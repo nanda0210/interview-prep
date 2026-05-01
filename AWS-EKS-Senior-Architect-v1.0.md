@@ -1,29 +1,49 @@
-# AWS / EKS Senior Architect — Interview Prep · v1.0
+<div align="center">
 
-> Single-file study document for a senior-software-developer / architect role
-> spanning AWS networking, EKS, Karpenter, ArgoCD, External Secrets, Helm,
-> CI/CD, and application onboarding. Treat this as your **night-before**
-> manual: skim the architecture, drill the steps, then run the questions.
+# 🎯 AWS / EKS Senior Architect
 
-**Last updated:** Apr 30, 2026 · **Version:** 1.0
+### Interview Prep · **v1.0**
 
----
+`AWS` `EKS` `Karpenter` `ArgoCD` `Helm` `External Secrets` `IAM` `Networking` `GitOps`
 
-## Table of contents
+*Single-file study manual for senior-software-developer & solution-architect rounds.*
+*Skim the architecture · drill the steps · run the questions.*
 
-1. [Architecture overview](#1-architecture-overview)
-2. [End-to-end setup, in order (Phases 1–10)](#2-end-to-end-setup-in-order)
-3. [Workflow diagram](#3-workflow-diagram-ascii)
-4. [Cheat-sheet: core services & when to pick what](#4-cheat-sheet-core-services--when-to-pick-what)
-5. [Technical interview questions (with answers)](#5-technical-interview-questions)
-6. [STAR behavioural questions (Situation · Task · Action · Result)](#6-star-behavioural-questions)
-7. [Top FAANG-style questions](#7-top-faang-style-questions)
-8. [Common pitfalls / "gotchas" to mention](#8-common-pitfalls--gotchas-to-mention)
-9. [Day-of-interview checklist](#9-day-of-interview-checklist)
+**Last updated:** Apr 30, 2026
 
 ---
 
-## 1. Architecture overview
+</div>
+
+> [!TIP]
+> **How to use this doc** — read top-to-bottom once for the map; on study days, jump via the TOC; the night before, re-read **§9 Day-of checklist** + **App F elevator pitch**.
+
+## 📑 Table of contents
+
+| § | Section | Purpose | ~Read time |
+|---|---|---|---|
+| 1 | [🏗️  Architecture overview](#1-️-architecture-overview) | Multi-account AWS layout & components | 5 min |
+| 2 | [🛠️  End-to-end setup (Phases 1–10)](#2-️-end-to-end-setup-in-order) | Sequenced build instructions | 15 min |
+| 3 | [📊  Workflow diagram](#3-workflow-diagram-ascii) | ASCII reference for whiteboarding | 2 min |
+| 4 | [⚡  Cheat-sheet: core services](#4-cheat-sheet-core-services--when-to-pick-what) | Quick disambiguation table | 3 min |
+| 5 | [❓  Technical Q&A](#5-technical-interview-questions) | 20 drillable questions w/ answers | 20 min |
+| 6 | [⭐  STAR behavioural stories](#6-star-behavioural-questions) | 8 ready-to-tell stories | 15 min |
+| 7 | [🏢  FAANG-style questions](#7-top-faang-style-questions) | 20 hardest interview prompts | 10 min |
+| 8 | [⚠️  Pitfalls & gotchas](#8-️-common-pitfalls--gotchas-to-mention) | Senior-level talking points | 5 min |
+| 9 | [📅  Day-of-interview checklist](#9--day-of-interview-checklist) | Morning-of routine | 2 min |
+| A | [🧰  Practical commands & manifests](#appendix-a--practical-commands--manifests-whiteboard-ready) | eksctl, Karpenter, ArgoCD, ESO, Helm, kubectl | reference |
+| B | [🔬  Deep-dive answers to FAANG questions](#appendix-b--deep-dive-answers-to-selected-faang-questions) | 4 long-form designs | 25 min |
+| C | [🛡️  Security baseline](#appendix-c--security-baseline-one-page) | One-page checklist | 3 min |
+| D | [🚨  DR / backup playbook](#appendix-d--disaster-recovery--backups-talking-points) | RTO/RPO talking points | 5 min |
+| E | [⭐  Bonus STAR stories](#appendix-e--two-more-star-stories-extra-ammo) | 2 backup stories | 5 min |
+| F | [🎤  90-second elevator pitch](#appendix-f--recap-30-second-elevator-pitch-for-whats-your-stack) | Memorise this | 2 min |
+
+---
+
+## 1. 🏗️ Architecture overview
+
+> [!NOTE]
+> **TL;DR** — Split AWS accounts by purpose (network, security, shared-services, app). One EKS cluster per app account, Karpenter for nodes, ArgoCD for delivery, Pod Identity for AWS auth, External Secrets for secrets.
 
 A typical mid-large enterprise EKS platform is split across **multiple AWS accounts** for blast-radius isolation. The minimum useful split is:
 
@@ -46,9 +66,13 @@ A typical mid-large enterprise EKS platform is split across **multiple AWS accou
 
 ---
 
-## 2. End-to-end setup, in order
+## 2. 🛠️ End-to-end setup, in order
 
-### Phase 1 — Network foundations (in the network account)
+> [!IMPORTANT]
+> **The 10-phase build order:** Network → IAM → EKS bootstrap → Karpenter → ArgoCD → External Secrets → EFS → Load Balancers → App onboarding → Day-2 ops.
+> **Order matters.** Each phase depends on the previous. Skipping ahead = retrofit pain.
+
+### 📡 Phase 1 — Network foundations (in the network account)
 
 1. **CIDR planning.** Reserve a parent supernet (e.g. `10.0.0.0/8`). Carve non-overlapping `/16`s per VPC. Plan for at least 3 AZs × 2 subnet tiers (public + private) per VPC. Leave room (`/20` per subnet is comfortable).
 2. **Create VPCs** in network and each application account. Tag for env / owner.
@@ -62,7 +86,7 @@ A typical mid-large enterprise EKS platform is split across **multiple AWS accou
 8. **Security Groups:** start with a baseline that **denies inbound by default** and allows only what's required between tiers. Reference SGs by ID, not CIDR, when both endpoints are in AWS.
 9. **Route53:** private hosted zones associated with each VPC for internal `*.internal` names.
 
-### Phase 2 — IAM & permissions
+### 🔐 Phase 2 — IAM & permissions
 
 1. **Identity Center (SSO)** for human access; one permission set per role (Admin, ReadOnly, Developer, Operator).
 2. **IAM roles for EKS cluster:**
@@ -77,7 +101,7 @@ A typical mid-large enterprise EKS platform is split across **multiple AWS accou
 5. **Permission boundaries** on developer-creatable roles — caps the worst case.
 6. **KMS keys:** customer-managed, with key policies referencing the EKS cluster's encryption key alias. Rotate annually.
 
-### Phase 3 — EKS cluster bootstrap
+### ☸️ Phase 3 — EKS cluster bootstrap
 
 1. **Create cluster** (Terraform / CDK / eksctl). Use private endpoint with public-via-allowlist if external `kubectl` is needed.
 2. **Add-ons** (managed): VPC CNI, kube-proxy, CoreDNS, EKS Pod Identity Agent, EBS CSI driver, EFS CSI driver, AWS Load Balancer Controller.
@@ -86,7 +110,7 @@ A typical mid-large enterprise EKS platform is split across **multiple AWS accou
 5. **Logging:** enable cluster control-plane logs → CloudWatch (api, audit, authenticator, controllerManager, scheduler).
 6. **kube-system network policies** to restrict pod-to-pod traffic by default once steady-state.
 
-### Phase 4 — Karpenter (autoscaling)
+### 🚀 Phase 4 — Karpenter (autoscaling)
 
 1. **Install** via Helm chart from `oci://public.ecr.aws/karpenter/karpenter`.
 2. **IAM:** Karpenter controller role (Pod Identity), and a **node IAM role** Karpenter assigns to each provisioned EC2.
@@ -121,7 +145,7 @@ A typical mid-large enterprise EKS platform is split across **multiple AWS accou
 6. **Mixed Spot + On-Demand:** prefer Spot for stateless workloads with PodDisruptionBudgets; use on-demand for system workloads (Karpenter itself, CoreDNS, ArgoCD).
 7. **Consolidation:** Karpenter actively re-packs workloads onto fewer / cheaper nodes — explain this is why it beats Cluster Autoscaler.
 
-### Phase 5 — ArgoCD (GitOps)
+### 🔄 Phase 5 — ArgoCD (GitOps)
 
 1. **Install** in `argocd` namespace (Helm chart).
 2. **Bootstrap repo structure:**
@@ -141,7 +165,7 @@ A typical mid-large enterprise EKS platform is split across **multiple AWS accou
 5. **SSO** via Identity Center / OIDC. RBAC by team (`role:team-payments` can sync only `payments-*` apps).
 6. **Notifications** (Slack) on sync / health changes.
 
-### Phase 6 — External Secrets Operator (secrets)
+### 🔑 Phase 6 — External Secrets Operator (secrets)
 
 1. **Install** ESO Helm chart.
 2. **Pod Identity** the ESO controller to a role that has `secretsmanager:GetSecretValue` and `ssm:GetParameter` on the relevant resources.
@@ -164,7 +188,7 @@ A typical mid-large enterprise EKS platform is split across **multiple AWS accou
 4. **ExternalSecret** in app namespace pulls one or more keys → projects as a Kubernetes `Secret`.
 5. **Rotation:** AWS Secrets Manager rotates upstream → ESO refresh interval (e.g. `1h`) projects new value → app reads from secret. Trigger pod rolling restart with **Reloader** controller or via `secretObjects` annotations.
 
-### Phase 7 — Storage (EFS)
+### 💾 Phase 7 — Storage (EFS)
 
 1. **Create EFS** file system (encrypted with CMK).
 2. **Mount targets** in each private subnet (one per AZ).
@@ -183,7 +207,7 @@ A typical mid-large enterprise EKS platform is split across **multiple AWS accou
    ```
 6. **PVC + PV** per workload that needs ReadWriteMany (e.g. shared assets, model cache).
 
-### Phase 8 — Load balancers
+### ⚖️ Phase 8 — Load balancers
 
 | Type | Use case | Layer | Key features |
 |---|---|---|---|
@@ -206,7 +230,7 @@ A typical mid-large enterprise EKS platform is split across **multiple AWS accou
      alb.ingress.kubernetes.io/healthcheck-path: /healthz
    ```
 
-### Phase 9 — Application onboarding (the developer-facing flow)
+### 📦 Phase 9 — Application onboarding (the developer-facing flow)
 
 1. **Repo template:** `app-template/` with Dockerfile, Helm chart skeleton, `.github/workflows/`, `argocd/` overlay.
 2. **CI pipeline** (GitHub Actions or GitLab):
@@ -224,7 +248,7 @@ A typical mid-large enterprise EKS platform is split across **multiple AWS accou
    - Image scanned (Trivy / ECR scan)
    - SBOM published
 
-### Phase 10 — Observability & Day 2
+### 📈 Phase 10 — Observability & Day 2
 
 | Concern | Tool | What it does |
 |---|---|---|
@@ -238,7 +262,7 @@ A typical mid-large enterprise EKS platform is split across **multiple AWS accou
 
 ---
 
-## 3. Workflow diagram (ASCII)
+## 3. 📊 Workflow diagram (ASCII)
 
 ```
                                          ┌────────────────────────────┐
@@ -305,7 +329,7 @@ A typical mid-large enterprise EKS platform is split across **multiple AWS accou
 
 ---
 
-## 4. Cheat-sheet: core services & when to pick what
+## 4. ⚡ Cheat-sheet: core services & when to pick what
 
 | Question | Answer |
 |---|---|
@@ -322,7 +346,7 @@ A typical mid-large enterprise EKS platform is split across **multiple AWS accou
 
 ---
 
-## 5. Technical interview questions
+## 5. ❓ Technical interview questions
 
 ### 5.1 Networking
 
@@ -396,9 +420,16 @@ Pipeline policy: CRITICAL → fail build, block merge. HIGH → warn + ticket au
 
 ---
 
-## 6. STAR behavioural questions
+## 6. ⭐ STAR behavioural questions
 
-> Use these as scaffolding for your real stories. Replace **\<\<placeholder\>\>** with concrete numbers / dates from your work.
+> [!TIP]
+> **How to use these stories:**
+> - **S** = context (where, when, scope, stakes)
+> - **T** = your specific responsibility
+> - **A** = actions **you** took (use "I", not "we")
+> - **R** = quantified outcomes (%, $, time)
+> - Replace **\<\<placeholder\>\>** with real numbers from your work
+> - Practice each aloud — aim for ~2 minutes
 
 ### STAR-1: Migrating from Cluster Autoscaler to Karpenter
 
@@ -458,7 +489,7 @@ Pipeline policy: CRITICAL → fail build, block merge. HIGH → warn + ticket au
 
 ---
 
-## 7. Top FAANG-style questions
+## 7. 🏢 Top FAANG-style questions
 
 ### Design / system questions
 
@@ -507,7 +538,7 @@ Pipeline policy: CRITICAL → fail build, block merge. HIGH → warn + ticket au
 
 ---
 
-## 8. Common pitfalls / "gotchas" to mention
+## 8. ⚠️ Common pitfalls / "gotchas" to mention
 
 These show seniority — drop them naturally:
 
@@ -524,26 +555,35 @@ These show seniority — drop them naturally:
 
 ---
 
-## 9. Day-of-interview checklist
+## 9. 📅 Day-of-interview checklist
+
+> [!IMPORTANT]
+> **The night before:** sleep beats cram. Read §9 once, set out your laptop/charger/water, then close the doc.
+
+### ⏰ Timeline
 
 | Before | What |
 |---|---|
-| 24 h before | Re-read the architecture diagram, draw it from memory once. |
-| 2 h before | Skim STAR section 6 — pick 3 stories you'd lead with. |
-| 1 h before | Open the cheat-sheet (§4). Practice one whiteboard answer aloud. |
-| 5 min before | Water, deep breath. You don't need to be perfect, just clear. |
+| **24 h before** | Re-read the architecture diagram (§3), draw it from memory once on paper. |
+| **2 h before** | Skim §6 STAR — pick 3 stories you'll lead with. |
+| **1 h before** | Open §4 cheat-sheet. Practice one whiteboard answer aloud. |
+| **5 min before** | Water · deep breath · open notes app for jotting. You don't need to be perfect, just clear. |
 
-| During | What |
-|---|---|
-| Every answer | **Frame** the problem before solving. Two-sentence restatement: "What I think you're asking is X. The trade-off is between Y and Z. I'd start with…". |
-| When stuck | Talk out loud. "I'm not sure between A and B — let me think about which dimension matters most for your use case." Senior interviewers reward visible reasoning. |
-| When you don't know | Say it once, briefly, then say what you'd do to find out. "I haven't run that at scale. Here's how I'd start a small POC to learn." |
-| When you do know | Lead with the answer. Detail second. "Karpenter — because of consolidation. Specifically, it…" |
+### 🎙️ During the interview
 
-| After | What |
+| Situation | Move |
 |---|---|
-| End of each round | Three questions for them: about scope, ownership, on-call rotation, the team's biggest current pain. |
-| End of the day | Send a short thank-you note within 24 h. |
+| **Every answer** | **Frame** before solving: *"What I think you're asking is X. The trade-off is between Y and Z. I'd start with…"* |
+| **Stuck** | Think aloud. *"I'm not sure between A and B — let me reason about which dimension matters most for your use case."* Senior interviewers reward visible reasoning. |
+| **Don't know** | Say so once, briefly, then say what you'd do. *"I haven't run that at scale. Here's how I'd start a small POC."* Faking it loses you the round. |
+| **Do know** | Lead with the answer. Detail second. *"Karpenter — because of consolidation. Specifically, it…"* |
+
+### 📞 After
+
+| When | What |
+|---|---|
+| **End of each round** | Have **3 questions** ready: scope of role, on-call rotation, team's biggest current pain, what success at 6 months looks like. |
+| **End of the day** | Send a short thank-you note within 24 h. Reference one specific thing from the conversation. |
 
 ---
 
@@ -553,7 +593,7 @@ These show seniority — drop them naturally:
 
 ---
 
-## Appendix A — Practical commands & manifests (whiteboard-ready)
+## 🧰 Appendix A — Practical commands & manifests (whiteboard-ready)
 
 ### A.1 EKS / cluster
 
@@ -846,7 +886,7 @@ kubectl apply -f deploy.yaml --dry-run=server -o yaml
 
 ---
 
-## Appendix B — Deep-dive answers to selected FAANG questions
+## 🔬 Appendix B — Deep-dive answers to selected FAANG questions
 
 These are the design questions that take 30-45 minutes in an interview. Practice walking through each one out loud at a whiteboard.
 
@@ -943,7 +983,7 @@ These are the design questions that take 30-45 minutes in an interview. Practice
 
 ---
 
-## Appendix C — Security baseline (one-page)
+## 🛡️ Appendix C — Security baseline (one-page)
 
 Drill these — security rounds love specifics.
 
@@ -964,7 +1004,7 @@ Drill these — security rounds love specifics.
 
 ---
 
-## Appendix D — Disaster recovery & backups (talking-points)
+## 🚨 Appendix D — Disaster recovery & backups (talking-points)
 
 Senior interviewers always ask: **what happens when the region goes down?**
 
@@ -1021,7 +1061,7 @@ Total RTO ~90 min from "region is gone" to "users see service" — only achievab
 
 ---
 
-## Appendix E — Two more STAR stories (extra ammo)
+## ⭐ Appendix E — Two more STAR stories (extra ammo)
 
 ### STAR-9: Reducing cluster-upgrade risk
 
@@ -1039,7 +1079,7 @@ Total RTO ~90 min from "region is gone" to "users see service" — only achievab
 
 ---
 
-## Appendix F — Recap: 30-second elevator pitch for "what's your stack?"
+## 🎤 Appendix F — Recap: 30-second elevator pitch for "what's your stack?"
 
 Memorise this. Variant of it works in 95% of interviews.
 
