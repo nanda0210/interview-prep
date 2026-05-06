@@ -382,8 +382,10 @@ def section_question_banks() -> str:
     return (
         "## 6. FAANG topic question bank\n\n"
         + read_text(REF_DIR / "faang-question-bank.md") + "\n\n"
-        + "## 7. Python interview bank\n\n"
+        + "## 7. Python interview bank (primer)\n\n"
         + read_text(REF_DIR / "python-interview-bank.md") + "\n\n"
+        + "## 7b. Python interview bank — extended (298 Qs)\n\n"
+        + read_text(REF_DIR / "python-interview-bank-extended.md") + "\n\n"
         + "## 8. Round-based interview plan\n\n"
         + read_text(REF_DIR / "round-based-interview-plan.md") + "\n\n"
         + "## 9. STAR framework reference\n\n"

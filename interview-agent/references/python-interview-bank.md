@@ -3,6 +3,8 @@
 > Format: **Q** → **What they want to see** → **Answer** (with code) → **Gotchas**.
 > Difficulty escalates by section: warm-up → idioms → concurrency → AWS/boto3 → systems.
 
+> **See also:** [`python-interview-bank-extended.md`](python-interview-bank-extended.md) — 298 deeper questions across 18 sections (Track A SRE/AWS/k8s/asyncio/systems, Track B Python craft, Track C 50-Q algorithm appendix). This file is the primer; the extended bank is the full FAANG-prep set.
+
 ---
 
 ## Section A — Warm-ups (phone screen)
