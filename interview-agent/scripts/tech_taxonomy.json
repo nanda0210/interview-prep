@@ -1,0 +1,31 @@
+{
+  "description": "Controlled vocabulary for PR.tech_tags. The generator groups tickets by these tags in the output doc.",
+  "tags": [
+    "terraform", "terragrunt", "aws-account", "vpc", "cidr", "subnet", "internet-gateway", "nat-gateway",
+    "transit-gateway", "vpn", "shared-services-account", "application-account",
+    "security-group", "ingress-rule", "egress-rule", "nacl", "route-table",
+    "load-balancer", "alb", "nlb", "target-group", "listener-rule",
+    "eks", "eks-version-upgrade", "managed-node-group", "fargate-profile", "karpenter",
+    "ec2", "ami", "launch-template",
+    "iam", "iam-role", "irsa", "pod-identity", "trust-policy", "iam-policy", "boundary-policy",
+    "argocd", "app-of-apps", "applicationset", "sync-wave",
+    "github", "github-actions", "cloudbees", "ci-cd", "pr-template",
+    "deployment", "rollout", "blue-green", "canary",
+    "tls", "acm", "cert-manager", "dns", "route53", "external-dns",
+    "repository", "monorepo", "polyrepo",
+    "cluster-lifecycle", "cluster-create", "cluster-decommission",
+    "helm", "helmfile", "kustomize", "release-channel",
+    "external-secrets", "secrets-manager", "ssm-parameter-store", "sealed-secrets", "vault",
+    "coredns", "kube-proxy", "vpc-cni", "aws-auth-configmap",
+    "configmap-amazon-vpc-cni", "configmap-aws-auth", "configmap-coredns",
+    "configmap-extension-apiserver-authentication",
+    "configmap-kube-apiserver-legacy-sa-token-tracking",
+    "configmap-kube-proxy", "configmap-kube-proxy-config",
+    "efs", "ebs", "csi-driver", "storage-class",
+    "service-account", "rbac", "role-binding", "cluster-role",
+    "monitoring", "prometheus", "grafana", "alertmanager",
+    "logging", "fluentbit", "splunk", "cloudwatch-logs",
+    "tracing", "otel", "signalfx",
+    "incident", "post-mortem", "rca"
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Interview Agent Tickets Input",
+  "description": "Schema for the tickets.json file consumed by generate_interview_doc.py. Designed to be a near-1:1 mapping of Jira REST /rest/api/3/search response with PR enrichment added.",
+  "type": "object",
+  "required": ["epic_key", "issues"],
+  "properties": {
+    "epic_key": {"type": "string", "examples": ["FSRE-20"]},
+    "epic_summary": {"type": "string"},
+    "epic_url": {"type": "string", "format": "uri"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "summary"],
+        "properties": {
+          "key": {"type": "string", "examples": ["FSRE-2702"]},
+          "url": {"type": "string", "format": "uri"},
+          "summary": {"type": "string"},
+          "issuetype": {"type": "string", "examples": ["Story", "Task", "Bug", "Spike"]},
+          "status": {"type": "string", "examples": ["Done", "In Progress", "To Do"]},
+          "priority": {"type": "string"},
+          "labels": {"type": "array", "items": {"type": "string"}},
+          "components": {"type": "array", "items": {"type": "string"}},
+          "fix_versions": {"type": "array", "items": {"type": "string"}},
+          "assignee": {"type": "string"},
+          "reporter": {"type": "string"},
+          "story_points": {"type": ["number", "null"]},
+          "created": {"type": "string", "format": "date-time"},
+          "resolved": {"type": ["string", "null"], "format": "date-time"},
+          "description": {"type": "string", "description": "Plain-text description (ADF flattened)."},
+          "acceptance_criteria": {"type": "string"},
+          "comments": {"type": "array", "items": {"type": "object", "properties": {"author": {"type": "string"}, "body": {"type": "string"}, "created": {"type": "string"}}}},
+          "linked_issues": {"type": "array", "items": {"type": "object", "properties": {"key": {"type": "string"}, "type": {"type": "string"}}}},
+          "prs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["repo", "number"],
+              "properties": {
+                "repo": {"type": "string", "examples": ["org/cxp-platform-terragrunt"]},
+                "number": {"type": "integer"},
+                "title": {"type": "string"},
+                "url": {"type": "string", "format": "uri"},
+                "state": {"type": "string", "enum": ["open", "merged", "closed"]},
+                "merged_at": {"type": ["string", "null"], "format": "date-time"},
+                "additions": {"type": "integer"},
+                "deletions": {"type": "integer"},
+                "files_changed": {"type": "array", "items": {"type": "string"}},
+                "summary": {"type": "string", "description": "1-3 sentence human summary of what the PR changed."},
+                "tech_tags": {
+                  "type": "array",
+                  "description": "Free-form tags drawn from the controlled vocabulary in scripts/tech_taxonomy.json",
+                  "items": {"type": "string"}
+                }
+              }
+            }
+          },
+          "failure_mode": {
+            "type": "object",
+            "description": "Optional. Use when the ticket is a bug/incident. Drives STAR generation.",
+            "properties": {
+              "trigger": {"type": "string"},
+              "blast_radius": {"type": "string", "enum": ["pod", "service", "namespace", "cluster", "account", "region", "multi-region"]},
+              "detection": {"type": "string"},
+              "recovery": {"type": "string"},
+              "prevention": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

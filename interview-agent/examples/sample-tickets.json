@@ -1,0 +1,83 @@
+{
+  "epic_key": "FSRE-20",
+  "epic_summary": "<MISSING DATA: paste epic summary here>",
+  "epic_url": "https://cisco-cxe.atlassian.net/browse/FSRE-20",
+  "generated_at": "2026-05-05T00:00:00Z",
+  "issues": [
+    {
+      "key": "FSRE-21",
+      "url": "https://cisco-cxe.atlassian.net/browse/FSRE-21",
+      "summary": "<MISSING DATA: paste ticket summary>",
+      "issuetype": "Story",
+      "status": "Done",
+      "priority": "Medium",
+      "labels": ["eks", "platform"],
+      "components": ["cxp-platform"],
+      "fix_versions": [],
+      "assignee": "<MISSING>",
+      "story_points": 5,
+      "created": "2024-01-15T10:00:00Z",
+      "resolved": "2024-02-01T10:00:00Z",
+      "description": "<MISSING DATA: paste full description>",
+      "comments": [],
+      "linked_issues": [{"key": "FSRE-20", "type": "Epic"}],
+      "prs": [
+        {
+          "repo": "org/cxp-platform-terragrunt",
+          "number": 1234,
+          "title": "feat: bootstrap cx-usw2-dev01-apps-eks-01 VPC + subnets",
+          "url": "https://github.com/org/cxp-platform-terragrunt/pull/1234",
+          "state": "merged",
+          "merged_at": "2024-01-30T12:00:00Z",
+          "additions": 412,
+          "deletions": 7,
+          "files_changed": [
+            "accounts/cxp-apps-platform-dev/us-west-2/vpc/terragrunt.hcl",
+            "accounts/cxp-apps-platform-dev/us-west-2/subnets/terragrunt.hcl"
+          ],
+          "summary": "<MISSING DATA: 1-3 sentence PR summary>",
+          "tech_tags": ["terraform", "terragrunt", "vpc", "cidr", "subnet", "nat-gateway", "internet-gateway"]
+        }
+      ],
+      "failure_mode": null
+    },
+    {
+      "key": "FSRE-2702",
+      "url": "https://cisco-cxe.atlassian.net/browse/FSRE-2702",
+      "summary": "<MISSING DATA: example bug ticket — replace>",
+      "issuetype": "Bug",
+      "status": "Done",
+      "priority": "High",
+      "labels": ["incident", "irsa"],
+      "components": ["cxp-platform"],
+      "story_points": 3,
+      "created": "2024-08-10T03:00:00Z",
+      "resolved": "2024-08-10T07:30:00Z",
+      "description": "<MISSING DATA>",
+      "comments": [],
+      "linked_issues": [{"key": "FSRE-20", "type": "Epic"}],
+      "prs": [
+        {
+          "repo": "org/cxp-platform-terragrunt",
+          "number": 2345,
+          "title": "fix(iam): correct IRSA trust policy for external-secrets sa",
+          "url": "https://github.com/org/cxp-platform-terragrunt/pull/2345",
+          "state": "merged",
+          "merged_at": "2024-08-10T07:00:00Z",
+          "additions": 18,
+          "deletions": 6,
+          "files_changed": ["modules/eks-irsa/main.tf"],
+          "summary": "<MISSING DATA>",
+          "tech_tags": ["iam", "irsa", "trust-policy", "external-secrets", "incident"]
+        }
+      ],
+      "failure_mode": {
+        "trigger": "External-secrets pods stuck in CrashLoopBackOff after cluster bootstrap",
+        "blast_radius": "namespace",
+        "detection": "ArgoCD app health degraded; alert from kube-state-metrics",
+        "recovery": "Patched IRSA trust policy to include correct OIDC provider thumbprint and sub claim; rotated SA token",
+        "prevention": "Added a Terratest check that asserts trust policy condition matches `system:serviceaccount:<ns>:<sa>`"
+      }
+    }
+  ]
+}
