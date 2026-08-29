@@ -1120,3 +1120,70 @@ Fargate eliminates node management entirely—no patching, no capacity planning,
 ### Q: Describe your approach to GitOps-based continuous delivery on EKS. What tooling choices would you make and what failure modes do you guard against?
 
 My preferred GitOps stack on EKS centers on Flux or Argo CD as the reconciliation controller, with a Git repository as the single source of truth for all Kubernetes manifests and Helm releases. I structure the repo with environment overlays (Kustomize) so promotion from staging to production is a reviewed pull request rather than an ad-hoc `kubectl apply`. The controller runs inside the cluster and pulls changes, which is architecturally preferable to push-based CI pipelines that need cluster credentials stored externally. For secrets I integrate External Secrets Operator backed by AWS Secrets Manager or Parameter Store, ensuring no secrets live in Git. Key failure modes I guard against: (1) **drift**—I enable the controller's drift detection so out-of-band manual changes are automatically reverted; (2) **reconciliation loops**—I set explicit sync intervals and health checks so a bad manifest doesn't hammer the API server; (3) **image tag mutability**—I use image digest pinning or Argo CD Image Updater with digest references to prevent "latest" tag ambiguity; (4) **split-brain during outage**—I document a break-glass procedure allowing direct `kubectl` access with audit logging enabled, while the GitOps controller resumes reconciliation once connectivity restores. Rollback is a `git revert` plus a forced sync, giving a clear, auditable history.
+
+
+---
+
+## 🗓️ Added 2026-08-29 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-08-29 16:32 -->
+
+### Q: How do you design a cost-optimised EKS compute strategy using Spot Instances, and how do you handle interruptions gracefully?
+
+A well-designed Spot strategy layers multiple instance families and sizes across several Availability Zones to maximise capacity pool diversity, configured via Karpenter NodePools or Cluster Autoscaler with mixed-instances policies. Key practices include:
+
+- **Diversification**: specify 10–15 instance types of similar vCPU/memory profiles so Spot reclamation in one pool triggers capacity from another.
+- **Interruption handling**: deploy the **AWS Node Termination Handler** (or rely on Karpenter's native interruption queue) to cordon and drain nodes within the 2-minute warning window.
+- **Workload suitability**: run stateless, fault-tolerant workloads (batch jobs, ML training, data processing) on Spot; keep stateful or latency-sensitive services on On-Demand or Savings Plans.
+- **Pod Disruption Budgets (PDBs)**: enforce minimum available replicas so a sudden Spot reclamation event doesn't drop below SLA thresholds.
+- **Fallback**: configure a small On-Demand base capacity (e.g., 20%) and let Spot cover burst, ensuring the cluster degrades gracefully rather than failing entirely.
+
+Typical outcome is 60–80 % compute cost reduction with near-zero unplanned downtime when all layers are in place.
+
+---
+
+### Q: Walk me through how you secure the EKS API server and the data plane network, from IAM through to pod-level controls.
+
+Defence-in-depth across four layers:
+
+1. **API server access**: set the endpoint to *private-only* or private+public with CIDR allowlisting; authenticate via **aws-auth ConfigMap** (migrating to EKS Access Entries in newer clusters) and enforce least-privilege IAM roles per team.
+2. **RBAC**: map IAM roles to Kubernetes RBAC roles, never to `cluster-admin`; use namespaced Roles + RoleBindings; audit with `kubectl auth can-i --list` or tools like `rbac-lookup`.
+3. **Network segmentation**: deploy nodes in private subnets, restrict control-plane-to-node SG rules; apply Kubernetes **NetworkPolicies** (Calico or Cilium) defaulting to deny-all and explicitly allowing required pod-to-pod flows.
+4. **Pod-level controls**: enforce **Pod Security Admission** (restricted profile) cluster-wide; use **IAM Roles for Service Accounts (IRSA)** or **EKS Pod Identity** so pods assume scoped IAM roles without shared node credentials; enable **Secrets encryption** with a CMK in KMS; scan images in ECR with Inspector and block non-compliant images via OPA/Gatekeeper admission webhooks.
+
+Continuous posture management via **AWS Security Hub** + **GuardDuty EKS Runtime Monitoring** closes the detection loop.
+
+---
+
+### Q: How do you architect observability for a large EKS fleet — metrics, logs, and traces — without creating runaway cost or operational toil?
+
+The goal is correlated, actionable telemetry with predictable spend:
+
+- **Metrics**: run **ADOT (AWS Distro for OpenTelemetry)** or the managed Prometheus add-on; scrape at 60 s intervals, drop high-cardinality labels at the collector tier, and remote-write to **Amazon Managed Prometheus**. Use recording rules to pre-aggregate. Visualise in **Managed Grafana**.
+- **Logs**: use Fluent Bit DaemonSet to ship container logs to **CloudWatch Logs** (structured JSON only); set log group retention policies and use Contributor Insights for anomaly detection. Avoid shipping DEBUG logs from every pod to production.
+- **Traces**: instrument services with **OpenTelemetry SDK** and send spans to **AWS X-Ray** or an OTLP-compatible backend; enable **tail-based sampling** to keep 100 % of error/slow traces and 1–5 % of healthy ones, cutting volume by 95 %.
+- **Cost guard rails**: use metric-stream filtering, CloudWatch Metric Math instead of custom metrics where possible, and S3 archival for logs older than 30 days.
+- **Correlation**: emit `trace_id` in structured logs so Grafana or CloudWatch can pivot from a metric spike → log line → trace without manual searching.
+
+This stack typically costs $0.10–0.30 per node-hour all-in and gives <5-minute MTTR for most incidents.
+
+---
+
+### Q: Tell me about a time an EKS upgrade caused a production incident. What happened, what was your remediation, and what did you change permanently?
+
+*(Behavioral — model answer framework)*
+
+**Situation**: During an in-place upgrade from EKS 1.24 → 1.25, the removal of the `PodSecurityPolicy` API caused several third-party Helm charts (cert-manager, ingress-nginx) to lose their PSP resources silently; pods began failing admission after node rollout.
+
+**Task**: Restore service within the RTO of 30 minutes while avoiding a full rollback.
+
+**Action**:
+- Immediately identified the root cause via `kubectl get events` and API server audit logs showing `Forbidden` responses from the new Pod Security Admission controller.
+- Applied namespace-level `pod-security.kubernetes.io/enforce: privileged` labels as a temporary exemption to unblock pods, restoring traffic in ~12 minutes.
+- Ran an emergency Helm upgrade for cert-manager and ingress-nginx to PSA-compatible versions.
+- Conducted a post-incident review the same day.
+
+**Result & permanent changes**:
+1. Added a **pre-upgrade runbook** step requiring a staging cluster upgrade 2 weeks before production, with automated API deprecation scanning via `Pluto` in CI.
+2. Instituted **blue/green cluster upgrades** (new cluster, traffic shift via weighted Route 53 or ALB target groups) instead of in-place upgrades for major version jumps.
+3. Set up alerting on API server audit logs for `NotImplemented` and `Forbidden` spikes immediately after any upgrade window.
