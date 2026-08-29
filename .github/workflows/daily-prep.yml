@@ -1,0 +1,45 @@
+name: Daily interview-prep agent
+
+on:
+  schedule:
+    # 15:00 UTC = 8:00 AM PDT (7:00 AM PST — GitHub cron does not observe DST).
+    - cron: "0 15 * * *"
+  workflow_dispatch: {}   # allow manual runs from the Actions tab / gh CLI
+
+# Let the job commit and push generated Q&A back to the repo.
+permissions:
+  contents: write
+
+# Never run two instances at once (they would both push).
+concurrency:
+  group: daily-prep
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history so the orchestrator's rebase-pull works
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install --quiet anthropic
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run orchestrator (generate + append + commit + push)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PREP_MODEL: claude-sonnet-4-6
+          PREP_ITEMS: "4"
+        run: python3 _agent/orchestrator.py
