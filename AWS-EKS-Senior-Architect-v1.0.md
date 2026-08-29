@@ -1091,3 +1091,32 @@ That's the whole stack in 90 seconds. The interviewer will pick a thread to dril
 
 *Real end of v1.0. Good luck.*
 
+
+
+---
+
+## 🗓️ Added 2026-08-15 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-08-15 12:44 -->
+
+### Q: How do you design multi-tenant isolation in EKS when multiple teams or customers share the same cluster?
+
+Multi-tenancy in EKS requires layered isolation controls rather than a single mechanism. At the Kubernetes level, I enforce namespace-per-tenant with RBAC roles scoped strictly to those namespaces, preventing cross-namespace API access. Network policies (via Calico or the VPC CNI's native policy support) enforce traffic segmentation so pods in one tenant namespace cannot reach another. For stronger isolation, I map each tenant namespace to a dedicated IAM role using IRSA, ensuring cloud-resource permissions never leak across tenants. On the compute side, I use node selectors, taints/tolerations, and—when the threat model demands it—separate node groups per tenant to achieve noisy-neighbor containment and blast-radius reduction. Resource quotas and LimitRanges prevent one tenant from starving others. For the hardest compliance requirements I evaluate separate clusters per tenant (cluster-per-tenant model) and weigh that against the operational overhead of running the fleet.
+
+---
+
+### Q: Walk me through how you would troubleshoot intermittent pod-to-pod connectivity failures in a VPC CNI-based EKS cluster.
+
+I approach this systematically, starting with data collection before making changes. First, I check `kubectl describe pod` and node events for any IP allocation failures—VPC CNI exhausts ENI secondary IPs if the instance type's IP limit is hit, so I verify ENI capacity against running pods per node and consider enabling prefix delegation to expand available IPs. I run `aws-node` DaemonSet logs (`kubectl logs -n kube-system -l k8s-app=aws-node`) to look for IPAMD errors or throttling from EC2 API. I use `kubectl exec` with `curl` or a debug container to reproduce the failure and capture the exact source/destination IPs, then check VPC Flow Logs to see if packets are being dropped at the security group or NACL layer—often a missing inbound rule for the pod CIDR. I verify that security groups attached to nodes allow traffic on the target port from the source pod's CIDR. If the issue is asymmetric, I look at conntrack table exhaustion on the node (`/proc/sys/net/netfilter/nf_conntrack_count` vs max). Finally I check whether a recent CNI version upgrade introduced a regression and review the CNI plugin changelog accordingly.
+
+---
+
+### Q: Compare the trade-offs between using AWS Fargate for EKS versus managed EC2 node groups. When would you choose each?
+
+Fargate eliminates node management entirely—no patching, no capacity planning, no SSH access to nodes—which reduces operational toil and satisfies strict compliance postures since each pod runs on an isolated compute boundary with no shared kernel. The trade-offs are real, however: Fargate doesn't support DaemonSets, stateful workloads requiring local NVMe, or privileged containers, and cold-start latency is higher because each pod provisions a micro-VM. Cost is also less predictable at scale because you pay per vCPU/memory second with no Reserved Instance discounting equivalent (Savings Plans apply but less efficiently). Managed node groups with EC2 give you full control over instance family, GPU access, storage, and DaemonSet-based tooling (log agents, security sensors), and allow Spot instances for significant cost reduction on fault-tolerant workloads. My decision framework: Fargate for bursty, stateless, compliance-sensitive workloads where teams shouldn't own infrastructure; managed node groups for performance-sensitive, GPU, stateful, or cost-optimized at-scale workloads. In practice most production clusters use both—Fargate profiles for specific namespaces and EC2 node groups for baseline capacity.
+
+---
+
+### Q: Describe your approach to GitOps-based continuous delivery on EKS. What tooling choices would you make and what failure modes do you guard against?
+
+My preferred GitOps stack on EKS centers on Flux or Argo CD as the reconciliation controller, with a Git repository as the single source of truth for all Kubernetes manifests and Helm releases. I structure the repo with environment overlays (Kustomize) so promotion from staging to production is a reviewed pull request rather than an ad-hoc `kubectl apply`. The controller runs inside the cluster and pulls changes, which is architecturally preferable to push-based CI pipelines that need cluster credentials stored externally. For secrets I integrate External Secrets Operator backed by AWS Secrets Manager or Parameter Store, ensuring no secrets live in Git. Key failure modes I guard against: (1) **drift**—I enable the controller's drift detection so out-of-band manual changes are automatically reverted; (2) **reconciliation loops**—I set explicit sync intervals and health checks so a bad manifest doesn't hammer the API server; (3) **image tag mutability**—I use image digest pinning or Argo CD Image Updater with digest references to prevent "latest" tag ambiguity; (4) **split-brain during outage**—I document a break-glass procedure allowing direct `kubectl` access with audit logging enabled, while the GitOps controller resumes reconciliation once connectivity restores. Rollback is a `git revert` plus a forced sync, giving a clear, auditable history.

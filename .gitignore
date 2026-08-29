@@ -1,0 +1,6 @@
+_agent/.env
+_agent/logs/
+_agent/state.json
+_agent/__pycache__/
+*.pyc
+.DS_Store
