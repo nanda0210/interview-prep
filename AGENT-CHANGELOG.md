@@ -25,3 +25,15 @@ _Committed & pushed: no_
 - Tell me about a time an EKS upgrade caused a production incident. What happened, what was your remediation, and what did you change permanently?
 
 _Committed & pushed: yes_
+
+## Run · 2026-08-30 18:24:18
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7257 chars)
+- How do you design a secure, scalable EKS networking architecture — including CNI choice, network policies, and ingress — for a highly regulated environment?
+- Walk me through how you would implement robust secrets management for workloads running in EKS, and what the failure modes of each approach are.
+- Describe how you would architect EKS cluster autoscaling in 2024 — Cluster Autoscaler versus Karpenter — and when each is appropriate.
+- A team reports that their pods are experiencing intermittent "OOMKilled" events, but the application developers insist memory usage looks fine in their profiling tools. How do you systematically diagnose and resolve this?
+
+_Committed & pushed: yes_

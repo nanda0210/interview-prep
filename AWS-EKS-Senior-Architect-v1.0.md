@@ -1187,3 +1187,62 @@ This stack typically costs $0.10–0.30 per node-hour all-in and gives <5-minute
 1. Added a **pre-upgrade runbook** step requiring a staging cluster upgrade 2 weeks before production, with automated API deprecation scanning via `Pluto` in CI.
 2. Instituted **blue/green cluster upgrades** (new cluster, traffic shift via weighted Route 53 or ALB target groups) instead of in-place upgrades for major version jumps.
 3. Set up alerting on API server audit logs for `NotImplemented` and `Forbidden` spikes immediately after any upgrade window.
+
+
+---
+
+## 🗓️ Added 2026-08-30 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-08-30 18:24 -->
+
+### Q: How do you design a secure, scalable EKS networking architecture — including CNI choice, network policies, and ingress — for a highly regulated environment?
+
+**What the interviewer wants to hear:** deep VPC/CNI knowledge, security posture, and awareness of compliance constraints.
+
+- **CNI choice:** Use the AWS VPC CNI for native VPC IP assignment, which simplifies security group enforcement and satisfies auditors who want "no overlay network" visibility. For very large clusters, enable prefix delegation (`ENABLE_PREFIX_DELEGATION`) to avoid IPv4 exhaustion.
+- **Security Groups for Pods:** Assign pod-level SGs to workloads that call RDS/ElastiCache so firewall rules are auditable in the same pane as EC2, rather than relying solely on NetworkPolicy.
+- **Network Policies:** Layer Calico or Cilium *on top* of VPC CNI for L3/L4 NetworkPolicy enforcement; Cilium additionally provides L7 visibility and can replace a service mesh sidecar for mTLS.
+- **Ingress:** AWS Load Balancer Controller with ALB in `ip` mode (pod-direct routing, no NodePort hop); use WAFv2 on the ALB for OWASP protection required by PCI/HIPAA.
+- **Egress control:** Route egress through a NAT Gateway with a fixed IP allowlist and/or deploy AWS Network Firewall in a centralised inspection VPC via Transit Gateway for FQDN-based egress filtering.
+- **Subnet segmentation:** Nodes in private subnets, control-plane endpoint private-only, bastion/SSM for access — no public IPs on nodes.
+- **Compliance audit trail:** Enable VPC Flow Logs to S3 + Athena; pair with Amazon GuardDuty EKS Protection for runtime threat detection.
+
+---
+
+### Q: Walk me through how you would implement robust secrets management for workloads running in EKS, and what the failure modes of each approach are.
+
+**What the interviewer wants to hear:** practical AWS Secrets Manager / Parameter Store integration, IRSA, and awareness of secret sprawl risks.
+
+- **Preferred pattern:** IRSA (IAM Roles for Service Accounts) + Secrets Store CSI Driver with the AWS provider mounts secrets as volumes; no secrets ever touch etcd or environment variables visible in `kubectl describe pod`.
+- **Alternative — External Secrets Operator (ESO):** Syncs Secrets Manager/SSM into native Kubernetes Secrets on a configurable refresh interval; broader community adoption but the secret *does* land in etcd, so etcd encryption at rest (KMS envelope encryption via `--encryption-provider-config`) is mandatory.
+- **Failure mode — IRSA misconfiguration:** If the OIDC provider or trust policy is wrong, pods silently fall back to no credentials; instrument with CloudTrail and deny explicit `ec2:*` instance-metadata access (`IMDSv2` required, hop limit 1) so pods cannot escalate via node role.
+- **Failure mode — CSI Driver unavailability:** If the CSI daemonset pod is evicted or crashlooping, pod startup blocks; mitigate with `secretProviderClass` sync-to-Kubernetes-Secret so a cached copy exists for restarts.
+- **Secret rotation:** Secrets Manager auto-rotation must be coupled with either pod restart (via Reloader/stakater) or CSI's `rotationPollInterval` to ensure in-memory secrets stay fresh.
+- **Audit:** Enable Secrets Manager resource policies + CloudTrail data events and periodically run `kubectl get secrets -A` to detect secrets created outside the approved pipeline.
+
+---
+
+### Q: Describe how you would architect EKS cluster autoscaling in 2024 — Cluster Autoscaler versus Karpenter — and when each is appropriate.
+
+**What the interviewer wants to hear:** architectural judgement on Karpenter's advantages, operational trade-offs, and real scaling scenarios.
+
+- **Cluster Autoscaler (CA):** Works against predefined Auto Scaling Groups; scaling decisions are ASG-bound, so you must pre-create node groups per instance family/size. Mature, well-understood, but can be slow (1–2 min per scale-out cycle) and requires careful ASG tagging and `--balance-similar-node-groups`.
+- **Karpenter:** Provisions EC2 instances directly via EC2 Fleet/Launch Templates without ASGs; NodePool + EC2NodeClass CRDs describe constraints (instance families, AZs, capacity types). Scale-out latency is typically 30–45 seconds — a meaningful improvement for bursty workloads.
+- **Karpenter's killer features:** Bin-packing consolidation (`disruption: consolidateAfter`) replaces over-provisioned nodes proactively; spot-to-on-demand fallback within a single NodePool; automatic Spot interruption handling via EC2 Instance Rebalance notifications.
+- **When to keep CA:** If you have strict compliance requirements around ASG lifecycle hooks (e.g., custom drain scripts triggered by ASG hooks), or if your organisation's security review hasn't approved Karpenter's direct EC2 API permissions yet.
+- **Avoid running both simultaneously** on the same node group — they will fight over scale-down decisions. Separate by node taints/labels if a migration phase requires coexistence.
+- **Operational concern:** Karpenter requires careful NodePool `limits` to prevent runaway provisioning; always set CPU/memory ceilings and use AWS Service Quotas alerts as a backstop.
+
+---
+
+### Q: A team reports that their pods are experiencing intermittent "OOMKilled" events, but the application developers insist memory usage looks fine in their profiling tools. How do you systematically diagnose and resolve this?
+
+**What the interviewer wants to hear:** methodical troubleshooting, understanding of cgroup memory accounting, JVM/Go/Node.js edge cases, and limits/requests design.
+
+- **First, verify cgroup accounting vs. application view:** The OOM killer fires based on the container's cgroup RSS + page cache; languages with their own allocators (JVM, Go) or apps that memory-map large files may look "fine" inside the process but consume significant page cache the app doesn't account for.
+- **Gather evidence:** `kubectl describe pod <pod> --previous` for `OOMKilled` exit code; `kubectl top pod` vs. limit; Prometheus `container_memory_working_set_bytes` (excludes reclaimable cache — closest to what Kubernetes uses for eviction) vs. `container_memory_rss`.
+- **JVM-specific:** If the app is Java, check that `-Xmx` + metaspace + direct buffers + JVM overhead stay within the container limit; use `-XX:MaxRAMPercentage` rather than hardcoded `-Xmx` and add `-XX:+UseContainerSupport` (default in JDK 11+).
+- **Go/Rust:** Check for goroutine leaks causing heap growth; `runtime.ReadMemStats` or pprof heap endpoint for evidence.
+- **Sidecar containers:** Count memory against the Pod's total cgroup; a logging or Envoy sidecar may be the actual culprit — inspect per-container `container_memory_working_set_bytes` with `container=` label filter.
+- **Resolution options:** (a) Increase memory limit with a buffer (20–30% headroom over p99 observed), (b) set correct JVM flags, (c) tune `GOMEMLIMIT` for Go 1.19+ apps, (d) if caused by page cache from file I/O, switch to `emptyDir` with `medium: Memory` or restructure I/O pattern.
+- **Prevention:** Add Vertical Pod Autoscaler in recommendation mode to surface right-sizing data; enforce `LimitRange` minimums and require resource requests/limits via OPA/Gatekeeper admission policy.
