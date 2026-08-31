@@ -1246,3 +1246,70 @@ This stack typically costs $0.10–0.30 per node-hour all-in and gives <5-minute
 - **Sidecar containers:** Count memory against the Pod's total cgroup; a logging or Envoy sidecar may be the actual culprit — inspect per-container `container_memory_working_set_bytes` with `container=` label filter.
 - **Resolution options:** (a) Increase memory limit with a buffer (20–30% headroom over p99 observed), (b) set correct JVM flags, (c) tune `GOMEMLIMIT` for Go 1.19+ apps, (d) if caused by page cache from file I/O, switch to `emptyDir` with `medium: Memory` or restructure I/O pattern.
 - **Prevention:** Add Vertical Pod Autoscaler in recommendation mode to surface right-sizing data; enforce `LimitRange` minimums and require resource requests/limits via OPA/Gatekeeper admission policy.
+
+
+---
+
+## 🗓️ Added 2026-08-31 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-08-31 20:38 -->
+
+### Q: How do you design a highly available, cross-region EKS strategy for a workload that requires near-zero RTO and RPO?
+
+A true active-active multi-region EKS design requires careful attention at every layer:
+
+- **Control plane**: Provision independent EKS clusters in each region; the managed control plane is already multi-AZ within a region, so cross-region means separate clusters, not a stretched one.
+- **Traffic routing**: Use Route 53 latency or health-check-based routing (or AWS Global Accelerator) to distribute traffic; combine with weighted records for controlled failover.
+- **Data plane synchronisation**: For stateful workloads, use Aurora Global Database, DynamoDB Global Tables, or S3 Cross-Region Replication so the data layer is consistent before you fail over compute.
+- **GitOps federation**: A single GitOps control plane (e.g., Flux with multiple cluster contexts, or ArgoCD in a hub-spoke topology) ensures identical workload manifests are reconciled in all regions simultaneously.
+- **Service mesh bridging**: Tools like Istio's east-west gateway or AWS Cloud Map allow services in one cluster to discover and call services in the other during partial failures.
+- **Testing**: Game-day exercises with AWS FIS (Fault Injection Simulator) simulating full-region unavailability are mandatory to validate RTO claims.
+
+The honest trade-off is cost — running full capacity in two regions can double the compute bill — so many teams opt for active-passive with pre-warmed capacity using Cluster Autoscaler or Karpenter node pools on standby.
+
+---
+
+### Q: Walk me through how you would harden an EKS cluster to meet CIS Benchmark and SOC 2 requirements without crippling developer velocity.
+
+**Key hardening layers and the velocity-preserving approach for each:**
+
+- **API server access**: Enable private endpoint only; restrict public access to specific CIDR ranges or remove it entirely. Use AWS VPN or Direct Connect for operator access rather than bastion hosts.
+- **RBAC**: Enforce least-privilege with namespace-scoped roles; use `aws-auth` ConfigMap (or the newer Access Entries API in EKS) audited by a policy-as-code tool like `rbac-lookup` in CI.
+- **Pod Security**: Enforce the `restricted` Pod Security Standard at the namespace level via admission; give development namespaces `baseline` with a documented exception process.
+- **Image supply chain**: Require all images to be signed (Cosign + Notation) and scanned (ECR Enhanced Scanning with Inspector v2); block unsigned or critical-CVE images at admission with Kyverno or OPA Gatekeeper — this is automated, not manual, so it doesn't slow PR merges.
+- **Secrets management**: Prohibit plaintext Secrets in manifests; use the Secrets Store CSI Driver with AWS Secrets Manager or Parameter Store. Rotate secrets automatically.
+- **Audit logging**: Enable EKS control-plane audit logs to CloudWatch; ship to a SIEM with a 90-day hot retention policy for SOC 2 evidence. Use Falco for runtime anomaly detection.
+- **Velocity preservation**: Shift-left — embed `kube-score`, `checkov`, and `trivy` scans into the developer's IDE and PR pipeline so issues are caught before they reach the admission webhook and cause a deployment failure at 2 a.m.
+
+---
+
+### Q: Explain how EKS Pod Identity (the newer mechanism) differs from IRSA, and when you would migrate to it.
+
+**IRSA (IAM Roles for Service Accounts)** works by annotating a Kubernetes ServiceAccount with a role ARN; the EKS OIDC provider exchanges a projected service-account token for temporary AWS credentials via `sts:AssumeRoleWithWebIdentity`. This requires you to embed the OIDC issuer URL in every IAM role's trust policy, which becomes operationally expensive at scale (especially across accounts).
+
+**EKS Pod Identity** (GA since late 2023) introduces an agent (`eks-pod-identity-agent` DaemonSet) and a new EKS API resource — *Pod Identity Associations* — that maps a namespace/ServiceAccount pair to an IAM role directly in the EKS control plane, without touching the role's trust policy per cluster. The agent intercepts the credentials request on the node and vends credentials via a local endpoint.
+
+**Key differences:**
+
+| Dimension | IRSA | Pod Identity |
+|---|---|---|
+| Trust policy coupling | Per-cluster OIDC URL in trust policy | Single generic EKS principal |
+| Cross-account | Requires role chaining or per-account OIDC | Cleaner; role stays in target account |
+| Credential endpoint | `sts` regional endpoint | Local agent on node (faster, no STS call per pod) |
+| Session tags | Limited | Supports `eks:cluster-name`, `eks:namespace`, `eks:service-account` |
+
+**When to migrate**: Migrate when you manage more than a handful of clusters, when you need richer session-tag-based attribute-based access control, or when OIDC trust-policy sprawl is becoming an audit burden. IRSA remains valid for existing clusters with no immediate pain; there is no forced cutover.
+
+---
+
+### Q: A critical microservice on EKS is experiencing high tail latency (p99) during peak load but p50 is fine. How do you systematically diagnose and resolve it?
+
+High p99 with healthy p50 is a classic indicator of resource contention, noisy-neighbour effects, or GC pressure — not an average-throughput problem. My systematic approach:
+
+1. **Isolate the layer first**: Use distributed tracing (X-Ray or Tempo) to identify whether latency is inside the pod, in a downstream dependency, or in the network path. Many p99 problems are actually in a dependency, not the service under investigation.
+2. **Node-level contention**: Check CPU throttling with `container_cpu_cfs_throttled_seconds_total` in Prometheus. Throttling is the single most common cause of tail latency in Kubernetes — pods are getting CPU-limited by their `limits` even though `requests` headroom appears available. Fix: raise limits or switch to a Guaranteed QoS class by setting `requests == limits`.
+3. **Noisy neighbour**: Use `perf`, `ebpf`-based tools (Pixie, Parca), or node-level `iostat` to check if a co-located pod is saturating disk I/O or LLC cache. Remediation: use pod topology spread constraints or node affinity to isolate the service onto dedicated nodes.
+4. **GC pauses (JVM/Go)**: Correlate p99 spikes with GC pause metrics. For JVM: tune heap, switch to G1/ZGC. For Go: check `runtime.MemStats`.
+5. **Connection pool exhaustion**: If the service calls a database or downstream API, check whether connection pool exhaustion causes request queuing. Instrument with pool-wait-time metrics.
+6. **Kernel network stack**: For very high RPS services, check if `conntrack` table is full (dropped packets) or if `net.core.somaxconn` is too low. Tune via node sysctl or use a custom AMI.
+7. **Remediation and validation**: Apply fixes in a staging environment, run load tests with k6 or Gatling targeting the same concurrency profile, and confirm p99 improvement before promoting. Set p99 SLO alerts (not just p50) in the production SLO framework going forward.

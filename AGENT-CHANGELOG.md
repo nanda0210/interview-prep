@@ -37,3 +37,15 @@ _Committed & pushed: yes_
 - A team reports that their pods are experiencing intermittent "OOMKilled" events, but the application developers insist memory usage looks fine in their profiling tools. How do you systematically diagnose and resolve this?
 
 _Committed & pushed: yes_
+
+## Run · 2026-08-31 20:38:51
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7067 chars)
+- How do you design a highly available, cross-region EKS strategy for a workload that requires near-zero RTO and RPO?
+- Walk me through how you would harden an EKS cluster to meet CIS Benchmark and SOC 2 requirements without crippling developer velocity.
+- Explain how EKS Pod Identity (the newer mechanism) differs from IRSA, and when you would migrate to it.
+- A critical microservice on EKS is experiencing high tail latency (p99) during peak load but p50 is fine. How do you systematically diagnose and resolve it?
+
+_Committed & pushed: yes_
