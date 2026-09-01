@@ -1313,3 +1313,80 @@ High p99 with healthy p50 is a classic indicator of resource contention, noisy-n
 5. **Connection pool exhaustion**: If the service calls a database or downstream API, check whether connection pool exhaustion causes request queuing. Instrument with pool-wait-time metrics.
 6. **Kernel network stack**: For very high RPS services, check if `conntrack` table is full (dropped packets) or if `net.core.somaxconn` is too low. Tune via node sysctl or use a custom AMI.
 7. **Remediation and validation**: Apply fixes in a staging environment, run load tests with k6 or Gatling targeting the same concurrency profile, and confirm p99 improvement before promoting. Set p99 SLO alerts (not just p50) in the production SLO framework going forward.
+
+
+---
+
+## 🗓️ Added 2026-09-01 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-01 18:09 -->
+
+### Q: How do you approach EKS cluster autoscaling — and when would you choose Karpenter over Cluster Autoscaler?
+
+**Model Answer:**
+
+Cluster Autoscaler (CA) operates at the node-group level, scaling pre-defined ASGs based on pending pods. Karpenter is node-group-agnostic: it watches unschedulable pods directly, selects the optimal instance type from a NodePool definition, and provisions nodes via EC2 Fleet in seconds rather than the 2–4 minute CA cycle. Key trade-offs:
+
+- **Flexibility:** Karpenter can bin-pack across hundreds of instance families simultaneously; CA requires you to pre-create node groups for each type you want.
+- **Speed:** Karpenter's direct EC2 API path is typically 60–90 s faster to first node-ready than CA+ASG warm-up.
+- **Consolidation:** Karpenter's `consolidationPolicy: WhenUnderutilized` actively right-sizes and de-provisions nodes; CA relies on `--scale-down-utilization-threshold`, which is coarser.
+- **Maturity:** CA has a longer production track record; Karpenter (GA since late 2023) has fewer edge-case integrations with some cluster add-ons.
+
+**Choose Karpenter** for greenfield clusters, Spot-heavy workloads, or teams that want low-ops autoscaling with mixed instance diversity. **Stick with CA** when you have strict node group compliance/tagging requirements enforced externally (e.g., by a CCoE) or when the workload relies on GPU node groups with complex launch templates already managed by ASG.
+
+Always set `topologySpreadConstraints` and appropriate PodDisruptionBudgets regardless of which scaler you use, so node churn doesn't create availability gaps during scale-down.
+
+---
+
+### Q: Walk me through how you would harden EKS workloads to meet CIS Kubernetes Benchmark and SOC 2 requirements without blocking developer velocity.
+
+**Model Answer:**
+
+The key is shifting controls left and automating enforcement so developers get fast feedback rather than change-freeze gates.
+
+- **Admission control:** Deploy OPA/Gatekeeper or Kyverno with a tiered policy set — `warn` mode first in dev/staging, `deny` in prod. Policies cover: no `hostPID`/`hostNetwork`, required resource limits, no `latest` tags, mandatory pod labels.
+- **Pod Security Standards:** Set `pod-security.kubernetes.io/enforce: restricted` on production namespaces; use `baseline` on developer sandboxes.
+- **Supply chain:** Enforce image signing with AWS Signer + Cosign verified at admission; use ECR image scanning (Inspector) with a severity gate in CI.
+- **Secrets:** Never mount AWS credentials as env vars; use IRSA (or EKS Pod Identity, now GA) scoped to least-privilege IAM roles per service account. Store secrets in Secrets Manager/Parameter Store, not K8s Secrets etcd.
+- **Audit & drift:** Enable EKS control plane audit logs → CloudWatch → Security Lake; run `kube-bench` as a CronJob and export results to Security Hub.
+- **Developer UX:** Provide a golden-path Helm chart library that's compliant by default, so teams don't write raw manifests against the hard rules.
+
+SOC 2 evidence is then generated automatically from Security Hub findings and CloudTrail — auditors get dashboards rather than manual evidence packs.
+
+---
+
+### Q: A deployment rollout on EKS is causing cascading failures because the new pods pass readiness checks but start returning 5xx errors under real traffic seconds later. How do you diagnose and prevent this?
+
+**Model Answer:**
+
+This is a classic **shallow readiness probe** problem combined with potentially missing traffic-shaping guardrails.
+
+**Diagnosis steps:**
+1. Correlate pod start timestamps against ALB/Ingress 5xx spikes using Container Insights or your APM tool — confirm it's the new revision.
+2. Check whether the readiness probe exercises only a `/healthz` stub rather than a dependency chain (DB, downstream services, cache warm-up).
+3. Look for connection pool exhaustion or cold-start JIT latency (common in JVM/Node apps) — pod is "ready" but not yet at steady-state throughput.
+4. Review `minReadySeconds` — if it's 0, traffic hits pods the instant readiness flips.
+
+**Fixes:**
+- **Deepen the probe:** Make `/ready` verify critical downstream connectivity and return 503 until warm.
+- **`minReadySeconds`:** Set to 30–60 s so the pod must stay ready before the Deployment considers it available and terminates old pods.
+- **Progressive delivery:** Use Argo Rollouts with a canary strategy and an analysis template querying error-rate metrics — auto-rollback if p99 or error rate breaches SLO within the analysis window.
+- **`maxSurge` / `maxUnavailable`:** Tune to keep old pods serving until new pods are genuinely stable.
+- **PreStop hook + `terminationGracePeriodSeconds`:** Ensure old pods drain in-flight requests before termination, so the transition window doesn't double-count failures.
+
+---
+
+### Q: How do you design an EKS IAM strategy using IRSA and EKS Pod Identity, and what are the security pitfalls to avoid?
+
+**Model Answer:**
+
+**IRSA (IAM Roles for Service Accounts)** works by annotating a Kubernetes ServiceAccount with an IAM role ARN; the OIDC provider on the EKS cluster issues a projected token that AWS STS exchanges for temporary credentials. **EKS Pod Identity** (GA 2023) simplifies this: it removes the per-cluster OIDC registration requirement and uses a new EKS-managed agent (DaemonSet) to vend credentials, making role associations a cluster-level API call rather than a trust-policy JSON edit per role.
+
+**Design principles:**
+- **One IAM role per workload** (not per namespace, not per cluster) — enables fine-grained least privilege and clean blast-radius containment.
+- **Condition keys:** For IRSA, always add `aws:PrincipalTag` or `sts:RoleSessionName` conditions to prevent role assumption from unintended service accounts across namespaces.
+- **No node instance profiles for app permissions:** If the node's EC2 role has S3/DynamoDB access, any pod can use it via the IMDS. Use IMDSv2 and, critically, set `--metadata-options httpPutResponseHopLimit=1` on node launch templates to block pod access to IMDS (hop count of 2 would reach containers).
+- **Audit:** Use CloudTrail `AssumeRoleWithWebIdentity` events to verify which pods are assuming which roles; alert on unexpected role assumptions.
+- **Pod Identity preference:** For new clusters on supported regions/versions, prefer Pod Identity — simpler trust policy management and no OIDC thumbprint rotation overhead.
+
+Pitfall: developers sometimes request wildcard resource ARNs (`"Resource": "*"`) to unblock themselves — enforce SCPs or IAM permission boundaries at the account level to cap what any IRSA role can ever grant.

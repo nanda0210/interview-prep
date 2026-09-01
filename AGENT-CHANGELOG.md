@@ -49,3 +49,15 @@ _Committed & pushed: yes_
 - A critical microservice on EKS is experiencing high tail latency (p99) during peak load but p50 is fine. How do you systematically diagnose and resolve it?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-01 18:09:00
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (6696 chars)
+- How do you approach EKS cluster autoscaling — and when would you choose Karpenter over Cluster Autoscaler?
+- Walk me through how you would harden EKS workloads to meet CIS Kubernetes Benchmark and SOC 2 requirements without blocking developer velocity.
+- A deployment rollout on EKS is causing cascading failures because the new pods pass readiness checks but start returning 5xx errors under real traffic seconds later. How do you diagnose and prevent this?
+- How do you design an EKS IAM strategy using IRSA and EKS Pod Identity, and what are the security pitfalls to avoid?
+
+_Committed & pushed: yes_
