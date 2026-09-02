@@ -61,3 +61,15 @@ _Committed & pushed: yes_
 - How do you design an EKS IAM strategy using IRSA and EKS Pod Identity, and what are the security pitfalls to avoid?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-02 18:24:43
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (6349 chars)
+- How do you design and manage EKS control-plane and data-plane upgrades at scale with minimal disruption?
+- Walk me through how you would debug and resolve an EKS networking issue where pods on different nodes cannot communicate intermittently.
+- How do you design an EKS secret management strategy that satisfies both security and developer-experience requirements?
+- A cost audit reveals your EKS workloads are consuming 60% more compute than capacity planning predicted. How do you investigate and remediate over-provisioning?
+
+_Committed & pushed: yes_
