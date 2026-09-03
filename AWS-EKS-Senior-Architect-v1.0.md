@@ -1419,3 +1419,82 @@ The baseline is to never store secrets in ConfigMaps or environment variables ba
 ### Q: A cost audit reveals your EKS workloads are consuming 60% more compute than capacity planning predicted. How do you investigate and remediate over-provisioning?
 
 I treat this as a data problem first. I deploy **Kubecost** (or use AWS Cost Explorer with split-cost allocation tags) to attribute spend to namespace, team, and workload. The most common root causes are: (1) `requests` set far higher than actual utilisation, (2) HPA minimum replicas never scaling down, (3) DaemonSets running on oversized nodes, and (4) orphaned node groups from old feature branches. For (1), I pull 30-day Prometheus data on `container_cpu_usage_seconds_total` and `container_memory_working_set_bytes` vs. `kube_pod_container_resource_requests` to quantify the gap per container, then use **VPA** in recommendation-only mode to generate right-sized request values—teams review and adopt them through their Helm values. For (2), I audit HPA `minReplicas` configurations; many teams set them high for "safety" without understanding the cost implication, so I establish a policy that `minReplicas` for non-critical workloads defaults to 1-2 with Karpenter consolidation enabled. For (3), I evaluate whether DaemonSets are truly needed cluster-wide or could be replaced with sidecar injection scoped to specific namespaces. For (4), I tag all node groups with the owning team and TTL, and a Lambda function alerts on groups older than 14 days with no active pods. Remediation is iterative: I target the top-10 over-provisioned workloads for a 30% request reduction sprint, measure impact, and repeat. I also enable Karpenter's **consolidation policy** (`WhenUnderutilized`) so underloaded nodes are compacted automatically, typically recovering 15-25% of compute cost without application changes.
+
+
+---
+
+## 🗓️ Added 2026-09-03 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-03 18:19 -->
+
+### Q: How do you design an EKS storage strategy for stateful workloads, and what are the trade-offs between the available volume options?
+
+**Model Answer:**
+
+The primary storage options on EKS are EBS (via the EBS CSI driver), EFS (via the EFS CSI driver), and FSx for Lustre/NetApp ONTAP for specialist workloads.
+
+- **EBS**: Low-latency, high-throughput block storage; `ReadWriteOnce` only, so pods are zone-pinned — design node groups and PersistentVolumes in the same AZ to avoid scheduling failures and cross-AZ data transfer costs. Best for databases (Postgres, MySQL) and single-writer workloads.
+- **EFS**: Managed NFS with `ReadWriteMany`; simpler multi-pod access but higher latency (~1–2 ms vs <0.5 ms for io2 EBS) and per-GB-read cost. Suitable for shared config, ML training checkpoints, or CMS assets.
+- **FSx for Lustre**: Purpose-built for HPC/ML; parallel throughput in the hundreds of GB/s but expensive and operationally heavier.
+- Use **VolumeSnapshotClass** for crash-consistent backups and test restores regularly. Set `reclaimPolicy: Retain` in production StorageClasses to prevent accidental data loss on PVC deletion.
+- For StatefulSets, use `volumeClaimTemplates` and ensure Pod Disruption Budgets and `terminationGracePeriodSeconds` are tuned so storage detaches cleanly before a node drains.
+- Key pitfall: EBS volumes take ~10–30 s to detach/reattach; if a node is forcibly terminated (Spot interruption, AZ failure), the volume may stay attached, blocking new pod scheduling — set `--volume-attach-timeout` appropriately in the CSI driver.
+
+---
+
+### Q: Walk me through how you would design and enforce a supply-chain security posture for container images running on EKS.
+
+**Model Answer:**
+
+Supply-chain security spans image build, distribution, admission, and runtime layers.
+
+- **Build**: Use minimal base images (distroless or Chainguard), pin digests not tags, and integrate Trivy/Grype into CI to fail builds above a CVSS threshold. Sign images with **Sigstore/Cosign** and push signatures to ECR alongside the image.
+- **Registry**: Enable **ECR image scanning** (Enhanced Scanning via Inspector v2) for both push-time and continuous rescanning. Use ECR lifecycle policies to evict untagged/old images and reduce attack surface.
+- **Admission**: Deploy **Kyverno** or **OPA/Gatekeeper** with a policy that verifies Cosign signatures before allowing image pulls (`cosign verify` via Kyverno's `verifyImages` rule). Reject `latest` tags, privileged containers, and images from non-approved registries.
+- **Runtime**: Use **Falco** or AWS GuardDuty Runtime Monitoring for anomaly detection — unexpected process execution, outbound connections, `/proc` reads, etc.
+- **SBOM**: Generate and attest SBOMs (CycloneDX/SPDX) at build time using `syft`; store attestations in ECR so you can audit component lineage after a CVE disclosure.
+- Tie everything together with a **policy-as-code** repo where changes go through PR review, ensuring governance isn't a one-time checklist but a living control.
+
+---
+
+### Q: Your EKS cluster's API server starts returning 429/503 errors intermittently during business hours. How do you diagnose and resolve this?
+
+**Model Answer:**
+
+EKS API server throttling and unavailability typically stem from client-side request storms, control-plane resource exhaustion, or AWS-side limits.
+
+1. **Quantify**: Pull `apiserver_request_total` and `apiserver_request_duration_seconds` from the control-plane CloudWatch Container Insights metrics. Look for spikes in `LIST`/`WATCH` verb counts.
+2. **Identify top talkers**: Enable **API server audit logs** (send to CloudWatch Logs), then query with Logs Insights — `stats count(*) by user.username, verb, resource` — to find which controllers, operators, or kubectl users are flooding the API.
+3. **Common culprits**: Misconfigured controllers doing full re-list on every reconcile loop, `kubectl get pods --all-namespaces` in monitoring scripts, Helm hooks that poll aggressively, or a Karpenter/CAS loop thrashing on conflicting decisions.
+4. **Remediation**:
+   - Add `--qps` and `--burst` flags to offending controllers; tune informer cache `resyncPeriod`.
+   - Use **watch** instead of repeated `list` calls in custom controllers.
+   - If using many CRDs, audit `etcd` object count — AWS EKS etcd has object limits (~25K secrets, etc.).
+   - Request an EKS control-plane limit increase via AWS Support if legitimately needed.
+5. **Structural fix**: Apply client-side rate limiting, back-off/retry logic in operators, and set up a CloudWatch alarm on `apiserver_request_total{code="429"}` so you catch this proactively.
+6. **Behavioral note**: In a post-mortem I'd capture this as a toil-reduction item — automate the audit log query as a Runbook so on-call doesn't need to reinvent it each time.
+
+---
+
+### Q: How do you design an EKS service mesh strategy, and when is a service mesh the wrong answer?
+
+**Model Answer:**
+
+A service mesh (Istio, AWS App Mesh, Linkerd, Cilium Service Mesh) adds mTLS, traffic management, and deep observability at the cost of operational complexity and latency overhead.
+
+**When it's justified:**
+- Zero-trust, pod-to-pod mTLS is a hard compliance requirement and you can't achieve it purely with network policies.
+- Fine-grained traffic shaping (weighted canary, fault injection, circuit breaking, retries) that application code shouldn't own.
+- Uniform observability (L7 golden signals) across polyglot services without per-language instrumentation.
+
+**Design considerations:**
+- **Linkerd** is the lightest-weight option (Rust data-plane, ~2 ms added latency), good for teams that want mTLS + metrics with low ops burden. **Istio** (with ambient mesh in sidecar-less mode) is more feature-rich but operationally heavier.
+- In EKS, integrate with **ACM Private CA** or **cert-manager** for workload certificate issuance; automate rotation.
+- Use **strict** mTLS mode only after ensuring all services are enrolled — otherwise you silently allow plaintext. Canary the rollout namespace by namespace.
+- Separate data-plane from control-plane upgrades; control-plane disruption should not drop existing connections.
+
+**When it's the wrong answer:**
+- Small clusters (<20 services) where network policies + IRSA + ALB auth satisfy security requirements — a mesh adds 10–30% CPU overhead per sidecar for marginal gain.
+- Teams without the maturity to operate it; a misconfigured Istio `VirtualService` is a common cause of hard-to-debug outages.
+- Fargate-heavy clusters where sidecar injection is constrained.
+- Start with Cilium's native network policies and BPF-based observability first; add a full mesh only when you've exhausted simpler primitives.

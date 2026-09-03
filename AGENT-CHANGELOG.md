@@ -73,3 +73,15 @@ _Committed & pushed: yes_
 - A cost audit reveals your EKS workloads are consuming 60% more compute than capacity planning predicted. How do you investigate and remediate over-provisioning?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-03 18:19:53
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (6783 chars)
+- How do you design an EKS storage strategy for stateful workloads, and what are the trade-offs between the available volume options?
+- Walk me through how you would design and enforce a supply-chain security posture for container images running on EKS.
+- Your EKS cluster's API server starts returning 429/503 errors intermittently during business hours. How do you diagnose and resolve this?
+- How do you design an EKS service mesh strategy, and when is a service mesh the wrong answer?
+
+_Committed & pushed: yes_
