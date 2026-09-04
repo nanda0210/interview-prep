@@ -1498,3 +1498,82 @@ A service mesh (Istio, AWS App Mesh, Linkerd, Cilium Service Mesh) adds mTLS, tr
 - Teams without the maturity to operate it; a misconfigured Istio `VirtualService` is a common cause of hard-to-debug outages.
 - Fargate-heavy clusters where sidecar injection is constrained.
 - Start with Cilium's native network policies and BPF-based observability first; add a full mesh only when you've exhausted simpler primitives.
+
+
+---
+
+## 🗓️ Added 2026-09-04 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-04 18:03 -->
+
+### Q: How do you design an EKS pod security strategy post-PodSecurityPolicy deprecation, and what controls do you layer together?
+
+**What the interviewer wants:** Understanding of the PSP replacement landscape, defense-in-depth, and practical enforcement.
+
+PSP was removed in Kubernetes 1.25, so the replacement stack combines **Pod Security Admission (PSA)**, **OPA/Gatekeeper or Kyverno**, and runtime security tooling. My layered approach:
+
+- **PSA** (built-in): Apply `baseline` or `restricted` standards at the namespace level via labels; use `warn` mode in non-prod namespaces first to surface violations before enforcing.
+- **Kyverno or OPA/Gatekeeper**: Policy-as-code for controls PSA can't express — e.g., required labels, image registry allow-lists, disallowing `latest` tags, enforcing resource requests/limits.
+- **Seccomp / AppArmor profiles**: Applied via `securityContext`; EKS 1.27+ defaults the `RuntimeDefault` seccomp profile, which I enforce cluster-wide via policy.
+- **Runtime enforcement**: Falco or AWS GuardDuty for Containers detects anomalous syscalls at runtime — the last line of defence when a misconfigured or compromised pod is already running.
+- **Image scanning**: ECR native scanning or Trivy in CI gates prevent vulnerable images reaching the cluster at all.
+
+The key trade-off is Kyverno (Kubernetes-native, easier authoring) vs. Gatekeeper (Rego, more expressive but steeper learning curve). I choose Kyverno for most teams unless there's an existing OPA investment. I always run policies in `audit` mode first, export violations to CloudWatch, and set a remediation SLA before flipping to `enforce`.
+
+---
+
+### Q: Your EKS cluster nodes are joining but pods remain in "Pending" with no scheduler events. How do you systematically diagnose and resolve this?
+
+**What the interviewer wants:** Structured troubleshooting, knowledge of scheduler internals, node readiness lifecycle, and common EKS-specific gotchas.
+
+I work through a structured hierarchy of failure domains:
+
+1. **Node readiness**: `kubectl get nodes` — are nodes `Ready`? Check `kubectl describe node` for condition taints (`node.kubernetes.io/not-ready`, `node.kubernetes.io/disk-pressure`). Examine kubelet and containerd logs via SSM or CloudWatch Logs.
+2. **Scheduler visibility**: `kubectl describe pod <pending>` — if there are *no* scheduler events at all, the scheduler itself may be unhealthy, or the pod is hitting a **node selector / affinity / toleration** mismatch that prevents scheduling silently.
+3. **Resource pressure**: Verify `Allocatable` vs. `Requested` on nodes. A common EKS gotcha is that the VPC CNI pre-allocates ENIs/IPs, and if the subnet is exhausted, nodes become `NotReady` with a CNI error — pods never schedule.
+4. **Taints**: New Karpenter or managed node group nodes may have a startup taint (`node.kubernetes.io/not-ready`) that isn't cleared if the node bootstrap script failed. Check EC2 user-data logs and `aws ec2 describe-instances` for instance state.
+5. **Resource quotas / LimitRange**: Namespace-level `ResourceQuota` can silently block scheduling if the pod spec lacks required requests. `kubectl describe resourcequota -n <ns>` reveals exhaustion.
+6. **Cluster Autoscaler / Karpenter race**: Pending pods might be waiting for a node the autoscaler decided to provision but that node failed to join (IAM role, launch template AMI mismatch). Check CA logs for `failed to create node group` errors.
+
+Resolution path: fix the root cause (subnet CIDR expansion, taint correction, quota increase), then force pod rescheduling. Post-incident, I add alerts on sustained pending pod counts > 5 minutes.
+
+---
+
+### Q: How do you design an EKS disaster recovery strategy that accounts for both the control plane and stateful workload data, and how do you validate it?
+
+**What the interviewer wants:** End-to-end DR thinking beyond just "use another region," including control-plane state, etcd, PV data, and runbook validation.
+
+EKS's managed control plane means AWS owns etcd availability within a region, but you're still responsible for everything *above* the API — and for data-plane and stateful recovery. My design covers five layers:
+
+- **Cluster configuration**: All cluster resources (Deployments, Services, CRDs, RBAC, ConfigMaps) are GitOps-managed in Flux/ArgoCD. Recovery = bootstrap a new cluster and let GitOps converge. Target RTO for stateless workloads: <30 minutes.
+- **Persistent data**: Use Velero with CSI snapshot support for EBS/EFS volumes. Snapshots are cross-region copied on a schedule matching RPO requirements. For databases, prefer RDS/Aurora with cross-region read replicas over self-managed PVs — the managed service DR story is stronger.
+- **Secrets**: External Secrets Operator pulling from AWS Secrets Manager, which replicates secrets cross-region. No Kubernetes secrets hold source-of-truth data.
+- **Networking dependencies**: Pre-provision VPCs, subnets, and Route53 hosted zones in the DR region. Use weighted routing policies so failover is a weight change, not a DNS propagation event.
+- **Validation — the critical part**: Run **quarterly DR drills** where the DR cluster is actually promoted. Use `kubectl diff` against the GitOps repo to confirm drift, run smoke tests, and measure actual RTO vs. target. Without validation, DR plans are fiction.
+
+I also instrument the mean-time-to-detect (MTTD) for control-plane unavailability via synthetic probes hitting the API server from a separate monitoring account, so the DR trigger is automated rather than dependent on human observation.
+
+---
+
+### Q: A security audit finds that several EKS workloads are making unexpected AWS API calls outside their intended permissions. How do you investigate the blast radius and harden the environment going forward?
+
+**What the interviewer wants:** Incident-response methodology, IRSA misuse patterns, detective controls, and remediation strategy.
+
+**Immediate investigation:**
+
+- Pull **CloudTrail** logs filtered by the OIDC-derived role ARNs associated with the offending workloads. Identify which API calls were made, from which source IP (pod IP maps to node via VPC Flow Logs), and whether they succeeded.
+- Check whether the calls used the *pod's* IRSA token or the *node's* EC2 instance profile — a common finding is that workloads fall back to the node role because IRSA is misconfigured, meaning the node role has over-broad permissions.
+- Map service account → IAM role → policy to determine actual granted permissions vs. what was intended (`aws iam simulate-principal-policy` is useful here).
+
+**Blast radius assessment:**
+Determine whether any data was exfiltrated (S3 `GetObject`, Secrets Manager `GetSecretValue`) or infrastructure mutated (EC2 `RunInstances`, IAM `CreateRole`). Escalate to a security incident if sensitive data or privilege escalation is confirmed.
+
+**Hardening actions:**
+
+1. **Restrict node instance profiles** to the absolute minimum (ECR pull, CloudWatch Logs, SSM) — nothing that application workloads should ever use.
+2. **Enforce IRSA on every workload** via Kyverno policy that rejects pods with `AWS_*` env vars injected manually or missing the required service account annotation.
+3. **Enable IAM Access Analyzer** to continuously flag roles with unused permissions; implement least-privilege remediation quarterly.
+4. **GuardDuty EKS Audit Log monitoring** detects anomalous API server behaviour and unusual IRSA usage patterns as an ongoing detective control.
+5. **Scope IAM role trust policies** with `aws:RequestedRegion` and `sts:ExternalId`-equivalent OIDC conditions so a stolen token cannot be used outside the expected cluster.
+
+Post-incident, I introduce a **permission boundary** on all IRSA roles created going forward, capping the maximum effective permissions regardless of what the attached policies allow.

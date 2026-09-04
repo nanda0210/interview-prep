@@ -85,3 +85,15 @@ _Committed & pushed: yes_
 - How do you design an EKS service mesh strategy, and when is a service mesh the wrong answer?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-04 18:03:58
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7931 chars)
+- How do you design an EKS pod security strategy post-PodSecurityPolicy deprecation, and what controls do you layer together?
+- Your EKS cluster nodes are joining but pods remain in "Pending" with no scheduler events. How do you systematically diagnose and resolve this?
+- How do you design an EKS disaster recovery strategy that accounts for both the control plane and stateful workload data, and how do you validate it?
+- A security audit finds that several EKS workloads are making unexpected AWS API calls outside their intended permissions. How do you investigate the blast radius and harden the environment going forward?
+
+_Committed & pushed: yes_
