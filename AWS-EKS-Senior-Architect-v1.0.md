@@ -1577,3 +1577,65 @@ Determine whether any data was exfiltrated (S3 `GetObject`, Secrets Manager `Get
 5. **Scope IAM role trust policies** with `aws:RequestedRegion` and `sts:ExternalId`-equivalent OIDC conditions so a stolen token cannot be used outside the expected cluster.
 
 Post-incident, I introduce a **permission boundary** on all IRSA roles created going forward, capping the maximum effective permissions regardless of what the attached policies allow.
+
+
+---
+
+## 🗓️ Added 2026-09-05 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-05 17:07 -->
+
+### Q: How do you design an EKS networking strategy for IPv6, and what are the operational trade-offs compared to IPv4?
+
+**Key points an interviewer wants to hear:**
+
+- **Why IPv6 on EKS:** Each pod gets a unique global IPv6 address, eliminating the RFC-1918 exhaustion problem that plagues large IPv4 clusters (especially with the VPC CNI's IP-per-pod model consuming ENI secondary IPs rapidly).
+- **VPC CNI behaviour:** In IPv6 mode the CNI assigns one IPv6 address per pod directly from the VPC prefix; there is no need for custom networking or prefix delegation workarounds required in large IPv4 deployments.
+- **Dual-stack reality:** Most production deployments today run dual-stack (IPv4 + IPv6) at the VPC level because downstream dependencies—RDS, ElastiCache, many SaaS endpoints—remain IPv4-only; you must plan NAT64/DNS64 at the subnet level for egress to IPv4 services.
+- **Trade-offs:**
+  - Security groups for pods work the same way, but flow logs are more verbose and SIEM parsers often need updating.
+  - Third-party tooling (service meshes, some CNI plugins, WAF rules) may have incomplete IPv6 support.
+  - Fargate on EKS supports IPv6 but only in single-stack IPv6 VPCs; mixing Fargate and EC2 nodes in dual-stack clusters requires careful subnet design.
+- **Load balancer layer:** AWS Load Balancer Controller supports dualstack and dualstack-without-public-ipv4 target types; choose based on whether external clients are IPv6-capable.
+- **Migration path:** Migrating an existing IPv4 cluster is destructive (cluster replacement); plan this as a greenfield deployment with traffic migration via weighted DNS or a service mesh.
+
+---
+
+### Q: How do you design an EKS add-on and cluster configuration drift-prevention strategy at scale?
+
+**Key points an interviewer wants to hear:**
+
+- **The drift problem:** In a fleet of dozens of clusters, manual console changes, ad-hoc `kubectl apply` operations, and out-of-band EKS add-on upgrades cause clusters to silently diverge—leading to "works in cluster A, fails in cluster B" incidents.
+- **Infrastructure layer (Terraform/CDK):** Represent every cluster, managed node group, EKS add-on version, and IRSA binding in IaC; enforce via CI plan-and-apply pipelines with required PR approvals. Use remote state locking to prevent concurrent mutations.
+- **Kubernetes manifest layer (GitOps):** Use Flux or ArgoCD with the `--prune` flag and a deny-all default sync policy so any resource not in Git is removed. ApplicationSets or Flux `Kustomization` objects let you fan out a single source to multiple clusters.
+- **Add-on version pinning:** Explicitly pin EKS managed add-on versions in IaC rather than using `LATEST`; subscribe to AWS SNS notifications for add-on deprecations so upgrades are deliberate.
+- **Policy enforcement:** Deploy OPA/Gatekeeper or Kyverno policies that reject mutations to protected namespaces (e.g., `kube-system`) unless they originate from the GitOps service account.
+- **Drift detection and alerting:** Run `kubectl diff` or ArgoCD's out-of-sync alerting on a schedule; pipe results to a Slack channel or PagerDuty so drift is visible within minutes, not discovered during an incident.
+- **Behavioral angle:** Emphasise that tooling alone is insufficient—teams need a culture where "if it's not in Git, it doesn't exist," enforced by removing broad IAM permissions for direct cluster write access from human users.
+
+---
+
+### Q: A newly onboarded EKS cluster in a regulated industry fails a CIS Kubernetes Benchmark scan. How do you systematically remediate it without breaking running workloads?
+
+**Key points an interviewer wants to hear:**
+
+- **Baseline first:** Run `kube-bench` (the CIS benchmark tool) against control-plane and worker node components to produce a prioritised finding list categorised as Level 1 (must-fix) and Level 2 (environment-specific).
+- **Control-plane findings on EKS:** AWS manages the API server, etcd, and scheduler—you cannot SSH into them. For findings like audit logging, enable EKS control-plane audit logs to CloudWatch; for API server flags you cannot change, document the shared-responsibility boundary and compensate with detective controls.
+- **Node-level findings:** Use a custom AMI built with EC2 Image Builder or Bottlerocket (which ships CIS-hardened by default) to address kubelet configuration, file permissions, and kernel parameters. Replace nodes via a rolling node-group update to avoid workload disruption.
+- **RBAC and authentication:** Remediate overly permissive ClusterRoleBindings incrementally—use `kubectl auth can-i --list` and audit logs to identify blast radius before removing permissions. Enforce MFA/SSO via IAM Identity Center; remove static `aws-auth` ConfigMap entries in favour of EKS Access Entries.
+- **Workload-impacting changes (e.g., disabling anonymous auth, enabling admission controllers):** Test in a non-production cluster first; use PodDisruptionBudgets and canary rollouts when node replacement touches production.
+- **Continuous compliance:** Integrate `kube-bench` into a CI job and deploy AWS Security Hub with the EKS standard to get ongoing drift alerting rather than treating this as a one-time exercise.
+
+---
+
+### Q: How do you design an EKS strategy for machine-learning inference workloads that require GPU nodes, and what are the key operational pitfalls?
+
+**Key points an interviewer wants to hear:**
+
+- **Node provisioning:** Use Karpenter with GPU-aware `NodePool` definitions (e.g., `g5`, `p4d`, `inf2` instance families) and `limits` to cap total GPU spend. Karpenter's bin-packing is particularly valuable here because GPU instances are expensive and idle allocation is wasteful.
+- **Device plugin:** Deploy the NVIDIA Device Plugin DaemonSet (or the AWS Neuron device plugin for Inferentia/Trainium) so the scheduler can treat `nvidia.com/gpu` or `aws.amazon.com/neuron` as a schedulable resource. Pin the plugin version to the driver version on your AMI.
+- **AMI and driver management:** Use the EKS-optimised accelerated AMI or a custom AMI with a tested driver stack; driver/CUDA/framework version mismatches are the #1 cause of silent inference errors or OOM crashes that look like application bugs.
+- **Resource requests and limits:** Always set `nvidia.com/gpu` as both request and limit (they must be equal); unlike CPU/memory, GPUs are not overcommittable. Failing to set limits causes a pod to consume the full GPU while kubernetes reports zero GPU usage.
+- **Spot for inference:** GPU Spot instances can cut costs 60–70% but require the model server (Triton, TorchServe) to checkpoint in-flight requests or drain gracefully on SIGTERM. Use `terminationGracePeriodSeconds` aligned to your model's warm-up time so replacement pods are ready before traffic shifts.
+- **Observability pitfalls:** Standard CloudWatch and Prometheus node exporters do not expose GPU utilisation or memory bandwidth by default; deploy `dcgm-exporter` (NVIDIA DCGM) to get GPU-level metrics, and alert on GPU memory utilisation rather than CPU to catch saturation early.
+- **Multi-tenancy on GPU nodes:** Avoid placing non-GPU workloads on GPU nodes (use taints/tolerations); a single CPU-bound sidecar can starve the GPU process of scheduling time and inflate p99 latency unpredictably.

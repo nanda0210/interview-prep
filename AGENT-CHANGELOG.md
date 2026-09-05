@@ -97,3 +97,15 @@ _Committed & pushed: yes_
 - A security audit finds that several EKS workloads are making unexpected AWS API calls outside their intended permissions. How do you investigate the blast radius and harden the environment going forward?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-05 17:07:37
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7360 chars)
+- How do you design an EKS networking strategy for IPv6, and what are the operational trade-offs compared to IPv4?
+- How do you design an EKS add-on and cluster configuration drift-prevention strategy at scale?
+- A newly onboarded EKS cluster in a regulated industry fails a CIS Kubernetes Benchmark scan. How do you systematically remediate it without breaking running workloads?
+- How do you design an EKS strategy for machine-learning inference workloads that require GPU nodes, and what are the key operational pitfalls?
+
+_Committed & pushed: yes_
