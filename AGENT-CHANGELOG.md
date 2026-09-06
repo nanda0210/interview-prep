@@ -109,3 +109,15 @@ _Committed & pushed: yes_
 - How do you design an EKS strategy for machine-learning inference workloads that require GPU nodes, and what are the key operational pitfalls?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-06 17:30:01
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (6605 chars)
+- How do you design an EKS ingress strategy at scale, and what are the trade-offs between the AWS Load Balancer Controller, NGINX, and Gateway API?
+- Your EKS cluster's DNS resolution is intermittently timing out under load. How do you systematically diagnose and resolve this?
+- How do you design an EKS workload identity and supply-chain security strategy to meet SLSA Level 3 requirements?
+- A large EKS cluster is experiencing node-level "NotReady" flapping on a subset of nodes every few hours, but the nodes recover without manual intervention. How do you diagnose the root cause?
+
+_Committed & pushed: yes_

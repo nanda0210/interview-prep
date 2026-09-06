@@ -1639,3 +1639,69 @@ Post-incident, I introduce a **permission boundary** on all IRSA roles created g
 - **Spot for inference:** GPU Spot instances can cut costs 60–70% but require the model server (Triton, TorchServe) to checkpoint in-flight requests or drain gracefully on SIGTERM. Use `terminationGracePeriodSeconds` aligned to your model's warm-up time so replacement pods are ready before traffic shifts.
 - **Observability pitfalls:** Standard CloudWatch and Prometheus node exporters do not expose GPU utilisation or memory bandwidth by default; deploy `dcgm-exporter` (NVIDIA DCGM) to get GPU-level metrics, and alert on GPU memory utilisation rather than CPU to catch saturation early.
 - **Multi-tenancy on GPU nodes:** Avoid placing non-GPU workloads on GPU nodes (use taints/tolerations); a single CPU-bound sidecar can starve the GPU process of scheduling time and inflate p99 latency unpredictably.
+
+
+---
+
+## 🗓️ Added 2026-09-06 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-06 17:30 -->
+
+### Q: How do you design an EKS ingress strategy at scale, and what are the trade-offs between the AWS Load Balancer Controller, NGINX, and Gateway API?
+
+**Model Answer:**
+
+The choice hinges on operational complexity, feature surface, and traffic profile:
+
+- **AWS Load Balancer Controller (ALB Ingress):** Provisions an ALB per Ingress or shared via IngressGroup. Best for teams wanting deep AWS-native integration (WAF, Cognito, target-group binding for gRPC/NLB). Trade-off: ALB per service can be expensive; cross-namespace sharing requires `IngressGroup` discipline.
+- **NGINX Ingress Controller:** Single NLB/CLB fronts many virtual hosts via L7 routing in-cluster. Richer annotation set, better cost profile at high Ingress-object count, but you own the NGINX pod's availability and scaling.
+- **Gateway API (v1 GA):** Separates infra (GatewayClass, Gateway) from app-team concerns (HTTPRoute). Preferred for multi-team clusters because it enforces RBAC-aligned role separation without annotation sprawl. AWS supports it via the LBC's Gateway API mode.
+- **Scaling pitfalls:** ALB rule limits (100 rules/listener), NGINX config reload latency at thousands of Ingresses, and certificate management (use ACM for ALB, cert-manager for NGINX).
+- **Recommendation at scale:** Adopt Gateway API as the abstraction layer with LBC as the implementation for AWS-native traffic, and NGINX for complex rewrite/snippet use-cases where Gateway API support is immature.
+
+---
+
+### Q: Your EKS cluster's DNS resolution is intermittently timing out under load. How do you systematically diagnose and resolve this?
+
+**Model Answer:**
+
+DNS failures in EKS almost always trace to CoreDNS saturation or misconfiguration, with the VPC resolver as a secondary suspect.
+
+1. **Quantify the blast radius:** `kubectl top pods -n kube-system` for CoreDNS CPU/memory; check CoreDNS `coredns_dns_request_duration_seconds` and `coredns_dns_responses_total{rcode="SERVFAIL"}` metrics.
+2. **Check `ndots` amplification:** Default `ndots:5` causes up to 8 DNS queries per external hostname lookup. Audit pod `dnsConfig` and reduce to `ndots:2` or append absolute FQDNs where possible.
+3. **CoreDNS horizontal scaling:** CoreDNS is often under-provisioned — scale replicas, enable `PodDisruptionBudget`, and pin replicas across AZs with `topologySpreadConstraints`.
+4. **NodeLocal DNSCache:** Deploy the `node-local-dns` DaemonSet to cache responses at the node level, bypassing conntrack table pressure that causes UDP packet drops under high connection rates (a known Linux kernel issue with `DNAT` and CoreDNS).
+5. **VPC resolver limits:** Each EC2 instance is limited to 1,024 DNS packets/second to the VPC resolver (.2 address). At scale, switch bulk external lookups to Route 53 Resolver or cache aggressively.
+6. **Validate fix:** Use `dnsperf` or `kubectl exec` `dig` loops to reproduce the failure rate before and after changes.
+
+---
+
+### Q: How do you design an EKS workload identity and supply-chain security strategy to meet SLSA Level 3 requirements?
+
+**Model Answer:**
+
+Meeting SLSA L3 on EKS requires controls across build, publish, and runtime stages:
+
+- **Hermetic, reproducible builds:** Use AWS CodeBuild with network-egress blocked or GitHub Actions OIDC with provenance attestation. Build systems must not allow mutable inputs at build time.
+- **Provenance and signing:** Sign container images with **Sigstore/Cosign** and generate SLSA provenance documents, storing both in ECR alongside the image via OCI referrers API. Use AWS Signer for an AWS-native alternative.
+- **Admission enforcement:** Deploy **Kyverno** or **OPA Gatekeeper** policies that verify Cosign signatures and provenance against a trusted Sigstore TUF root before any pod is admitted. Reject unsigned or unverified images at the policy layer.
+- **SBOM generation and vulnerability gating:** Attach SBOMs (Syft/CycloneDX) as OCI artifacts; pipe them into **Amazon Inspector** or Grype in CI to block images with critical CVEs before push.
+- **Immutable registry:** Enable ECR image immutability and tag-protection policies so deployed digests cannot be overwritten.
+- **Runtime enforcement:** Combine **Falco** rules with seccomp/AppArmor profiles and read-only root filesystems to detect supply-chain compromise at runtime.
+- **Audit trail:** All image promotions, policy decisions, and IRSA credential issuance should flow into CloudTrail + S3 for the immutable audit log SLSA L3 demands.
+
+---
+
+### Q: A large EKS cluster is experiencing node-level "NotReady" flapping on a subset of nodes every few hours, but the nodes recover without manual intervention. How do you diagnose the root cause?
+
+**Model Answer:**
+
+Intermittent `NotReady` that self-recovers is deceptive — it rarely points to the obvious causes. Systematic approach:
+
+1. **Correlate timing:** `kubectl describe node <node>` — check `Conditions` history and the `lastTransitionTime`. Cross-reference with CloudWatch node-level metrics (CPU steal, network error counters) and EC2 status checks at the same timestamp.
+2. **Kubelet health:** SSH (or use SSM) to an affected node and inspect `journalctl -u kubelet --since "X minutes ago"`. Look for PLEG (Pod Lifecycle Event Generator) errors — `PLEG is not healthy` means the container runtime is stalling, often a containerd or Docker daemon issue.
+3. **Container runtime pressure:** Check `containerd` or `dockerd` logs for image pull storms, garbage collection pauses, or OOM events on the runtime process itself. Disk I/O saturation during image GC is a common culprit on `gp2` volumes — migrate to `gp3` with provisioned IOPS.
+4. **Network plugin (CNI) failures:** For VPC CNI, check `ipamd` logs (`kubectl logs -n kube-system aws-node-<id>`). IP exhaustion in a subnet causes ipamd to stall, which can manifest as kubelet losing connectivity to the API server.
+5. **EC2 maintenance events:** Call `aws ec2 describe-instance-status` — Spot interruption notices or scheduled maintenance can cause transient `NotReady` before the instance is replaced.
+6. **Node-level resource pressure:** `NotReady` also fires when the node's own memory pressure triggers the kubelet's eviction manager — check `MemoryPressure` and `DiskPressure` conditions; tune eviction thresholds or right-size the node.
+7. **Resolution:** Once root cause is confirmed, encode the fix in the node group launch template (e.g., containerd config, larger ephemeral storage, ENI warm pool settings) and validate with a canary node group before rolling fleet-wide.
