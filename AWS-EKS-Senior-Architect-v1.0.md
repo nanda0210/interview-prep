@@ -1705,3 +1705,89 @@ Intermittent `NotReady` that self-recovers is deceptive — it rarely points to 
 5. **EC2 maintenance events:** Call `aws ec2 describe-instance-status` — Spot interruption notices or scheduled maintenance can cause transient `NotReady` before the instance is replaced.
 6. **Node-level resource pressure:** `NotReady` also fires when the node's own memory pressure triggers the kubelet's eviction manager — check `MemoryPressure` and `DiskPressure` conditions; tune eviction thresholds or right-size the node.
 7. **Resolution:** Once root cause is confirmed, encode the fix in the node group launch template (e.g., containerd config, larger ephemeral storage, ENI warm pool settings) and validate with a canary node group before rolling fleet-wide.
+
+
+---
+
+## 🗓️ Added 2026-09-07 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-07 18:59 -->
+
+### Q: How do you design an EKS cluster networking strategy to support PrivateLink-based communication between clusters and external AWS services, and what are the operational pitfalls?
+
+**Model Answer:**
+
+For inter-service communication that must never traverse the public internet, I use AWS PrivateLink (VPC Endpoints) to expose AWS-managed services and internal Platform services to the EKS VPC. Key design decisions:
+
+- **VPC Endpoint placement:** Create Interface Endpoints (e.g., for ECR, S3, STS, Secrets Manager, ELB, EC2) in each AZ where EKS nodes run; missing an AZ endpoint causes asymmetric routing failures and subtle DNS resolution gaps.
+- **DNS resolution:** Enable `enableDnsSupport` and `enableDnsHostnames` on the VPC; Route 53 Private Hosted Zones or endpoint-specific private DNS must resolve service hostnames to endpoint ENI IPs — misconfigured PHZs are the #1 PrivateLink support ticket.
+- **Security Groups on endpoints:** Lock endpoint SGs to the node and pod CIDR ranges only; overly broad rules undermine the isolation goal.
+- **Cross-cluster traffic:** For EKS-to-EKS communication across accounts or VPCs, expose services via NLB + PrivateLink rather than VPC peering; this avoids overlapping CIDR conflicts and provides per-service access control.
+- **Gateway Endpoints vs. Interface Endpoints:** S3 and DynamoDB support free Gateway Endpoints (route-table based); prefer these over Interface Endpoints for cost on high-throughput workloads.
+- **Operational pitfall — endpoint policy drift:** VPC Endpoint resource policies are separate from IAM; forgetting to scope them allows any principal in the VPC to call the service. Enforce policies via AWS Config rules and SCP guardrails.
+- **Fargate consideration:** Fargate pods require the ECR, S3, STS, and Secrets Manager endpoints to be present; missing endpoints silently prevent pod startup with opaque "ImagePullBackOff" or credential errors.
+
+---
+
+### Q: Your EKS pods intermittently lose connectivity to an RDS Aurora cluster for 30–60 seconds, then self-recover. How do you diagnose and eliminate the root cause?
+
+**Model Answer:**
+
+This pattern — brief, self-healing connectivity loss — has several common causes in EKS and requires layered investigation:
+
+1. **Establish a baseline:** Deploy a sidecar or DaemonSet-based TCP prober (e.g., `tcping` or a Prometheus blackbox exporter) hitting the Aurora writer endpoint every second, correlated with timestamps to match application error logs precisely.
+2. **Check Aurora failover events:** In the RDS console and CloudWatch Events, look for Multi-AZ failovers or Aurora writer re-elections — these cause a DNS TTL flush period (typically 30–40 s) during which old connections time out.
+3. **Connection pool behavior:** Many ORMs and connection pools cache the Aurora DNS endpoint IP; after a failover the pool holds stale connections. Fix: set connection TTL/validation (`testOnBorrow`, `keepalive`) and respect the RDS DNS TTL of 5 s in the pool config.
+4. **Security Group rule evaluation:** Spot check that pod CIDR ranges (especially if using custom networking or Prefix Delegation) are covered by the Aurora SG inbound rule; a recent node scaling event expanding IP space can expose gaps.
+5. **NAT Gateway SNAT port exhaustion:** If pods route through a NAT GW to reach RDS (not recommended), check `ErrorPortAllocation` CloudWatch metric; port exhaustion causes silent drops.
+6. **VPC DNS throttling:** The `.2` resolver has a 1,024 packets/second/ENI limit; bursts of DNS lookups at scale cause query drops. Mitigation: enable Route 53 Resolver DNS Firewall logging, and use NodeLocal DNSCache.
+7. **Resolution:** Use Aurora Proxy (RDS Proxy) to absorb failover events transparently, enforce connection pool limits at the proxy layer, and switch to persistent keep-alive connections with exponential backoff in the application.
+
+---
+
+### Q: How do you design an EKS platform team operating model — including cluster fleet topology, self-service developer experience, and guardrails — for an organisation with 50+ engineering teams?
+
+**Model Answer:**
+
+At this scale the platform team becomes a product team; the design spans topology, tooling, and culture:
+
+**Cluster topology strategy:**
+- Use a **hub-and-spoke** model: shared platform services (observability, service mesh control plane, CI runners) in a dedicated cluster; per-domain or per-environment clusters for tenant workloads. This balances blast radius isolation against operational overhead.
+- Define a **cluster tier taxonomy** (e.g., Tier 1 = prod critical, Tier 2 = prod non-critical, Tier 3 = non-prod) with different SLOs, upgrade cadences, and cost allocations per tier.
+
+**Self-service developer experience:**
+- Expose cluster provisioning via an Internal Developer Portal (Backstage) backed by a Terraform/Crossplane GitOps pipeline; teams submit PRs, not tickets.
+- Provide opinionated Helm chart libraries or Kustomize bases that embed security defaults (non-root, read-only FS, resource limits); teams extend, not override from scratch.
+- Namespace-as-a-Service: automate namespace creation with RBAC, NetworkPolicy, ResourceQuota, and LimitRange templates via a controller (e.g., Hierarchical Namespace Controller).
+
+**Guardrails:**
+- Enforce policy via **Kyverno or OPA/Gatekeeper** in `Enforce` mode for must-have controls (image registry allowlist, no `latest` tags, required labels); use `Audit` mode for advisory policies with automated PR comments.
+- SCPs and IAM permission boundaries prevent teams from bypassing IRSA constraints.
+- Automated CIS/NSA benchmark scans (Trivy, kube-bench) as part of the cluster provisioning pipeline gate.
+
+**Operational concerns:**
+- Maintain a **golden AMI pipeline** using EC2 Image Builder; nodes launch only from validated, patched AMIs.
+- Define a platform SLO (e.g., control-plane API p99 < 1 s, node provisioning < 5 min) and publish it on an internal status page to create accountability.
+- Hold a monthly **platform review** with team leads covering cost attribution, policy violations, and roadmap — treating internal teams as customers.
+
+---
+
+### Q: Walk me through how you would implement and operationalise fine-grained network segmentation for EKS workloads using both Kubernetes NetworkPolicy and AWS-native controls, and explain where each layer is insufficient alone.
+
+**Model Answer:**
+
+Defense-in-depth for EKS network segmentation requires three complementary layers:
+
+**Layer 1 — Kubernetes NetworkPolicy (pod-to-pod):**
+- Requires a CNI that enforces NetworkPolicy; with VPC CNI, you must enable the **Network Policy Controller** (GA in EKS 1.29+) or use a policy-aware overlay like Calico or Cilium.
+- Default-deny posture per namespace (`ingress: []`, `egress: []`) then explicit allow rules. Policies are namespace-scoped and cannot control traffic leaving the node to AWS services.
+- **Limitation:** NetworkPolicy has no concept of FQDN-based egress (you can't write "allow egress to `api.stripe.com`"); for that you need Cilium's `CiliumNetworkPolicy` or an egress proxy.
+
+**Layer 2 — Security Groups for Pods (SGP):**
+- With VPC CNI's `ENABLE_POD_ENI=true`, individual pods get a branch ENI and can be assigned a dedicated Security Group.
+- This allows SG-based rules between pods and AWS resources (RDS, ElastiCache, MSK) — the cleanest way to scope DB access without CIDR-based rules that drift as node IPs change.
+- **Limitation:** SGP requires Nitro instances; not supported on Fargate with the same model; adds ENI branch limit pressure per node.
+
+**Layer 3 — VPC-level controls (NACLs, route tables):**
+- NACLs provide stateless subnet-level segmentation; useful as a coarse backstop (e.g., blocking all inter-VPC traffic not explicitly routed), but too blunt for pod-level policy.
+- AWS
