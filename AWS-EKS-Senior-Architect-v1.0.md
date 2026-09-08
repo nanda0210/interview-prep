@@ -1791,3 +1791,66 @@ Defense-in-depth for EKS network segmentation requires three complementary layer
 **Layer 3 — VPC-level controls (NACLs, route tables):**
 - NACLs provide stateless subnet-level segmentation; useful as a coarse backstop (e.g., blocking all inter-VPC traffic not explicitly routed), but too blunt for pod-level policy.
 - AWS
+
+
+---
+
+## 🗓️ Added 2026-09-08 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-08 18:17 -->
+
+### Q: How do you design an EKS cluster bootstrap and node initialisation strategy to ensure nodes are security-hardened and configuration-compliant before they accept workloads?
+
+**Key points an interviewer wants to hear:**
+
+- Use **custom AMIs built with EC2 Image Builder or Packer**, baking in CIS-hardened OS configurations, approved kernel versions, and pre-pulled pause/critical images — rather than relying on userdata alone against the EKS-optimised Amazon Linux 2/AL2023 base.
+- Apply **Karpenter `NodeClass` or managed node group launch templates** to inject userdata that runs a hardening script (e.g., disabling unused kernel modules, setting `auditd` rules, configuring `/etc/sysctl.d`) *before* `bootstrap.sh` registers the node with the control plane.
+- Gate workload scheduling with a **startup taint** (e.g., `node.kubernetes.io/not-ready` plus a custom `bootstrapping:NoSchedule` taint) removed only after a DaemonSet-based compliance agent (e.g., a Falco/Inspector agent or custom init container) validates the node and calls the Kubernetes API to remove the taint.
+- Enforce **SSM Agent presence** and enrol nodes into AWS Systems Manager for patch compliance tracking; block nodes that miss SSM heartbeats via a Lambda-driven Node auto-remediation loop.
+- Integrate **Amazon Inspector container scanning** and **EC2 scanning** so newly launched nodes are assessed within seconds; couple this with EventBridge rules that cordon or drain nodes flagged with critical CVEs above a configurable CVSS threshold.
+- Store the golden AMI ID in **SSM Parameter Store** and reference it in Terraform/CDK so all node groups always pull the latest approved image; failed AMI validation in CI blocks the parameter update.
+- **Behavioral angle:** Be ready to discuss a specific case where a misconfigured userdata script caused nodes to register but fail kubelet TLS bootstrap, and how you used `cloud-init` logs via SSM Session Manager to diagnose it without SSH access.
+
+---
+
+### Q: How do you design an EKS strategy for batch and queue-driven workloads — such as data-processing pipelines — and what are the trade-offs between Kubernetes Jobs, Kueue, and purpose-built AWS services like AWS Batch?
+
+**Key points an interviewer wants to hear:**
+
+- **Kubernetes Jobs + Karpenter** suit teams that need tight Kubernetes-native integration (shared RBAC, namespaces, IRSA, pod-level observability) and tolerate some framework overhead; Karpenter's `consolidationPolicy` and `expireAfter` handle ephemeral node lifecycle cleanly.
+- **Kueue** adds gang-scheduling, quota management, and workload priority across namespaces — essential when multiple teams compete for GPU/CPU burst capacity; it integrates with JobSet for distributed training without a separate scheduler.
+- **AWS Batch with EKS compute environments** offloads job queue management, fair-share scheduling, and array job orchestration to the managed service while still running containers on EKS nodes; best when the organisation already owns Batch expertise or needs cost-allocation reporting per job queue.
+- Key trade-off: AWS Batch abstracts retry logic and dependency graphs (via Step Functions integration) but couples you to AWS APIs and limits pod-level Kubernetes scheduling flexibility (affinity, topology spread).
+- For **high-throughput, short-duration jobs** (seconds to minutes), Kubernetes Job overhead (API server write amplification, etcd pressure) becomes significant; consider chunking via indexed Jobs and setting conservative `ttlSecondsAfterFinished` to reduce object churn.
+- Pair any batch strategy with **Spot Instances for cost** but design jobs to be **checkpointable** (S3 or EFS intermediate state) and use `terminationGracePeriodSeconds` with SIGTERM handlers to flush in-flight work before Spot reclamation.
+- **Observability:** emit custom CloudWatch or Prometheus metrics on queue depth, job age, and failure rate; set HPA on the job-dispatch component if using a work-queue pattern (e.g., SQS-triggered consumers).
+
+---
+
+### Q: A security team reports that a compromised pod in your EKS cluster has attempted a lateral movement attack by querying the EC2 Instance Metadata Service (IMDS) to harvest node IAM credentials. How do you contain the incident and harden the cluster long-term?
+
+**Immediate containment:**
+
+1. **Isolate the pod** — apply a `NetworkPolicy` denying all egress/ingress and, if needed, cordon and drain the node to prevent scheduling new workloads there; preserve the node for forensics before terminating.
+2. **Revoke / rotate** the node's IAM instance profile credentials via IAM's `deny` condition on `aws:TokenIssueTime`; invalidate any IMDS-derived STS tokens by attaching an explicit Deny policy scoped to the node role.
+3. Capture pod filesystem snapshot, memory dump (via `kubectl exec` or Falco-triggered Lambda), and CloudTrail events in the blast-radius window.
+
+**Root-cause & hardening:**
+
+- The fundamental exposure is that **IMDSv1 was enabled** or **hop-limit was ≥ 2**, allowing containers to reach `169.254.169.254`. Enforce **IMDSv2-only with hop-limit = 1** in all launch templates so container-originated IMDS calls are dropped at the hypervisor.
+- Implement **IRSA / EKS Pod Identity** for all workloads so pods never need node-level credentials; audit via AWS Config rule `ec2-instance-profile-attached` and a custom rule checking that no pod mounts the default service account with `automountServiceAccountToken: true` unnecessarily.
+- Deploy **Falco** with the `aws_metadata_service_access` rule to alert in real time when any process inside a container queries the IMDS endpoint.
+- Enforce **restricted Pod Security Standards** (no `hostNetwork`, no privileged containers) and **OPA/Kyverno policies** blocking `hostPID` and `hostIPC`, which are common pivot points post-IMDS compromise.
+- Review **VPC security groups** on nodes — outbound to `169.254.169.254` should be restricted, and consider a VPC endpoint for SSM/S3 to eliminate internet egress paths the attacker might exploit.
+
+---
+
+### Q: How do you design an EKS platform for regulated financial services workloads that must comply with PCI-DSS and achieve sub-100 ms p99 latency SLAs simultaneously — and where do compliance and performance requirements conflict?
+
+**Architecture pillars:**
+
+- **Network segmentation:** Run the cardholder data environment (CDE) workloads in **dedicated node groups within private subnets**, separated from non-CDE workloads by distinct VPCs and AWS Network Firewall; use VPC endpoints for all AWS service communication to eliminate internet traversal.
+- **Encryption in transit:** Enforce mTLS via a service mesh (Istio/App Mesh) for all east-west traffic — PCI DSS Req 4 demands encryption of CHD in transit, but mTLS sidecar overhead adds **1–5 ms per hop**; mitigate by tuning Envoy connection pools, enabling HTTP/2 multiplexing, and co-locating tightly coupled services via pod topology spread within the same AZ.
+- **Encryption at rest:** Use **EBS volumes with CMK-backed KMS encryption** for any persistent CHD; the per-I/O KMS call adds latency — offset by enabling **KMS request caching** in the CSI driver and choosing `io2 Block Express` volumes for consistent sub-1 ms storage latency.
+- **Logging and audit:** PCI requires tamper-evident audit logs (Req 10); stream all pod logs and Kubernetes audit logs to **CloudWatch Logs with S3 Object Lock (WORM)** — but high-volume log shipping can saturate the node's network interface; use **Fluent Bit with async buffering and back-pressure** to isolate logging I/O from application traffic.
+- **Conflict: least-privilege vs. automation speed.** PCI change control (Req 6) demands peer review and approval workflows that can slow deployment pipelines; resolve by implementing **GitOps with required PR approvals** and automated compliance gates (OPA Conftest in CI) so policy checks are fast and human review is scoped to risk-tiered changes only.
