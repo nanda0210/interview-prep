@@ -145,3 +145,15 @@ _Committed & pushed: yes_
 - How do you design an EKS platform for regulated financial services workloads that must comply with PCI-DSS and achieve sub-100 ms p99 latency SLAs simultaneously — and where do compliance and performance requirements conflict?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-09 18:17:56
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7081 chars)
+- How do you design an EKS cluster observability strategy for cost attribution and chargeback across multiple teams sharing a cluster?
+- A critical EKS workload shows correct pod logs but customers report partial request failures that never appear in application traces. How do you diagnose and resolve gaps in your distributed tracing pipeline?
+- How do you design an EKS platform to support safe, progressive multi-cluster canary releases where traffic is shifted across clusters rather than within a single cluster?
+- Describe a time you had to make a significant architectural decision on EKS under uncertainty, where the right answer wasn't clear. How did you frame the decision and what was the outcome?
+
+_Committed & pushed: yes_

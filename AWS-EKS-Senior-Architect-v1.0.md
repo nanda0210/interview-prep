@@ -1854,3 +1854,62 @@ Defense-in-depth for EKS network segmentation requires three complementary layer
 - **Encryption at rest:** Use **EBS volumes with CMK-backed KMS encryption** for any persistent CHD; the per-I/O KMS call adds latency — offset by enabling **KMS request caching** in the CSI driver and choosing `io2 Block Express` volumes for consistent sub-1 ms storage latency.
 - **Logging and audit:** PCI requires tamper-evident audit logs (Req 10); stream all pod logs and Kubernetes audit logs to **CloudWatch Logs with S3 Object Lock (WORM)** — but high-volume log shipping can saturate the node's network interface; use **Fluent Bit with async buffering and back-pressure** to isolate logging I/O from application traffic.
 - **Conflict: least-privilege vs. automation speed.** PCI change control (Req 6) demands peer review and approval workflows that can slow deployment pipelines; resolve by implementing **GitOps with required PR approvals** and automated compliance gates (OPA Conftest in CI) so policy checks are fast and human review is scoped to risk-tiered changes only.
+
+
+---
+
+## 🗓️ Added 2026-09-09 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-09 18:17 -->
+
+### Q: How do you design an EKS cluster observability strategy for cost attribution and chargeback across multiple teams sharing a cluster?
+
+**Key points an interviewer wants to hear:**
+
+- **Label discipline is foundational**: enforce namespace-level and pod-level labels (`team`, `cost-center`, `environment`) via admission webhooks (OPA/Gatekeeper or Kyverno) so every resource is attributable before it lands in the cluster.
+- **Metrics pipeline**: deploy Kubecost or OpenCost alongside Prometheus; both ingest node pricing from AWS Cost and Usage Reports (CUR) and apply proportional allocation based on CPU/memory requests vs. actual usage, with idle cost distribution configured per policy (shared equally, proportional, or charged to a "platform" cost center).
+- **Spot and Savings Plan amortisation**: normalise EC2 pricing in the tool so Spot savings are not silently absorbed by the platform team—map instance lifecycle to pod scheduling events.
+- **Network egress attribution**: tag VPC flow logs with pod metadata using the AWS VPC CNI's ENI-tagging feature and correlate with CUR line items; egress is often the largest surprise cost.
+- **Showback vs. chargeback**: start with showback dashboards (Grafana + Kubecost API) shared with teams weekly; move to chargeback only after label hygiene is consistently above ~95% coverage, otherwise teams dispute numbers and trust collapses.
+- **Storage and data-transfer costs**: surface EBS/EFS PVC costs by cross-referencing PersistentVolume names with AWS volume IDs in CUR; often missed in Kubernetes-only tooling.
+- **Governance**: publish allocation policies in your platform runbook, review monthly with team leads, and feed anomalies back into capacity planning.
+
+---
+
+### Q: A critical EKS workload shows correct pod logs but customers report partial request failures that never appear in application traces. How do you diagnose and resolve gaps in your distributed tracing pipeline?
+
+**Key diagnostic steps:**
+
+1. **Sampling rate audit**: check whether the tracing SDK (X-Ray, OTEL Collector) is configured with a sampling rate that drops spans before they reach the backend—partial failures at low RPS are often silently discarded by head-based sampling.
+2. **Collector pipeline health**: inspect OTEL Collector `receivers`, `processors`, and `exporters` metrics (`otelcol_exporter_send_failed_spans`); a misconfigured batch processor or queue overflow will silently drop spans without pod-level errors.
+3. **Context propagation gaps**: verify W3C TraceContext or B3 headers are propagated across *every* hop—ALB, service mesh sidecars, async SQS consumers, and Lambda invocations all commonly break trace context; use `X-Amzn-Trace-Id` passthrough on ALB and confirm the SDK reads it.
+4. **Sidecar resource starvation**: if using a sidecar collector pattern, check that the sidecar container has sufficient CPU/memory limits; under load it can queue-drop spans while the main container appears healthy.
+5. **Clock skew**: nodes with significant NTP drift cause spans to appear out-of-order or be rejected by the backend's time-window validation; confirm `chrony` is running on nodes and check CloudWatch `NTPSkew` metric.
+6. **Resolution**: implement tail-based sampling for error traces to guarantee 100% capture of failed requests regardless of overall sample rate; add collector self-observability dashboards and alert on `drop_rate > 0`.
+
+---
+
+### Q: How do you design an EKS platform to support safe, progressive multi-cluster canary releases where traffic is shifted across clusters rather than within a single cluster?
+
+**Architecture and trade-offs:**
+
+- **Global load balancing layer**: use Route 53 weighted routing or AWS Global Accelerator endpoint weights to split traffic between two EKS clusters (stable and canary) at the DNS/anycast layer; this avoids in-cluster traffic-splitting complexity and works for any protocol.
+- **Cluster parity guarantee**: both clusters must run identical Kubernetes versions, add-on versions, and node AMIs; a GitOps source of truth (Flux/ArgoCD with cluster-scoped ApplicationSets) ensures configuration drift doesn't confound canary signal.
+- **Observability alignment**: each cluster emits metrics with a `cluster_role=canary|stable` label; a unified Grafana dashboard overlays error rate, latency, and saturation for direct comparison—this is your promotion gate.
+- **Automated promotion/rollback**: a promotion controller (Argo Rollouts cross-cluster plugin or a custom Lambda) reads the Grafana/CloudWatch metric API, adjusts Route 53 weights incrementally (5% → 20% → 50% → 100%), and rolls back by flipping weight to 0 if the error budget burns too fast.
+- **Stateful workload challenge**: databases must be readable from both clusters simultaneously during the shift; use Aurora Global Database with read endpoints or ensure the canary cluster writes to the same primary with latency accounted for in SLO definition.
+- **Trade-off**: cross-cluster canary doubles running compute cost during the window and adds DNS TTL latency to rollback (mitigate with low TTLs and Global Accelerator's near-instant weight propagation); it is most justified for high-blast-radius changes like runtime or CNI upgrades.
+- **Cleanup**: automate decommission of the canary cluster post-promotion via Terraform pipelines to avoid zombie clusters accumulating cost.
+
+---
+
+### Q: Describe a time you had to make a significant architectural decision on EKS under uncertainty, where the right answer wasn't clear. How did you frame the decision and what was the outcome?
+
+**What a strong answer demonstrates:**
+
+- **Structured ambiguity handling**: name a concrete decision (e.g., choosing between Karpenter in early GA vs. Cluster Autoscaler for a 500-node production fleet, or adopting EKS Pod Identity before broad tooling support existed).
+- **Decision framework**: explain how you decomposed uncertainty into *knowable now* vs. *unknowable without experimentation*—used a time-boxed spike (1–2 weeks) to validate the riskiest assumption rather than making a fully speculative choice.
+- **Stakeholder alignment**: describe how you communicated the trade-off to non-technical stakeholders using a lightweight ADR (Architecture Decision Record) with explicit reversibility cost—not just a Slack message.
+- **Outcome and learning**: be honest about partial success or unexpected complications (e.g., "Karpenter's consolidation caused a brief surge in pod evictions during a high-traffic window that we hadn't load-tested for"), and explain what observability gaps you closed as a result.
+- **Reversibility as a first-class criterion**: strong candidates mention they weighted reversibility heavily under uncertainty—choosing the option that was cheaper to undo if wrong, even if slightly less optimal if right.
+- **Red flags to avoid**: claiming certainty you didn't have, not mentioning how you validated the decision, or describing a purely solo decision without cross-functional input.
