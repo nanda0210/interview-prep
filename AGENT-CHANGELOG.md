@@ -157,3 +157,15 @@ _Committed & pushed: yes_
 - Describe a time you had to make a significant architectural decision on EKS under uncertainty, where the right answer wasn't clear. How did you frame the decision and what was the outcome?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-10 18:04:15
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7796 chars)
+- How do you design an EKS strategy for Windows node workloads running alongside Linux nodes, and what are the key operational constraints?
+- A team's EKS workload passes all load tests in staging but suffers from severe thundering-herd startup failures in production during a cold deployment. How do you diagnose and remediate this?
+- How do you design an EKS cluster topology and scheduling strategy to support strict data-residency requirements where certain workloads must never leave a specific AWS Availability Zone?
+- Describe how you would design an EKS-based platform to support secure, isolated development environments (per-developer or per-feature-branch) without runaway cost or cluster sprawl.
+
+_Committed & pushed: yes_

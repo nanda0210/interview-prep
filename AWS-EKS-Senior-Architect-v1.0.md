@@ -1913,3 +1913,93 @@ Defense-in-depth for EKS network segmentation requires three complementary layer
 - **Outcome and learning**: be honest about partial success or unexpected complications (e.g., "Karpenter's consolidation caused a brief surge in pod evictions during a high-traffic window that we hadn't load-tested for"), and explain what observability gaps you closed as a result.
 - **Reversibility as a first-class criterion**: strong candidates mention they weighted reversibility heavily under uncertainty—choosing the option that was cheaper to undo if wrong, even if slightly less optimal if right.
 - **Red flags to avoid**: claiming certainty you didn't have, not mentioning how you validated the decision, or describing a purely solo decision without cross-functional input.
+
+
+---
+
+## 🗓️ Added 2026-09-10 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-10 18:04 -->
+
+### Q: How do you design an EKS strategy for Windows node workloads running alongside Linux nodes, and what are the key operational constraints?
+
+**Model Answer:**
+
+EKS supports Windows nodes via managed node groups running Windows Server Core AMIs, but they introduce meaningful constraints that must be planned for deliberately.
+
+Key design points:
+- **Node isolation**: Windows nodes cannot run Linux system pods (CoreDNS, aws-node, kube-proxy variants differ), so you must taint Windows nodes (e.g., `os=windows:NoSchedule`) and use `nodeSelector`/tolerations to prevent Linux workloads landing on them. A Linux node group must always co-exist to host cluster-critical DaemonSets.
+- **CNI limitations**: The Amazon VPC CNI on Windows does not support all features available on Linux — notably, Network Policy enforcement requires a separate solution (e.g., Calico for Windows or NPN). IPv6 is unsupported on Windows nodes as of recent releases.
+- **AMI patching cadence**: Windows AMIs are significantly larger and patch cycles are longer. Use SSM Patch Manager or bake custom AMIs with EC2 Image Builder; node recycling windows must account for longer drain times due to Windows graceful shutdown behaviour.
+- **Licensing and cost**: Windows nodes carry an additional OS licensing surcharge on EC2. Right-size carefully and favour Savings Plans over Spot (Spot interruption handling on Windows is less mature).
+- **Image pull latency**: Windows container base images are large (2–6 GB). Pre-pull images on node startup using a DaemonSet or bake them into the AMI to avoid cold-start latency impacting pod scheduling SLAs.
+- **Monitoring**: CloudWatch Container Insights has partial Windows support; supplement with Prometheus windows-exporter for node-level metrics.
+
+The honest architectural recommendation is to minimise Windows node usage, containerising only workloads that genuinely cannot be ported, and to treat the Windows node pool as a secondary fleet with its own lifecycle policy.
+
+---
+
+### Q: A team's EKS workload passes all load tests in staging but suffers from severe thundering-herd startup failures in production during a cold deployment. How do you diagnose and remediate this?
+
+**Model Answer:**
+
+Thundering-herd on cold deployment typically manifests as a burst of pods starting simultaneously, overwhelming a downstream dependency (database, cache, external API, or the Kubernetes API itself), causing cascading failures that look like an application bug.
+
+**Diagnosis steps:**
+1. Correlate pod `startedAt` timestamps with downstream error spikes — if all pods become ready within a 5-second window and errors begin immediately, the pattern is clear.
+2. Check if connection pool exhaustion is occurring at the database layer (RDS `DatabaseConnections` CloudWatch metric, `max_connections` on Aurora).
+3. Review application startup code for synchronous cache warm-up or schema migration calls executed by every replica simultaneously.
+4. Check HPA/Karpenter scaling events — a sudden scale-out after a deployment can compound the effect.
+
+**Remediation:**
+- **Stagger pod startup**: Use `minReadySeconds` on the Deployment to slow rolling updates, or reduce `maxSurge` to limit simultaneous new pods.
+- **Add jitter in application startup**: Introduce a randomised sleep (50–500 ms) before the application opens connections or warms caches.
+- **Decouple schema migrations**: Run migrations as a pre-upgrade Helm hook Job, not at application startup.
+- **Connection pooling proxy**: Front RDS with RDS Proxy to absorb connection burst without hitting `max_connections`.
+- **Rate-limit readiness**: Use a custom readiness probe with back-off so pods don't all become Ready (and start receiving traffic) at the identical instant.
+- **Staging parity**: Replicate production replica counts and downstream connection limits in staging to expose the pattern before promotion.
+
+---
+
+### Q: How do you design an EKS cluster topology and scheduling strategy to support strict data-residency requirements where certain workloads must never leave a specific AWS Availability Zone?
+
+**Model Answer:**
+
+Data-residency at the AZ level (rather than region level) is an unusual but real requirement, typically driven by latency guarantees for local data stores or regulatory interpretations of "zone" as a physical boundary.
+
+**Topology design:**
+- Create **per-AZ node groups** with explicit AZ labels (e.g., `topology.kubernetes.io/zone=eu-west-1a`) and taint them so only intentional workloads schedule there (e.g., `az-pinned=eu-west-1a:NoSchedule`).
+- Use `nodeAffinity` with `requiredDuringSchedulingIgnoredDuringExecution` — not `preferred` — to make AZ pinning a hard constraint, not a hint.
+- Set `topologySpreadConstraints` with `whenUnsatisfiable: DoNotSchedule` scoped to the target zone to prevent the scheduler from spreading replicas across zones.
+
+**Storage**: Ensure PVCs use `WaitForFirstConsumer` binding mode so the EBS volume is provisioned in the same AZ as the pod; use a StorageClass with `allowedTopologies` restricted to that AZ.
+
+**Networking**: If the workload communicates with a zonal Aurora replica or ElastiCache node, configure the Service's `topologyKeys` or use AWS Local Zones / Outposts if the requirement extends beyond AZ to physical location.
+
+**Operational risks to communicate**:
+- Single-AZ designs sacrifice Kubernetes' default HA model; an AZ outage takes down the pinned workload entirely.
+- Cluster Autoscaler and Karpenter must be configured with matching AZ constraints to avoid provisioning replacement capacity in the wrong zone.
+- Document the business justification and accept the availability trade-off explicitly in an Architecture Decision Record.
+
+---
+
+### Q: Describe how you would design an EKS-based platform to support secure, isolated development environments (per-developer or per-feature-branch) without runaway cost or cluster sprawl.
+
+**Model Answer:**
+
+Per-developer or per-branch environments ("preview environments") on EKS require balancing isolation, speed, and cost — getting any one wrong makes the platform unusable or unaffordable.
+
+**Namespace-per-environment model (preferred for most cases):**
+- Provision a dedicated namespace per branch/developer using a GitOps controller (Argo CD `ApplicationSet` with a `git` generator keyed on branch name or PR number).
+- Apply `ResourceQuota` and `LimitRange` per namespace to cap CPU/memory; use Karpenter with node consolidation enabled so idle environments don't hold warm nodes.
+- Use `NetworkPolicy` to enforce namespace isolation — environments should not communicate laterally.
+- Inject environment-specific config via Helm values or Kustomize overlays parameterised on branch name.
+
+**Cost controls:**
+- Schedule a CronJob or use a Kubernetes operator (e.g., `kube-janitor`) to delete namespaces after a TTL (e.g., 48 hours of inactivity) or on PR close via a CI webhook.
+- Use Spot instances for the dev-environment node pool; dev workloads tolerate interruption.
+- Share cluster-level services (ingress controller, observability stack, image pull cache) across all environments rather than replicating per namespace.
+
+**Isolation trade-offs**: Namespace isolation is logical, not hard; for stricter isolation (e.g., if environments run customer data in testing), consider vcluster (virtual clusters) to provide API server-level isolation within a single physical cluster, at the cost of slightly higher resource overhead and operational complexity.
+
+**Ingress**: Use wildcard DNS (`*.dev.internal.example.com`) with a single ALB and host-based routing rules auto-generated per environment, so each branch gets a unique URL without provisioning new load balancers.
