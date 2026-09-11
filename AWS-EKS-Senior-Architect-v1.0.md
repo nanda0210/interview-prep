@@ -2003,3 +2003,71 @@ Per-developer or per-branch environments ("preview environments") on EKS require
 **Isolation trade-offs**: Namespace isolation is logical, not hard; for stricter isolation (e.g., if environments run customer data in testing), consider vcluster (virtual clusters) to provide API server-level isolation within a single physical cluster, at the cost of slightly higher resource overhead and operational complexity.
 
 **Ingress**: Use wildcard DNS (`*.dev.internal.example.com`) with a single ALB and host-based routing rules auto-generated per environment, so each branch gets a unique URL without provisioning new load balancers.
+
+
+---
+
+## 🗓️ Added 2026-09-11 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-11 18:09 -->
+
+### Q: How do you design an EKS cluster strategy for extremely latency-sensitive workloads — such as high-frequency trading or real-time bidding — where microsecond-level jitter is unacceptable?
+
+**Model Answer:**
+
+- **Node placement**: Use dedicated tenancy EC2 instances (`--instance-tenancy dedicated`) or bare-metal instance types (e.g., `c6i.metal`) to eliminate noisy-neighbour effects; pin workloads to specific AZs to avoid cross-AZ latency.
+- **CPU isolation**: Use `static` CPU Manager policy and Guaranteed QoS pods (matching `requests == limits`) so the kubelet pins threads to dedicated physical cores; disable CPU throttling via cgroup v2 tuning.
+- **NUMA awareness**: Enable Topology Manager (`best-effort` or `restricted` policy) alongside Memory Manager so the kernel scheduler respects NUMA locality for both CPU and memory.
+- **Kernel and OS tuning**: Use a custom AMI (via Bottlerocket or Ubuntu with PREEMPT_RT patch) with tuned IRQ affinity, disabled transparent huge pages, and SR-IOV / ENA Express enabled for sub-100 µs NIC latency.
+- **Networking**: Place producer and consumer pods in the same placement group (cluster placement group) to minimise intra-rack hops; use host networking (`hostNetwork: true`) to bypass the CNI overlay stack where latency budgets demand it.
+- **Scheduler hints**: Use `podAffinity` with `topologyKey: kubernetes.io/hostname` to co-locate communicating pods; set `priorityClass` to guarantee eviction order under pressure.
+- **Observability**: Instrument with eBPF-based tools (e.g., Cilium Hubble, `bpftrace`) for nanosecond-resolution latency histograms rather than application-level metrics that add overhead.
+- **Trade-off**: These optimisations reduce scheduling flexibility and increase cost significantly; validate with production-representative load before committing to the architecture.
+
+---
+
+### Q: A cluster operator reports that Karpenter is repeatedly launching and terminating nodes in a tight loop — "thrashing" — causing instability and elevated AWS costs. How do you diagnose and resolve this?
+
+**Model Answer:**
+
+Karpenter thrashing typically results from a mismatch between provisioned node capacity and workload consolidation or disruption settings. Systematic approach:
+
+1. **Check disruption budget and consolidation config**: Review `NodePool` `disruption.consolidationPolicy` and `consolidateAfter` — overly aggressive consolidation (e.g., `consolidateAfter: 0s`) causes Karpenter to remove nodes before pods fully migrate, triggering re-provisioning.
+2. **Inspect node TTL vs. pod startup time**: If `expireAfter` is shorter than application startup + readiness probe time, nodes expire before workloads stabilise, causing a perpetual cycle.
+3. **Look for anti-affinity/topology conflicts**: Pods with `podAntiAffinity` requiring unique nodes may prevent bin-packing; Karpenter terminates under-utilised nodes but the displaced pods immediately force new single-pod nodes.
+4. **Review NodePool label/taint drift**: If a `NodePool` selector changed mid-flight, existing nodes no longer match and Karpenter decommissions them while simultaneously provisioning replacements — ensure label changes are batched.
+5. **Check Spot interruption handling**: Rapid Spot interruptions (via EC2 Instance Rebalance or ITN) paired with narrow instance-type diversification triggers constant replacement; widen `instanceFamily` or add On-Demand fallback.
+6. **Remediation**: Set `disruption.budgets` with a `maxUnavailable` cap, tune `consolidateAfter` to `≥ 1m`, and enable `do-not-disrupt` annotations on stateful or slow-starting pods during diagnosis.
+7. **Metrics to watch**: `karpenter_nodes_terminated_total`, `karpenter_nodes_created_total`, and CloudWatch EC2 `RunInstances`/`TerminateInstances` API call rates are the fastest indicators.
+
+---
+
+### Q: How do you design an EKS platform to support safe, zero-downtime schema migrations for stateful services that use relational databases, where both old and new pod versions coexist during a rolling deployment?
+
+**Model Answer:**
+
+This is a classic **expand/contract** (a.k.a. parallel-change) pattern problem applied to Kubernetes rolling deployments:
+
+- **Expand phase**: Write migrations that are *backward-compatible* — add nullable columns, new tables, or indexes without dropping or renaming existing ones. The old pod version continues to function against the migrated schema.
+- **Migration job gating**: Use a Kubernetes `Job` or an init container in the new `Deployment` that runs `alembic upgrade head` / `flyway migrate` *before* new pods become ready. Gate with a `preStop` hook on old pods only after the job succeeds, preventing simultaneous migration runs. Use a distributed lock (e.g., via Postgres advisory lock) to serialise multi-pod job execution.
+- **Deployment strategy**: Configure `maxSurge: 1, maxUnavailable: 0` to ensure old pods only terminate after new pods pass readiness probes, guaranteeing overlap exists only during the transition window.
+- **Contract phase**: In a *subsequent* deployment (decoupled release), remove deprecated columns or rename once all old pod instances are gone — never in the same release.
+- **Feature flags**: Wrap application code that references new schema objects in feature flags so both versions can be deployed from a single artefact; avoids branching deployment pipelines.
+- **Rollback design**: Migrations must be *reversible* (down migrations) or the rollback strategy must be data-loss-free (e.g., re-adding a dropped column as nullable). Document rollback SLOs explicitly.
+- **EKS-specific tooling**: Use Argo Rollouts `prePromotionAnalysis` to run schema validation smoke tests before promoting the stable ReplicaSet, automatically aborting if validation fails.
+
+---
+
+### Q: Describe how you would design an EKS platform governance model — including policy guardrails, admission controls, and audit mechanisms — for a large enterprise with hundreds of development teams operating under a hub-and-spoke cluster topology.
+
+**Model Answer:**
+
+Governance at enterprise scale requires layered, automated controls rather than manual review:
+
+- **Policy-as-code via OPA/Gatekeeper or Kyverno**: Define a central `ConstraintTemplate` library (stored in a governed Git repo) covering mandatory labels, image registry allowlists, resource request/limit requirements, and prohibited capabilities. Sync to all spoke clusters via GitOps (Flux or ArgoCD App-of-Apps). Kyverno is preferred for teams that find Rego opaque — it uses Kubernetes-native YAML policies.
+- **Admission webhook tiering**: Separate policies into `deny` (hard guardrails — e.g., no `privileged: true`, no `latest` tags), `warn` (advisory — e.g., missing liveness probes), and `audit` (logging-only for new policy rollout). This prevents policy changes from causing sudden breakages.
+- **Namespace-scoped delegation**: Hub cluster hosts a `PlatformTeam` namespace with cluster-scoped resources; spoke namespaces are owned by dev teams. Use `HierarchicalNamespaceController` (HNC) or Capsule/vCluster for safe namespace-level tenancy boundaries so platform team policies propagate automatically to child namespaces.
+- **Audit and compliance reporting**: Enable EKS API server audit logs to CloudWatch Logs with a structured query layer (Athena or OpenSearch); build weekly compliance dashboards from `kubectl get constraint -o json` policy violation counts. Export to a centralised SIEM for SOC visibility.
+- **Change management for guardrails**: Policy changes go through a PR process with mandatory review by a Platform Architecture Board; new `deny` policies are deployed in `warn` mode for a 30-day soak period, with violation counts tracked and communicated to teams before enforcement.
+- **Developer self-service**: Publish a developer portal (Backstage) with policy documentation, a policy simulator (OPA Playground integrated with the live `ConstraintTemplate` library), and a `ValidatingAdmissionPolicy` dry-run CLI tool so teams can validate manifests locally before CI.
+- **Escape-hatch process**: Define a formal exception workflow (ticketed, time-bounded, CISO-approved
