@@ -2071,3 +2071,93 @@ Governance at enterprise scale requires layered, automated controls rather than 
 - **Change management for guardrails**: Policy changes go through a PR process with mandatory review by a Platform Architecture Board; new `deny` policies are deployed in `warn` mode for a 30-day soak period, with violation counts tracked and communicated to teams before enforcement.
 - **Developer self-service**: Publish a developer portal (Backstage) with policy documentation, a policy simulator (OPA Playground integrated with the live `ConstraintTemplate` library), and a `ValidatingAdmissionPolicy` dry-run CLI tool so teams can validate manifests locally before CI.
 - **Escape-hatch process**: Define a formal exception workflow (ticketed, time-bounded, CISO-approved
+
+
+---
+
+## 🗓️ Added 2026-09-12 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-12 17:41 -->
+
+### Q: How do you design an EKS strategy for graceful pod disruption during node maintenance, and what are the common failure modes that cause SLA breaches?
+
+**Model Answer:**
+
+Graceful disruption depends on the correct interplay of several Kubernetes primitives working together:
+
+- **PodDisruptionBudgets (PDBs):** Define `minAvailable` or `maxUnavailable` so the eviction API blocks unsafe drains; a common mistake is setting `maxUnavailable: 0` on every deployment, which deadlocks rolling node replacements entirely.
+- **Termination grace period:** Set `terminationGracePeriodSeconds` to reflect actual shutdown time — not the default 30 s. Applications must trap SIGTERM and drain in-flight requests; missing this causes 502s during Kubernetes-initiated evictions.
+- **`preStop` hooks:** Add a short sleep (`preStop: exec sleep 5`) to absorb the lag between pod removal from endpoints and load-balancer deregistration propagating through kube-proxy or AWS Target Groups — this is the single most common source of brief 502 spikes during drains.
+- **Node drain ordering with Karpenter/CA:** Karpenter respects PDBs during voluntary disruption via the `Disruption` budget API; CA uses the eviction API. Validate both paths in staging with chaos tooling (e.g., `karpenter.sh/do-not-disrupt` annotation tests).
+- **Common failure modes:** PDB misconfiguration blocking drains indefinitely; `minReadySeconds` not set, causing premature traffic routing to cold pods; ALB target deregistration delay not matching `terminationGracePeriodSeconds`; and missing `topology.kubernetes.io/zone` spread constraints causing all replicas to be co-located and simultaneously evicted.
+- **Operational hygiene:** Automate drain validation in CI by running `kubectl drain --dry-run` against staging clusters; alert on stuck PDB-blocked drains exceeding a threshold.
+
+---
+
+### Q: A multi-tenant EKS cluster starts hitting the 110-pod-per-node limit on several nodes, causing scheduling failures. How do you systematically address this without emergency cluster expansion?
+
+**Model Answer:**
+
+The 110-pod limit is a hard kernel/kubelet constraint (also constrained by ENI secondary IP capacity on VPC CNI), so the fix has both immediate and architectural layers:
+
+**Immediate triage:**
+- Run `kubectl describe nodes | grep -A5 "Allocatable"` and cross-reference pod counts per node with `kubectl get pods -A -o wide | awk '{print $8}' | sort | uniq -c | sort -rn`.
+- Identify daemon-set overhead — every DaemonSet pod counts against the limit; audit and remove unnecessary DaemonSets (logging agents, monitoring collectors that can be consolidated).
+
+**Short-term mitigations:**
+- Increase `max-pods` per node by switching to **prefix delegation** on VPC CNI (`ENABLE_PREFIX_DELEGATION=true`), which dramatically increases available IP slots per ENI and allows raising `max-pods` to 250+ on nitro instances — no cluster expansion needed.
+- Move batch or burst workloads to Fargate or dedicated Karpenter node pools with smaller instance types (more nodes, same total capacity, higher aggregate pod ceiling).
+
+**Architectural remediation:**
+- Right-size requests so the scheduler prefers fewer, larger nodes for compute-heavy pods and reserves pod-dense nodes for lightweight services.
+- Introduce **Karpenter NodePool constraints** that select instance families with higher ENI/IP density (e.g., `m5.4xlarge` vs `m5.large`) for namespaces expected to run many small pods.
+- Establish a platform policy: pod-per-node utilisation is a tracked capacity metric surfaced via observability dashboards, with alerts at 80% of the limit.
+
+---
+
+### Q: How do you design an EKS strategy for handling API deprecations across Kubernetes minor-version upgrades, and what governance mechanisms prevent deprecated APIs from blocking future upgrades?
+
+**Model Answer:**
+
+API deprecations are one of the leading causes of upgrade freezes in mature EKS fleets. A structured strategy has three layers:
+
+**Detection:**
+- Deploy **Pluto** (Fairwinds) or **kubent** as a CI gate that scans all Helm charts, raw manifests, and in-cluster live objects against the target Kubernetes version's removed-API list. Fail PRs that introduce deprecated API versions.
+- Enable **API server audit logs** with a filter for `k8s.io/deprecated=true` to surface in-cluster usage of deprecated APIs by controllers, operators, and CRDs — things CI scanning misses.
+
+**Remediation workflow:**
+- Maintain a deprecation backlog tracked per-team in the platform team's JIRA/Linear board, auto-populated from Pluto scan results in each namespace.
+- Use `kubectl convert` (or Helm `--api-versions` override) to migrate manifests; for third-party operators, track upstream release timelines and pin to versions that support the target API group.
+
+**Governance:**
+- Enforce via OPA/Gatekeeper: a policy that rejects `CREATE`/`UPDATE` of resources using removed API versions in the target minor version — applied to staging clusters first as a dry-run gate.
+- Adopt a **version-skew window policy**: no workload team may be more than one minor version behind the cluster's Kubernetes version. This prevents the anti-pattern of skipping upgrades until APIs are hard-removed.
+- Run a "shadow upgrade" canary cluster (same workloads, next K8s version) continuously; diff its API audit logs against production to surface surprises before the upgrade window.
+
+**Operational tip:** EKS will block control-plane upgrades if deprecated APIs in the removed list are still in active use — treat the AWS pre-upgrade check as a lagging indicator, not the primary gate.
+
+---
+
+### Q: Describe how you would design an EKS-based platform to support a SaaS product where each customer requires a dedicated, isolated Kubernetes namespace with guaranteed resource quotas — and the customer count is expected to grow from 50 to 5,000 over 18 months.
+
+**Model Answer:**
+
+This is a namespace-per-tenant soft-multitenancy problem that hits scaling limits in both the Kubernetes control plane and the operational model well before 5,000 tenants:
+
+**Namespace provisioning automation:**
+- Build a **Tenant Controller** (CRD + controller pattern, implemented with controller-runtime) that reconciles a `Tenant` custom resource into: a namespace, `ResourceQuota`, `LimitRange`, `NetworkPolicy` (default-deny + allow-ingress-from-gateway), RBAC RoleBindings, and an IRSA-linked service account — all idempotent and GitOps-managed via Flux/ArgoCD App-of-Apps.
+- Use **Helm library charts** or **Crossplane Compositions** for the tenant template to ensure consistency and allow policy updates to propagate across all tenants via a single chart version bump.
+
+**Control-plane scaling considerations:**
+- etcd key count and API server watch fan-out grow linearly with namespace count. At 5,000 namespaces, benchmark etcd performance; AWS-managed EKS etcd is opaque, so track API server latency (`apiserver_request_duration_seconds`) as a proxy.
+- Consider a **cluster-per-tier model**: a fleet of clusters segmented by customer tier (free, professional, enterprise), with Karpenter handling compute elasticity within each. This bounds blast radius and etcd load per cluster.
+- Use **ACM + Route53 + wildcard ALB** for tenant URL routing; avoid per-tenant load balancers (AWS account limits).
+
+**Resource isolation:**
+- `ResourceQuota` + `LimitRange` provide soft compute isolation. For noisy-neighbour CPU, evaluate **CPU Manager** policy (`static`) on dedicated node pools for premium tiers.
+- `NetworkPolicy` enforces namespace egress/ingress isolation; pair with Cilium for identity-aware enforcement and observability.
+
+**Operational at scale:**
+- Automate tenant lifecycle (create, suspend, delete) with a reconciliation loop that handles partial failure gracefully (idempotent steps, status conditions on the CRD).
+- Alert on `ResourceQuota` utilisation >85% per tenant namespace to trigger proactive upsell or quota expansion workflows — surface this via a per-tenant observability dashboard backed by label-scoped Prometheus recording rules.
+- At 5,000 tenants, label cardinality
