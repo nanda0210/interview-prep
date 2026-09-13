@@ -193,3 +193,15 @@ _Committed & pushed: yes_
 - Describe how you would design an EKS-based platform to support a SaaS product where each customer requires a dedicated, isolated Kubernetes namespace with guaranteed resource quotas — and the customer count is expected to grow from 50 to 5,000 over 18 months.
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-13 17:54:43
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (5994 chars)
+- How do you design an EKS strategy for handling control-plane audit log volume at scale without incurring runaway CloudWatch costs?
+- How do you design an EKS platform to enforce and validate resource quotas and admission policies as a hard multi-team governance boundary, and what breaks when you get it wrong?
+- A blue/green cluster migration on EKS (moving workloads from an old cluster to a new one) is running weeks behind schedule and causing escalating risk. How do you diagnose the bottleneck and recover the programme?
+- How do you design an EKS strategy for running and securing AI/LLM inference workloads that have large model artefacts, long startup times, and unpredictable per-request latency profiles?
+
+_Committed & pushed: yes_

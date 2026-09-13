@@ -2161,3 +2161,32 @@ This is a namespace-per-tenant soft-multitenancy problem that hits scaling limit
 - Automate tenant lifecycle (create, suspend, delete) with a reconciliation loop that handles partial failure gracefully (idempotent steps, status conditions on the CRD).
 - Alert on `ResourceQuota` utilisation >85% per tenant namespace to trigger proactive upsell or quota expansion workflows — surface this via a per-tenant observability dashboard backed by label-scoped Prometheus recording rules.
 - At 5,000 tenants, label cardinality
+
+
+---
+
+## 🗓️ Added 2026-09-13 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-13 17:54 -->
+
+### Q: How do you design an EKS strategy for handling control-plane audit log volume at scale without incurring runaway CloudWatch costs?
+
+EKS control-plane audit logs can easily generate hundreds of GB per day in large clusters, and the default CloudWatch Logs ingestion and retention pricing makes naive enablement extremely expensive. My approach layers **selective log-level configuration**, **log routing**, and **retention discipline**. First, I enable only the audit log types genuinely needed for compliance (`audit`, `authenticator`), suppressing `scheduler` and `controllerManager` verbosity unless actively debugging. Second, I use a **Fluent Bit DaemonSet or Kinesis Data Firehose subscription filter** on the CloudWatch log group to route high-volume audit events to S3 with Parquet conversion via Firehose, reserving CloudWatch retention (7–14 days) only for operational triage. For compliance queries I use **Athena** over the S3 sink. I apply CloudWatch metric filters to alarm on anomalous API call rates (e.g., `list secrets` spikes) so I don't need to retain everything hot. Finally, I set explicit `RetentionInDays` on all EKS log groups via IaC — an omission that is the single most common source of runaway bills — and enforce it with AWS Config.
+
+---
+
+### Q: How do you design an EKS platform to enforce and validate resource quotas and admission policies as a hard multi-team governance boundary, and what breaks when you get it wrong?
+
+Resource quotas alone (`LimitRange`, `ResourceQuota`) are necessary but insufficient because they don't prevent misconfigured manifests from reaching the scheduler or enforce organisational conventions. My governance stack layers three controls. **Admission webhooks** (Kyverno or OPA/Gatekeeper) enforce policies such as mandatory resource requests/limits, disallowed host-path mounts, and required label taxonomies before objects persist — any cluster without this will see quota bypass through partially-specified pods. **Namespace-scoped ResourceQuotas** set hard CPU/memory/PVC ceilings per team namespace, sized from historical VPA recommendations rather than guesswork. **LimitRanges** set default requests/limits so pods without explicit values don't schedule as burstable or BestEffort accidentally. Common failure modes: policy webhook availability — if the webhook is not configured with `failurePolicy: Fail` and has no HA replicas, a crashing webhook takes down all admission for that scope; quota sum mismatches with actual node capacity causing systemic pending; and drift when teams create resources through `kubectl` bypassing CI pipelines. I close the last gap by restricting direct `kubectl apply` to break-glass roles and enforcing GitOps as the only write path.
+
+---
+
+### Q: A blue/green cluster migration on EKS (moving workloads from an old cluster to a new one) is running weeks behind schedule and causing escalating risk. How do you diagnose the bottleneck and recover the programme?
+
+This is a classic programme failure disguised as a technical one, so I triage both dimensions simultaneously. Technically, cluster migrations stall on: **stateful workload data re-platforming** (PVC migration, replication lag, schema compatibility), **IRSA/Pod Identity role re-binding** (teams forget to update trust policies for the new OIDC issuer), **hardcoded cluster-internal DNS or endpoint references** in application config, and **admission/policy delta** between clusters causing manifest rejections on the new side. I run a **migration readiness checklist** per service: DNS portability, IAM role rebinding, external dependency allow-listing, and smoke-test coverage. To recover schedule I introduce **traffic-splitting at the load balancer layer** (weighted target groups or Route 53 weighted records) so we can migrate 5–10% of traffic per service to the new cluster incrementally rather than big-bang cutovers, decoupling migration risk from migration speed. Behaviourally, I hold a **programme retrospective mid-flight** to identify which teams are blocked on platform tooling versus their own readiness, then dedicate platform engineers as embedded migration buddies for the longest-tail teams. I also establish a hard cutover date with executive sponsorship to eliminate indefinite parallel-run cost drag.
+
+---
+
+### Q: How do you design an EKS strategy for running and securing AI/LLM inference workloads that have large model artefacts, long startup times, and unpredictable per-request latency profiles?
+
+LLM inference on EKS introduces four atypical operational challenges that standard Kubernetes patterns don't address well. **Model loading latency**: containers that take 3–10 minutes to load a multi-GB model from S3 or EFS make default readiness probe timeouts and HPA reaction times dangerous. I pre-warm nodes using Karpenter node templates that mount models at launch via an init container pulling from S3 with `s3-mountpoint` or a shared EFS access point, and I set `initialDelaySeconds` and `failureThreshold` on readiness probes conservatively. **Scaling dynamics**: token-per-second throughput saturates non-linearly, so I use **KEDA with a custom SQS queue depth or GPU utilisation scaler** rather than CPU-based HPA, which is meaningless for GPU-bound inference. **Node topology**: I pin inference pods to GPU node groups (p4d, g5, inf2) using `nodeSelector` and `tolerations`, and I use `topologySpreadConstraints` to prevent model replica concentration on a single AZ. **Security**: model artefacts are IP-sensitive assets; I enforce S3 VPC endpoints with bucket policies restricting access to the pod's IRSA role, and I use network policies to isolate inference namespaces from tenant workloads. For cost, I combine On-Demand for a guaranteed baseline (to avoid cold-start on Spot interruption during active inference) with Spot for batch/offline inference jobs, separated by priority class.
