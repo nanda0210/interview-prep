@@ -205,3 +205,15 @@ _Committed & pushed: yes_
 - How do you design an EKS strategy for running and securing AI/LLM inference workloads that have large model artefacts, long startup times, and unpredictable per-request latency profiles?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-14 19:43:52
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7006 chars)
+- How do you design an EKS strategy for handling IPv4 exhaustion in large VPCs, and what are the trade-offs between the available CIDR-extension approaches?
+- A senior engineer proposes replacing all EKS managed node groups with fully self-managed node groups to gain more control. How do you evaluate and respond to this proposal?
+- How do you design an EKS strategy for compliance-driven image scanning and runtime threat detection, and what are the gaps that each tool layer leaves?
+- Describe how you would design the EKS cluster RBAC model for a platform team that must grant developers self-service access without allowing privilege escalation.
+
+_Committed & pushed: yes_

@@ -2190,3 +2190,69 @@ This is a classic programme failure disguised as a technical one, so I triage bo
 ### Q: How do you design an EKS strategy for running and securing AI/LLM inference workloads that have large model artefacts, long startup times, and unpredictable per-request latency profiles?
 
 LLM inference on EKS introduces four atypical operational challenges that standard Kubernetes patterns don't address well. **Model loading latency**: containers that take 3–10 minutes to load a multi-GB model from S3 or EFS make default readiness probe timeouts and HPA reaction times dangerous. I pre-warm nodes using Karpenter node templates that mount models at launch via an init container pulling from S3 with `s3-mountpoint` or a shared EFS access point, and I set `initialDelaySeconds` and `failureThreshold` on readiness probes conservatively. **Scaling dynamics**: token-per-second throughput saturates non-linearly, so I use **KEDA with a custom SQS queue depth or GPU utilisation scaler** rather than CPU-based HPA, which is meaningless for GPU-bound inference. **Node topology**: I pin inference pods to GPU node groups (p4d, g5, inf2) using `nodeSelector` and `tolerations`, and I use `topologySpreadConstraints` to prevent model replica concentration on a single AZ. **Security**: model artefacts are IP-sensitive assets; I enforce S3 VPC endpoints with bucket policies restricting access to the pod's IRSA role, and I use network policies to isolate inference namespaces from tenant workloads. For cost, I combine On-Demand for a guaranteed baseline (to avoid cold-start on Spot interruption during active inference) with Spot for batch/offline inference jobs, separated by priority class.
+
+
+---
+
+## 🗓️ Added 2026-09-14 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-14 19:43 -->
+
+### Q: How do you design an EKS strategy for handling IPv4 exhaustion in large VPCs, and what are the trade-offs between the available CIDR-extension approaches?
+
+**Model Answer:**
+
+IPv4 exhaustion is a common pain point at scale. The primary mitigations on EKS are:
+
+- **VPC secondary CIDRs (RFC 1918 or 100.64.0.0/10 CG-NAT space):** Attach additional CIDRs to the VPC and create new subnets; the VPC CNI can assign pod IPs from these. CG-NAT space is popular because it doesn't conflict with corporate routing, but some enterprises block it at the transit gateway.
+- **Prefix delegation (VPC CNI ≥ 1.9):** Instead of assigning one IP per pod, assign a /28 prefix to each ENI slot, multiplying pod density per node 16×. This is the lowest-friction win — no topology changes required — but requires Nitro instance types and inflates the size of IP reservations even if pods don't use them all.
+- **Custom networking:** Separate pod and node IP spaces by routing pod traffic through secondary ENIs in different subnets. Enables using large pod subnets without touching node subnets, but adds operational complexity and disables `externalTrafficPolicy: Local` without extra care.
+- **IPv6 dual-stack:** The cleanest long-term solution; pods get globally unique IPv6 addresses so exhaustion is effectively eliminated. The trade-off is that not all third-party tooling, legacy databases, or on-premises systems are IPv6-ready.
+
+Governance: enforce subnet-size standards and prefix-delegation as defaults via a platform Helm chart and admission webhook; audit IP utilisation weekly with a Lambda querying the EC2 `DescribeSubnets` API and alert before subnets drop below a 20 % free-IP threshold.
+
+---
+
+### Q: A senior engineer proposes replacing all EKS managed node groups with fully self-managed node groups to gain more control. How do you evaluate and respond to this proposal?
+
+**Model Answer:**
+
+This is a classic control-vs-operational-burden trade-off. The key points to cover:
+
+- **What managed node groups give you:** AWS handles node group rolling upgrades, drain sequencing, ASG lifecycle hooks, and health-check integration. Critically, `eksctl upgrade nodegroup` or console-driven upgrades drain and cordon nodes safely — removing this means you own that automation entirely.
+- **Legitimate reasons to go self-managed:** Custom AMIs with kernel patches not yet in EKS-optimised AMIs, custom `kubelet` flags not exposed by managed groups, specialised instance types (e.g., Mac instances), or integration with custom launch template pipelines that conflict with managed-group constraints.
+- **Hidden costs of self-managed:** You must write and maintain your own upgrade automation (typically via rolling ASG instance refresh + lifecycle hooks), your own node registration validation, and your own health-gate logic. Incident risk increases because AWS's tested drain path is no longer your safety net.
+- **Middle path:** Karpenter replaces both approaches for most clusters — it provides fine-grained instance selection, fast scale-out, and automatic node consolidation without the node-group model at all. For stable, predictable baseline capacity Karpenter NodePools with custom `NodeClass` AMI selectors satisfy most "control" requirements.
+
+**Recommendation:** Reject broad replacement. Accept self-managed only for specific node pools where a concrete, documented capability gap exists, and require the team to own an automated upgrade runbook reviewed by the platform team before it ships to production.
+
+---
+
+### Q: How do you design an EKS strategy for compliance-driven image scanning and runtime threat detection, and what are the gaps that each tool layer leaves?
+
+**Model Answer:**
+
+A defence-in-depth model across four layers:
+
+1. **Build-time scanning (Trivy / Snyk / ECR Enhanced Scanning with Inspector):** Catches known CVEs before the image is pushed. Gap: zero-days, mis-configurations not expressed as CVEs, and packages added at runtime (e.g., `curl` downloaded inside a container entrypoint) are invisible.
+2. **Admission-time policy (Kyverno or OPA/Gatekeeper):** Blocks images not sourced from approved ECR repos, lacking a recent scan pass, or missing required labels/SBOMs. Gap: policy bypass if the admission webhook itself is unavailable (always run in `FailClosed` mode with multiple replicas) or if someone has direct `kubectl exec` access.
+3. **Runtime threat detection (Amazon GuardDuty EKS Runtime Monitoring or Falco):** Detects anomalous syscalls (e.g., unexpected shell exec, `/proc` scraping, crypto-mining patterns). GuardDuty is low-ops but has a fixed ruleset; Falco is flexible but requires rule maintenance and a daemonset that itself needs hardening.
+4. **Network-level detection (VPC Flow Logs + GuardDuty network findings + network policies):** Identifies unexpected egress or east-west communication post-compromise.
+
+**Key gaps to articulate:** No single tool closes the window between image push and admission; SBOM generation (Syft + Cosign attestation) is the bridge that lets admission policy verify supply-chain provenance rather than just a scan result. Integrate findings into a SIEM (Security Hub → EventBridge → Slack/PagerDuty) so runtime alerts have an SLA-driven response path, not just a dashboard.
+
+---
+
+### Q: Describe how you would design the EKS cluster RBAC model for a platform team that must grant developers self-service access without allowing privilege escalation.
+
+**Model Answer:**
+
+The core risk is that any subject with `create`/`update` on `ClusterRoleBinding` or `RoleBinding` in a privileged namespace can grant themselves or others higher permissions — so those verbs must be reserved for the platform team only.
+
+**Design principles:**
+
+- **Namespace-scoped RBAC only for developers:** Grant `edit` or custom `Role` objects (never `ClusterRole edit` bound at cluster scope). Developers can do everything within their namespace; nothing crosses namespace boundaries.
+- **No `bind` or `escalate` verbs for developers:** Kubernetes 1.17+ `escalate` verb prevents a user from creating a RoleBinding that grants permissions they don't already hold. Audit this via `kubectl auth can-i` checks baked into CI.
+- **RBAC via GitOps only:** All `Role`, `ClusterRole`, `RoleBinding`, and `ClusterRoleBinding` objects are managed in a platform GitOps repo. Kyverno policy blocks `kubectl apply` of RBAC resources by non-platform service accounts at admission time.
+- **Break-glass access:** A time-limited `ClusterRoleBinding` to `cluster-admin` is issued via an internal CLI that writes to an audit log, sends a Slack alert, and auto-expires the binding after 4 hours using a CronJob or Kyverno `cleanupPolicy`.
+- **Audit continuously:** Export RBAC objects nightly to S3 via a Kubernetes Job; diff against the GitOps state to detect out-of-band mutations. Surface any new `ClusterRoleBinding` to `cluster-admin` as a P1 security alert.
