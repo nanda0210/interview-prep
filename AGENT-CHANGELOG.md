@@ -217,3 +217,15 @@ _Committed & pushed: yes_
 - Describe how you would design the EKS cluster RBAC model for a platform team that must grant developers self-service access without allowing privilege escalation.
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-15 18:42:28
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7473 chars)
+- How do you design an EKS strategy for control-plane scalability when running thousands of Custom Resource Definitions and high-volume operators, and what are the failure modes to watch for?
+- A team has enabled the EKS VPC CNI's network policy controller, but pods that should be isolated are still communicating freely. How do you systematically diagnose and fix this?
+- How do you design an EKS platform to support tenant-level egress control — ensuring different teams' pods exit to the internet through different NAT Gateways or egress IPs — and what are the trade-offs?
+- Describe how you would architect and operate an EKS cluster fleet upgrade program across 50+ clusters with varying team ownership, and what governance mechanisms prevent clusters from falling critically behind on Kubernetes versions.
+
+_Committed & pushed: yes_

@@ -2256,3 +2256,72 @@ The core risk is that any subject with `create`/`update` on `ClusterRoleBinding`
 - **RBAC via GitOps only:** All `Role`, `ClusterRole`, `RoleBinding`, and `ClusterRoleBinding` objects are managed in a platform GitOps repo. Kyverno policy blocks `kubectl apply` of RBAC resources by non-platform service accounts at admission time.
 - **Break-glass access:** A time-limited `ClusterRoleBinding` to `cluster-admin` is issued via an internal CLI that writes to an audit log, sends a Slack alert, and auto-expires the binding after 4 hours using a CronJob or Kyverno `cleanupPolicy`.
 - **Audit continuously:** Export RBAC objects nightly to S3 via a Kubernetes Job; diff against the GitOps state to detect out-of-band mutations. Surface any new `ClusterRoleBinding` to `cluster-admin` as a P1 security alert.
+
+
+---
+
+## 🗓️ Added 2026-09-15 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-15 18:42 -->
+
+### Q: How do you design an EKS strategy for control-plane scalability when running thousands of Custom Resource Definitions and high-volume operators, and what are the failure modes to watch for?
+
+**Model Answer:**
+
+At scale, etcd becomes the primary bottleneck: each CRD instance is stored as a key-value entry, and operators that reconcile frequently can saturate etcd with watch events and list operations. Key design principles:
+
+- **Limit CRD cardinality** — avoid patterns where one CRD instance is created per ephemeral object (e.g., per-request resources); prefer aggregation.
+- **Operator tuning** — set `--sync-period`, `--max-concurrent-reconciles`, and use informer caches with label-selector filtering to reduce API server fan-out.
+- **Separate operator namespaces and RBAC** — scope watches to specific namespaces so operators don't trigger cluster-wide list/watch storms.
+- **etcd health metrics** — alert on `etcd_db_total_size_in_bytes` (warn at 6 GB, hard limit 8 GB), `etcd_request_duration_seconds` p99, and `apiserver_request_duration_seconds` by verb/resource.
+- **Pagination and rate limiting** — ensure operators use paginated list calls (`Limit`/`Continue`) and respect client-side rate limits (`QPS`/`Burst` in the controller-runtime rest config).
+- **Fleet segmentation** — for very high CRD volumes, consider dedicated clusters per domain (e.g., separate clusters for CI workloads vs. production) to isolate etcd pressure.
+
+Common failure modes: etcd compaction lag causing watch re-sync storms; a single runaway operator issuing un-paginated list calls on a large resource type; CRD conversion webhooks adding latency to every API call of that resource.
+
+---
+
+### Q: A team has enabled the EKS VPC CNI's network policy controller, but pods that should be isolated are still communicating freely. How do you systematically diagnose and fix this?
+
+**Model Answer:**
+
+Start by confirming the foundational prerequisites before assuming policy logic is wrong:
+
+1. **Verify the network policy controller is actually active** — check that `ENABLE_NETWORK_POLICY` env var is set to `true` on the `aws-node` DaemonSet, and that `aws-network-policy-agent` pods are running on every node and healthy.
+2. **Check node kernel and eBPF support** — the VPC CNI network policy controller uses eBPF; nodes must run kernel ≥ 5.10 (Amazon Linux 2023 or AL2 with updated kernel). Older AMIs silently fall back to no enforcement.
+3. **Validate policy selector labels** — use `kubectl get networkpolicy -o yaml` and cross-check `podSelector` labels against actual pod labels with `kubectl get pod --show-labels`. Label mismatches are the most common cause.
+4. **Check policy direction** — confirm both ingress and egress rules are defined as needed. A missing egress policy on the source pod allows outbound traffic regardless of the destination's ingress rules.
+5. **Inspect eBPF maps** — on the node, use `bpftool prog list` and check agent logs for policy programming errors; failed eBPF map updates mean policies are not enforced even if they appear applied in the API.
+6. **Namespace isolation** — ensure a default-deny policy exists in the namespace; NetworkPolicy is additive, so without a baseline deny, all traffic remains allowed.
+7. **Test with `kubectl exec` + `curl`** — instrument connectivity tests between specific pod pairs to confirm before/after, and use `aws-network-policy-agent` debug logging to trace policy decisions.
+
+---
+
+### Q: How do you design an EKS platform to support tenant-level egress control — ensuring different teams' pods exit to the internet through different NAT Gateways or egress IPs — and what are the trade-offs?
+
+**Model Answer:**
+
+This is a common requirement in regulated multi-tenant environments where per-team IP allowlisting on downstream systems is mandatory. Available approaches:
+
+- **Per-team subnet + NAT Gateway** — place each tenant's node group or Fargate profile in dedicated subnets with their own route table pointing to a dedicated NAT Gateway. Traffic egresses from a predictable, team-specific elastic IP. Trade-off: NAT Gateway per team is expensive ($0.045/hr + data processing), and subnet proliferation increases VPC complexity.
+- **VPC CNI secondary IP with custom routing** — use the VPC CNI's `AWS_VPC_K8S_CNI_CUSTOM_NETWORK_CFG` feature to assign pod ENIs to specific subnets distinct from the node subnet, enabling per-pod-subnet egress routing. This gives finer-grained control but requires careful ENI capacity planning.
+- **Egress gateway via service mesh or proxy** — route all outbound traffic through a per-tenant Envoy egress gateway or a Squid proxy tier, applying source-NAT at the proxy layer. Adds latency and an operational proxy fleet but allows egress IP assignment without VPC subnet proliferation.
+- **AWS Network Firewall + GWLB** — centralize egress through a firewall VPC with per-tenant route tables. Supports domain-based filtering and centralised logging but adds routing complexity and cost.
+
+Key trade-offs: subnet-per-team is operationally simple but costly and hits VPC subnet limits at scale; proxy-based egress is flexible but introduces a critical-path dependency. Always combine with egress NetworkPolicy to enforce which pods can reach the egress path at all.
+
+---
+
+### Q: Describe how you would architect and operate an EKS cluster fleet upgrade program across 50+ clusters with varying team ownership, and what governance mechanisms prevent clusters from falling critically behind on Kubernetes versions.
+
+**Model Answer:**
+
+At fleet scale, ad-hoc upgrades become untenable; the program needs to be systematic and policy-enforced:
+
+- **Version skew policy** — define an organisational SLA: clusters must not be more than N-2 minor versions behind the current EKS-supported release. Codify this as an AWS Config rule or custom policy that alerts and escalates automatically.
+- **Cluster metadata registry** — maintain a central inventory (e.g., a DynamoDB table or Backstage catalog) recording each cluster's current version, owner, last-upgrade date, and upgrade-window schedule. Feed this into dashboards and on-call runbooks.
+- **Staged upgrade rings** — group clusters into rings (sandbox → dev → staging → prod), promoting upgrades through rings with a mandatory soak period and automated smoke tests (kube-bench, workload health checks) before proceeding.
+- **Automation with Terraform/CDK + CI pipelines** — define the target cluster version in code; a GitOps PR pipeline applies version bumps, runs pre-flight checks (deprecated API scan via `pluto` or `kubent`, add-on compatibility matrix), and requires team sign-off before merging.
+- **Managed node group rolling updates** — use EKS managed node group update configs with `maxUnavailable` tuning per criticality tier; Karpenter clusters require draining and re-provisioning nodes to the new AMI.
+- **Escalation path** — clusters approaching end-of-support trigger automated Jira tickets to team leads and skip-level managers; unresponsive clusters after a defined date are force-upgraded during a maintenance window by the platform team with documented authority.
+- **Add-on compatibility gates** — before each upgrade, run an automated check against the EKS add-on version compatibility matrix (VPC CNI, CoreDNS, kube-proxy) and block the upgrade pipeline if incompatible add-on versions are detected.
