@@ -229,3 +229,15 @@ _Committed & pushed: yes_
 - Describe how you would architect and operate an EKS cluster fleet upgrade program across 50+ clusters with varying team ownership, and what governance mechanisms prevent clusters from falling critically behind on Kubernetes versions.
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-16 18:38:38
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7299 chars)
+- How do you design an EKS strategy for handling cluster-level secrets rotation without causing application downtime, and what are the common failure modes?
+- How do you design an EKS strategy for high-churn, short-lived job workloads — such as CI runners or ephemeral build environments — and what are the scaling and cost trade-offs?
+- A multi-team EKS cluster is experiencing intermittent scheduling failures where pods sit in "Pending" despite nodes appearing to have sufficient CPU and memory. How do you systematically diagnose and resolve this?
+- Describe a situation where you had to advocate against a business stakeholder's preferred EKS architectural decision. How did you handle the disagreement and what was the outcome?
+
+_Committed & pushed: yes_

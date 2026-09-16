@@ -2325,3 +2325,67 @@ At fleet scale, ad-hoc upgrades become untenable; the program needs to be system
 - **Managed node group rolling updates** — use EKS managed node group update configs with `maxUnavailable` tuning per criticality tier; Karpenter clusters require draining and re-provisioning nodes to the new AMI.
 - **Escalation path** — clusters approaching end-of-support trigger automated Jira tickets to team leads and skip-level managers; unresponsive clusters after a defined date are force-upgraded during a maintenance window by the platform team with documented authority.
 - **Add-on compatibility gates** — before each upgrade, run an automated check against the EKS add-on version compatibility matrix (VPC CNI, CoreDNS, kube-proxy) and block the upgrade pipeline if incompatible add-on versions are detected.
+
+
+---
+
+## 🗓️ Added 2026-09-16 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-16 18:38 -->
+
+### Q: How do you design an EKS strategy for handling cluster-level secrets rotation without causing application downtime, and what are the common failure modes?
+
+**Model Answer:**
+
+The core challenge is decoupling secret rotation from application restarts. Key design decisions:
+
+- **External Secrets Operator (ESO) or Secrets Store CSI Driver** syncs secrets from AWS Secrets Manager/Parameter Store into Kubernetes Secrets or mounted volumes; rotation is propagated on a configurable refresh interval without pod restarts when using volume mounts with `syncSecret.enabled` and application-level file watching.
+- **Versioned secret ARNs** in Secrets Manager allow you to stage a new secret version to `AWSPENDING`, validate it, then promote to `AWSCURRENT` — giving applications a window to drain old credentials.
+- **Application-side rotation awareness** is critical: apps must re-read credentials from the filesystem or re-fetch from the SDK rather than caching them indefinitely in memory. This is the most common failure mode.
+- **Dual-credential windows**: For database passwords, RDS Proxy or application-level dual-credential support (accepting both old and new password simultaneously) eliminates the gap between rotation and propagation.
+- **Common failure modes**: (1) CSI driver volume not refreshing because `rotationPollInterval` is too long; (2) Kubernetes Secrets cached by kubelet not propagated when pods use `envFrom` (environment variables require a pod restart, unlike volume mounts); (3) race conditions where some pods pick up the new secret before the backend accepts it.
+- **Governance**: Use CloudTrail + EventBridge to alert on rotation events and trigger automated canary validation before full rollout.
+
+---
+
+### Q: How do you design an EKS strategy for high-churn, short-lived job workloads — such as CI runners or ephemeral build environments — and what are the scaling and cost trade-offs?
+
+**Model Answer:**
+
+High-churn job workloads have distinct characteristics: bursty demand, short lifespans (seconds to minutes), and high scheduling overhead. The recommended architecture:
+
+- **Karpenter** is strongly preferred over Cluster Autoscaler here because it can provision a node in ~30–60 seconds and consolidate aggressively between bursts; set `consolidationPolicy: WhenEmpty` or `WhenUnderutilized` with short `consolidateAfter` windows (e.g., 30s) to reclaim idle nodes quickly.
+- **Dedicated NodePools** for CI workloads with taints/tolerations prevent job pods from landing on long-lived service nodes, avoiding noisy-neighbour disruption and enabling aggressive instance-type diversification across spot capacity pools.
+- **Spot Instances with interruption handling** are cost-effective for CI since most jobs can be retried; use `karpenter.sh/interruption-queue` with SQS-based interruption handling to cordon and drain nodes before reclamation.
+- **Avoid StatefulSet/PVC patterns** for ephemeral builds; use emptyDir with `medium: Memory` for small temp files or leverage S3-backed build caches (e.g., Buildkite, GitHub Actions cache action) to externalise state.
+- **Pod scheduling overhead**: For very short jobs (< 60s), node startup latency dominates. Mitigate with warm pool pre-provisioning or by running a small baseline node count for immediate scheduling.
+- **Cost trade-off**: Aggressive consolidation reduces idle compute waste but increases API server churn (frequent node create/delete events); monitor etcd object count and API server request rate to detect saturation.
+
+---
+
+### Q: A multi-team EKS cluster is experiencing intermittent scheduling failures where pods sit in "Pending" despite nodes appearing to have sufficient CPU and memory. How do you systematically diagnose and resolve this?
+
+**Model Answer:**
+
+When capacity appears available but scheduling fails, the issue is almost always a non-resource constraint. Systematic approach:
+
+1. **`kubectl describe pod <pod>`**: Read the `Events` section for the scheduler's explicit rejection reason — this is the single most important diagnostic step. Common messages: `0/N nodes are available: N node(s) had taint that the pod didn't tolerate`, `Insufficient ephemeral-storage`, `node(s) didn't match Pod's node affinity/selector`.
+2. **Ephemeral storage and extended resources**: CPU/memory shown in `kubectl top nodes` does not include ephemeral-storage pressure or custom extended resources (e.g., GPU, hugepages). Check `kubectl describe node` for `Allocatable` vs `Requests` across all extended dimensions.
+3. **Topology spread constraints**: A misconfigured `topologySpreadConstraint` with `maxSkew: 1` across zones can block scheduling if one zone already has more pods than others, even when aggregate capacity is free.
+4. **Taint/toleration drift**: Node groups created by Karpenter or via lifecycle hooks may have acquired unexpected taints (e.g., from a DaemonSet or node problem detector). Verify with `kubectl get nodes -o json | jq '.items[].spec.taints'`.
+5. **Scheduler throughput**: In very large clusters (1000+ nodes), the scheduler queue depth may be backlogged. Check `scheduler_pending_pods` and `scheduler_scheduling_duration_seconds` metrics; increase `--kube-api-qps` or deploy a second scheduler for batch workloads.
+6. **Resolution pattern**: Fix the immediate constraint, then add alerting on `kube_pod_status_phase{phase="Pending"} > 0 for 5m` with a runbook reference to this diagnostic flow.
+
+---
+
+### Q: Describe a situation where you had to advocate against a business stakeholder's preferred EKS architectural decision. How did you handle the disagreement and what was the outcome?
+
+**Model Answer:**
+
+This question probes influence without authority and technical leadership under pressure. A strong answer structure:
+
+- **Situation framing**: "A VP of Engineering wanted to consolidate all teams — including high-compliance PCI workloads — onto a single shared EKS cluster to reduce operational overhead. I believed this introduced unacceptable blast radius and compliance scope creep."
+- **Approach taken**: I prepared a structured trade-off document rather than a flat objection. It quantified the compliance cost (PCI scope expansion would pull 12 additional services into quarterly audits, estimated at ~$200K/year in audit effort) against the operational saving (~2 FTE cluster management overhead for separate clusters).
+- **Building alignment**: I brought in the CISO and lead auditor to validate the compliance risk assessment, so the technical concern was backed by regulatory authority, not just architectural preference. I also proposed a middle path: a dedicated PCI cluster managed by the same platform tooling (Terraform modules, shared GitOps patterns) to reduce the operational delta.
+- **Outcome**: The middle path was adopted. The PCI cluster was spun up within the existing platform framework in three weeks; the operational overhead delta was less than 0.5 FTE, well within the compliance savings.
+- **Key principle demonstrated**: Technical advocacy is most effective when it translates architectural risk into business-relevant terms (cost, compliance exposure, time) and offers a concrete alternative rather than a binary objection.
