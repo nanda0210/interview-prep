@@ -241,3 +241,15 @@ _Committed & pushed: yes_
 - Describe a situation where you had to advocate against a business stakeholder's preferred EKS architectural decision. How did you handle the disagreement and what was the outcome?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-17 18:48:00
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7999 chars)
+- How do you design an EKS strategy for handling node-level kernel and OS vulnerabilities on Bottlerocket and Amazon Linux 2023 managed nodes, and what are the operational trade-offs?
+- A team reports that their EKS workload's HorizontalPodAutoscaler is not scaling despite CPU metrics being well above the target threshold. How do you systematically diagnose and resolve this?
+- How do you design an EKS strategy for cost-optimised, resilient use of Spot Instances for production workloads, and what failure modes must you explicitly engineer against?
+- Describe how you would lead a post-incident review after a major EKS outage, and what systemic changes you would drive to prevent recurrence. Walk through a realistic example.
+
+_Committed & pushed: yes_

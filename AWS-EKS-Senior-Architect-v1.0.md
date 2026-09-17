@@ -2389,3 +2389,74 @@ This question probes influence without authority and technical leadership under 
 - **Building alignment**: I brought in the CISO and lead auditor to validate the compliance risk assessment, so the technical concern was backed by regulatory authority, not just architectural preference. I also proposed a middle path: a dedicated PCI cluster managed by the same platform tooling (Terraform modules, shared GitOps patterns) to reduce the operational delta.
 - **Outcome**: The middle path was adopted. The PCI cluster was spun up within the existing platform framework in three weeks; the operational overhead delta was less than 0.5 FTE, well within the compliance savings.
 - **Key principle demonstrated**: Technical advocacy is most effective when it translates architectural risk into business-relevant terms (cost, compliance exposure, time) and offers a concrete alternative rather than a binary objection.
+
+
+---
+
+## 🗓️ Added 2026-09-17 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-17 18:48 -->
+
+### Q: How do you design an EKS strategy for handling node-level kernel and OS vulnerabilities on Bottlerocket and Amazon Linux 2023 managed nodes, and what are the operational trade-offs?
+
+**Model Answer:**
+
+- **Bottlerocket** is the preferred choice for security-sensitive workloads: it has a minimal, read-only root filesystem, automatic transactional OS updates via `apiclient`, and a gVisor/Bottlerocket-aware attack surface, making CVE patching faster and more deterministic.
+- For managed node groups, the primary patching mechanism is **node group version updates** — AWS releases new AMIs, you update the launch template version, and managed node groups perform a rolling replacement with respect to PodDisruptionBudgets.
+- **Operational trade-off**: Bottlerocket limits deep OS customisation (no `apt`/`yum`, restricted SSH by default via SSM admin container), which can conflict with teams that run node-level daemons or require custom kernel modules. Amazon Linux 2023 offers more flexibility but a larger attack surface.
+- Implement **automated AMI drift detection**: compare the AMI ID in running node groups against the latest EKS-optimised AMI via the SSM Parameter Store path (`/aws/service/bottlerocket/...`), and alert or auto-trigger updates when drift exceeds a policy threshold (e.g., 14 days).
+- Pair OS patching with **runtime threat detection** (Falco or GuardDuty EKS Runtime Monitoring) so that zero-days exploited before the patch cycle fires an alert rather than going silent.
+- For Karpenter-managed nodes, bake AMI selection into `EC2NodeClass` with `amiSelectorTerms` pinned to a specific AMI family, and use a CI pipeline to publish a new `EC2NodeClass` version when a new AMI passes your validation suite — avoiding uncontrolled AMI drift.
+- **Key interview signal**: distinguish between *data-plane AMI patching* (managed node group rollout, Karpenter node drift) and *control-plane CVEs* (AWS-managed, no operator action needed beyond staying on a supported minor version).
+
+---
+
+### Q: A team reports that their EKS workload's HorizontalPodAutoscaler is not scaling despite CPU metrics being well above the target threshold. How do you systematically diagnose and resolve this?
+
+**Model Answer:**
+
+Start with `kubectl describe hpa <name>` — the `Conditions` section will surface the most common root causes immediately: `AbleToScale`, `ScalingActive`, and `ScalingLimited` each have machine-readable reasons.
+
+**Common root causes and checks:**
+
+1. **Metrics pipeline broken** — HPA relies on `metrics-server` (for CPU/memory) or a custom metrics adapter (Prometheus Adapter, KEDA). Verify `kubectl top pods` returns data; if it errors, the metrics-server is the failure point. Check metrics-server logs for scrape failures, especially if node-level mTLS or network policies block kubelet port 10250.
+2. **Missing resource requests** — HPA computes utilisation as `current / requested`. If the pod has no `resources.requests.cpu`, the HPA reports `<unknown>` utilisation and will not scale. Enforce requests via admission policy.
+3. **`scaleTargetRef` mismatch** — the HPA must reference the correct `apiVersion` and `kind`; a wrong reference causes silent no-ops.
+4. **`minReplicas`/`maxReplicas` ceiling** — confirm the current replica count is not already at `maxReplicas`; the HPA will show `ScalingLimited: TooManyReplicas`.
+5. **Cooldown/stabilisation window** — default scale-down stabilisation is 5 minutes; scale-up has a 3-minute default. If the spike is short-lived, the HPA may have already stabilised before action.
+6. **KEDA vs. HPA conflict** — if KEDA is also managing the same deployment, it creates its own HPA, and the two can conflict; remove the manual HPA.
+
+**Resolution path**: fix the metrics pipeline first, enforce resource requests via OPA/Kyverno, validate with `kubectl get --raw "/apis/metrics.k8s.io/v1beta1/namespaces/<ns>/pods"`, then retest with a sustained load generator.
+
+---
+
+### Q: How do you design an EKS strategy for cost-optimised, resilient use of Spot Instances for production workloads, and what failure modes must you explicitly engineer against?
+
+**Model Answer:**
+
+- **Diversification is the foundational principle**: specify a broad set of instance families and sizes in Karpenter `NodePool` (or Cluster Autoscaler's node group pool) — ideally 10+ compatible types — so the scheduler can always find capacity even during Spot shortages in a single pool.
+- Use **Spot interruption handling** proactively: AWS sends a 2-minute interruption notice via EC2 instance metadata and EventBridge. Deploy the **AWS Node Termination Handler** (or rely on Karpenter's built-in interruption queue) to cordon and drain the node gracefully before the 2-minute window closes, respecting PodDisruptionBudgets.
+- **Workload suitability**: stateless, horizontally scalable services with fast startup times (<30 seconds) are ideal. Stateful workloads, leader-elected singletons, and anything with a long startup time are poor candidates unless you run at least one on-demand replica per critical component.
+- **Spread and topology constraints**: use `topologySpreadConstraints` across multiple AZs and combine with `podAntiAffinity` to avoid all replicas landing on Spot nodes in a single AZ that experiences a simultaneous Spot reclamation wave.
+- **Capacity rebalancing signals**: subscribe to EC2 Capacity Rebalancing recommendations (separate from interruption notices, arriving earlier) via Karpenter's interruption SQS queue to proactively replace at-risk nodes before the hard 2-minute window.
+- **On-demand baseline**: for critical services, run a minimum replica count on on-demand nodes using node selectors or `nodeAffinity` with a `preferredDuringSchedulingIgnoredDuringExecution` fallback, and use Spot only for burst capacity.
+- **Key trade-off to articulate**: Spot saves 60–80% compute cost but introduces non-deterministic interruptions; the architecture must treat Spot nodes as ephemeral infrastructure, not stable hosts — any assumption of node longevity is an anti-pattern.
+
+---
+
+### Q: Describe how you would lead a post-incident review after a major EKS outage, and what systemic changes you would drive to prevent recurrence. Walk through a realistic example.
+
+**Model Answer:**
+
+**Realistic scenario**: A misconfigured Karpenter `NodePool` change (wrong instance family filter) caused all new nodes to launch without the EBS CSI driver DaemonSet being scheduled (node selector mismatch), resulting in all StatefulSet pods failing to attach PVCs cluster-wide for 40 minutes during a peak traffic window.
+
+**Post-incident review process:**
+
+- **Blameless framing from the start**: the review focuses on system and process failures, not individual error. The misconfiguration was possible because the change lacked a pre-production validation gate.
+- **Timeline reconstruction**: use CloudTrail (API calls), Kubernetes audit logs, and a correlated observability timeline (Grafana/CloudWatch) to establish a precise sequence — change applied → nodes launched → DaemonSet selector mismatch detected → PVC attachment failures → on-call page → mitigated.
+- **Five whys**: Why did pods fail? PVC attach failed. Why? EBS CSI driver not present on new nodes. Why? Node selector in DaemonSet didn't match new node labels introduced by the NodePool change. Why did the change go undetected? No staging environment mirrors Karpenter `NodePool` config; change was applied directly to production via a manual `kubectl apply`. Why was manual apply possible? GitOps enforcement (ArgoCD) had an exception for Karpenter config due to a legacy bypass.
+
+**Systemic changes driven:**
+1. Remove the ArgoCD bypass — all Karpenter manifests flow through GitOps with mandatory PR review.
+2. Add a pre-merge CI check that validates `NodePool` changes against DaemonSet node selectors using a policy-as-code rule (OPA Conftest).
+3. Implement
