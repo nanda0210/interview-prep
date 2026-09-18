@@ -2460,3 +2460,68 @@ Start with `kubectl describe hpa <name>` — the `Conditions` section will surfa
 1. Remove the ArgoCD bypass — all Karpenter manifests flow through GitOps with mandatory PR review.
 2. Add a pre-merge CI check that validates `NodePool` changes against DaemonSet node selectors using a policy-as-code rule (OPA Conftest).
 3. Implement
+
+
+---
+
+## 🗓️ Added 2026-09-18 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-18 18:03 -->
+
+### Q: How do you design an EKS strategy for etcd health and API server request throttling as the cluster scales to thousands of nodes and tens of thousands of objects?
+
+**Model Answer:**
+
+etcd is the single most critical bottleneck in a large EKS control plane, even though AWS manages it. Key design principles:
+
+- **Object count discipline**: Aggressively prune stale objects — completed Jobs, old ReplicaSets, expired Events — using `ttlSecondsAfterFinished`, `revisionHistoryLimit`, and event TTL tuning. Unbounded growth in object count directly degrades etcd and API server list performance.
+- **List/watch optimisation**: Ensure all controllers and monitoring agents use **watch** rather than repeated **list** calls. Audit `--watch-cache-sizes` and ensure informers share caches rather than each opening independent watches (e.g., avoid multiple in-cluster clients per process).
+- **API priority and fairness (APF)**: EKS 1.20+ enables APF by default. Define `FlowSchema` and `PriorityLevelConfiguration` objects to ring-fence critical system traffic (node heartbeats, kube-scheduler) from lower-priority automation or CI tooling that floods the API server with requests.
+- **Avoid chatty CRD controllers**: Controllers with tight reconciliation loops and no exponential back-off generate disproportionate API server load. Enforce requeue rate limits and use `controller-runtime`'s built-in rate limiting.
+- **Shard workloads across clusters**: When a single cluster exceeds ~1,000 nodes or ~150,000 objects, the correct architectural answer is cluster sharding — don't try to tune your way past the physics of a single etcd ring.
+- **Observability signals**: Monitor `apiserver_request_duration_seconds`, `etcd_request_duration_seconds`, and `apiserver_current_inflight_requests` via the EKS control-plane CloudWatch metrics namespace; alert before throttling becomes visible to workloads.
+
+---
+
+### Q: A team wants to use EKS Fargate exclusively for all workloads to eliminate node management overhead. What are the architectural constraints you would surface before approving this, and under what conditions would you push back?
+
+**Model Answer:**
+
+Fargate on EKS eliminates node management but imposes significant architectural constraints that must be surfaced explicitly:
+
+- **No DaemonSets**: Fargate pods run one-pod-per-virtual-node; DaemonSets are unsupported. Any sidecar-based observability, security agents (Falco, Datadog), or log forwarders must be injected as sidecars via admission webhooks — increasing pod complexity and resource overhead.
+- **No privileged containers or host networking**: Workloads requiring `hostNetwork`, `hostPID`, or privileged security contexts (e.g., eBPF-based tools, GPU workloads, some service meshes) cannot run on Fargate.
+- **Persistent storage limitations**: Only EFS (via CSI) is supported; EBS is not. Workloads needing block storage or high-IOPS persistent volumes cannot use Fargate.
+- **Cold start latency**: Fargate provisions a new microVM per pod, which takes 30–90 seconds. This is unacceptable for latency-sensitive autoscaling, Job workloads with tight deadlines, or burst traffic patterns.
+- **Cost at scale**: Fargate pricing is per-vCPU/memory-second with no Reserved or Savings Plan pricing equivalent for EKS Fargate (unlike EC2). At sustained high utilisation, EC2-based node groups are materially cheaper.
+- **My recommendation**: Fargate is excellent for low-volume, variable, or bursty workloads where operational simplicity outweighs cost. For sustained, high-throughput, or infrastructure-dependent workloads, I would push back and propose a hybrid model — Fargate for auxiliary services, managed node groups for core workloads.
+
+---
+
+### Q: How do you design an EKS multi-cluster fleet management strategy, including config synchronisation, policy enforcement, and visibility, without creating an unmanageable operational burden?
+
+**Model Answer:**
+
+At scale, ad hoc per-cluster management becomes untenable. The strategy layers across three concerns:
+
+- **Config synchronisation**: Use a GitOps controller (Flux or ArgoCD) with an **app-of-apps** or **ApplicationSet** pattern to declaratively synchronise cluster addons, namespaces, RBAC, and workloads from a single Git source of truth. Cluster-specific overrides are expressed as Kustomize overlays or Helm values files keyed by cluster metadata.
+- **Policy enforcement**: Deploy Kyverno or OPA/Gatekeeper as a standard addon via the GitOps pipeline to every cluster. Policies are authored centrally and versioned in Git; `PolicyExceptions` are peer-reviewed. Use AWS Config with a custom rule or Security Hub integration to detect clusters missing required policy controllers.
+- **Add-on lifecycle**: Use **EKS Managed Add-ons** (VPC CNI, CoreDNS, kube-proxy, EBS CSI) to delegate patching to AWS for common components. For third-party addons, pin versions in Git and use Renovate or Dependabot to propose version bumps via PR.
+- **Fleet visibility**: Aggregate metrics and alerts into a central observability plane (e.g., Amazon Managed Prometheus with cross-account scraping, or a centralised Grafana fleet dashboard). Tag all clusters consistently (`environment`, `team`, `region`) and surface this in AWS Resource Explorer.
+- **Cluster API or eksctl pipelines**: Codify cluster creation itself — VPC, node groups, addons — in infrastructure-as-code (Terraform or CDK) with a cluster vending machine pattern so new clusters are born already compliant.
+- **Key guardrail**: Resist the temptation to allow per-cluster manual drift. Every exception applied by SSH or `kubectl` outside GitOps becomes invisible operational debt. Enforce this culturally and technically via RBAC that limits direct cluster access.
+
+---
+
+### Q: Describe how you would conduct and structure a blameless post-mortem after a customer-impacting EKS incident, and how you translate its findings into durable architectural improvements rather than one-off fixes.
+
+**Model Answer:**
+
+A high-quality post-mortem does two things: it builds shared understanding without blame, and it produces systemic improvements rather than tactical patches.
+
+- **Timeline construction**: Within 24 hours, assemble a precise timeline from CloudTrail, CloudWatch Logs, ALB access logs, and application logs. Every action — automated or human — is included. This prevents competing narratives and surfaces the true sequence of contributing factors.
+- **Five-whys to systemic causes**: Push the analysis past the proximate cause ("a pod OOMKilled") to systemic causes ("resource limits were absent because the admission policy only warned, not denied, and the staging environment had more memory than production"). Resist stopping at human error as a root cause — human error is always a symptom.
+- **Action items with owners and deadlines**: Each finding maps to a concrete action with a named owner and a due date. Categorise actions: **detection** (we didn't know fast enough), **prevention** (the failure should have been impossible), and **mitigation** (blast radius should have been smaller). Unowned actions become shelfware.
+- **Architectural translation**: Prevention actions should challenge the architecture. If a single misconfigured Deployment caused cluster-wide disruption, the architectural answer is namespace-scoped resource quotas, pod disruption budgets, and admission control — not "be more careful next time." Document these as Architecture Decision Records (ADRs) so the rationale is preserved.
+- **Feedback loops**: Share the post-mortem openly across teams (sanitised if needed for external parties). Track action item completion in a backlog reviewed monthly. Re-run GameDay exercises or chaos tests specifically targeting the failure mode after mitigations are in place to verify effectiveness.
+- **Culture signal**: How leadership responds to post-mortems sets the cultural tone. If engineers fear punishment, incidents get under-reported and analysis stays shallow. Publicly acknowledging good post-mortem work reinforces the behaviour you want at scale.

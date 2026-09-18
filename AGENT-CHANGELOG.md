@@ -253,3 +253,15 @@ _Committed & pushed: yes_
 - Describe how you would lead a post-incident review after a major EKS outage, and what systemic changes you would drive to prevent recurrence. Walk through a realistic example.
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-18 18:03:42
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8168 chars)
+- How do you design an EKS strategy for etcd health and API server request throttling as the cluster scales to thousands of nodes and tens of thousands of objects?
+- A team wants to use EKS Fargate exclusively for all workloads to eliminate node management overhead. What are the architectural constraints you would surface before approving this, and under what conditions would you push back?
+- How do you design an EKS multi-cluster fleet management strategy, including config synchronisation, policy enforcement, and visibility, without creating an unmanageable operational burden?
+- Describe how you would conduct and structure a blameless post-mortem after a customer-impacting EKS incident, and how you translate its findings into durable architectural improvements rather than one-off fixes.
+
+_Committed & pushed: yes_
