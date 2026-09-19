@@ -2525,3 +2525,62 @@ A high-quality post-mortem does two things: it builds shared understanding witho
 - **Architectural translation**: Prevention actions should challenge the architecture. If a single misconfigured Deployment caused cluster-wide disruption, the architectural answer is namespace-scoped resource quotas, pod disruption budgets, and admission control — not "be more careful next time." Document these as Architecture Decision Records (ADRs) so the rationale is preserved.
 - **Feedback loops**: Share the post-mortem openly across teams (sanitised if needed for external parties). Track action item completion in a backlog reviewed monthly. Re-run GameDay exercises or chaos tests specifically targeting the failure mode after mitigations are in place to verify effectiveness.
 - **Culture signal**: How leadership responds to post-mortems sets the cultural tone. If engineers fear punishment, incidents get under-reported and analysis stays shallow. Publicly acknowledging good post-mortem work reinforces the behaviour you want at scale.
+
+
+---
+
+## 🗓️ Added 2026-09-19 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-19 17:45 -->
+
+### Q: How do you design an EKS strategy for cross-cluster service discovery and traffic routing without a full service mesh?
+
+**Model Answer:**
+
+- **CoreDNS chaining / stub zones**: Configure CoreDNS with stub zones that forward `<cluster>.local`-style FQDNs to a central Route 53 Private Hosted Zone, allowing pods in one cluster to resolve services in another without a mesh sidecar.
+- **AWS Cloud Map**: Register services at deploy-time into Cloud Map namespaces; clients resolve via DNS or the Cloud Map API, decoupling discovery from cluster internals.
+- **NLB + PrivateLink anchors**: Expose inter-cluster services through internal NLBs (or PrivateLink endpoints for strict isolation) so that cross-cluster traffic has a stable IP and never hairpins through the public internet.
+- **ExternalDNS**: Run ExternalDNS in each cluster to publish `Service` and `Ingress` records into shared Route 53 zones automatically, keeping DNS entries consistent with the actual live endpoints.
+- **Trade-offs to articulate**: This approach eliminates sidecar overhead and control-plane complexity but sacrifices mTLS, fine-grained retries, and traffic-shifting that a mesh provides; it's appropriate when latency budget is tight or mesh operational maturity is low.
+- **Failure modes**: DNS TTL caching can cause stale routing after a pod or node failure; mitigate with short TTLs plus health-check-based weighted records, and ensure clients implement exponential back-off.
+
+---
+
+### Q: A team wants to adopt GitOps with Flux or Argo CD on EKS, but the cluster manages sensitive production workloads. What security boundaries and operational safeguards do you enforce?
+
+**Model Answer:**
+
+- **Separate GitOps controller permissions from application permissions**: The Argo CD / Flux controller's ServiceAccount uses IRSA scoped only to the resources it reconciles; it should never inherit broad cluster-admin rights.
+- **Repository access hygiene**: Source repos use deploy keys (read-only) or OIDC-based GitHub App tokens; secrets are never committed — only sealed-secret or SOPS-encrypted ciphertext, with the decryption key held in AWS KMS accessible only by the controller's IRSA role.
+- **Admission gate before sync**: Pair the GitOps controller with an OPA/Gatekeeper or Kyverno policy engine so that even a PR that passes code review is rejected at admission if it violates policy (e.g., `privileged: true`, missing resource limits).
+- **Progressive delivery gating**: For production, require a manual sync gate or a Argo CD `SyncWindow` that restricts automatic reconciliation to maintenance windows; automated rollout only in non-prod.
+- **Drift detection as a security signal**: Enable Argo CD's out-of-sync alerting; unexpected drift (someone `kubectl apply`-ing directly) triggers a PagerDuty alert and should be treated as a potential incident, not just an ops nuisance.
+- **Multi-tenancy isolation**: Use Argo CD `AppProject` resources to fence teams — each project can only target specific destination namespaces/clusters and source repos, preventing one team's GitOps pipeline from touching another's workloads.
+- **Audit trail**: All reconcile events write to CloudTrail (via the API server) and Argo CD's own audit log, shipped to a SIEM; this satisfies change-management audit requirements in regulated environments.
+
+---
+
+### Q: How do you design an EKS strategy for handling long-running, stateful gRPC streaming connections through AWS Load Balancer infrastructure, and what failure modes must you plan for?
+
+**Model Answer:**
+
+- **NLB over ALB for persistent streams**: ALB terminates HTTP/2 streams at the load balancer and multiplexes them, which can cause unexpected stream resets; NLB operates at L4 and preserves end-to-end gRPC framing, making it the preferred choice for long-lived bidirectional streams.
+- **Connection draining alignment**: Set NLB target-group deregistration delay to be longer than your longest expected stream lifetime (or your client's reconnect timeout); a mismatch causes in-flight streams to be abruptly reset during deployments.
+- **`preStop` hook + `terminationGracePeriodSeconds`**: Configure pods with a `preStop` sleep matching the draining delay so the process doesn't exit before connections are fully drained; gRPC servers should also honour `SIGTERM` by stopping new stream acceptance while completing existing ones.
+- **Health check vs. keepalive tuning**: NLB TCP health checks and gRPC keepalive pings (`KEEPALIVE_TIME`, `KEEPALIVE_TIMEOUT`) must be co-tuned; overly aggressive keepalives cause idle connection churn, while too-loose values mask dead backend detection.
+- **Client-side load balancing consideration**: For very high fan-out (e.g., thousands of streaming subscribers), consider moving load balancing to the client layer using xDS/Envoy rather than relying solely on NLB, since NLB connections are persistent and can create hot backends if streams are long-lived.
+- **Failure modes**: Spot interruption or node drain terminates streams without client retry logic noticing immediately — ensure clients implement gRPC status code `UNAVAILABLE` retry with exponential back-off and cap; also plan for NAT gateway idle-timeout (350 seconds) resetting streams if no data flows.
+
+---
+
+### Q: Describe how you would lead a blameless post-mortem after a major EKS production incident, and what structural outputs you expect to drive lasting improvement.
+
+**Model Answer:**
+
+- **Psychological safety first**: Open the post-mortem by explicitly stating the blameless principle — the goal is to understand system and process failure, not to assign personal fault; this is especially important in organisations where engineers fear retribution for outages.
+- **Timeline reconstruction**: Collaboratively build a precise timeline (to the minute) using CloudTrail, CloudWatch Logs Insights, and kubectl audit logs; surface the gap between when the issue started and when it was detected, as that gap is usually where the biggest reliability investment should go.
+- **Five-whys on contributing factors**: Identify both the proximate cause (e.g., "CoreDNS OOMKilled") and systemic causes (e.g., "no memory limit set, no autoscaling for CoreDNS, no alert on DNS error rate"); surface organisational factors like missing runbooks, insufficient on-call training, or skipped staging tests.
+- **Structured action items**: Every action item must have an owner, a due date, and a severity classification (P1 = must fix before next deploy, P2 = sprint, P3 = backlog); vague actions like "improve monitoring" are rejected — replace with "add CloudWatch alarm on `coredns_dns_request_duration_seconds` p99 > 500 ms, owner: SRE team, due: 2 weeks."
+- **Reliability metrics linkage**: Map findings to SLO impact — how many error-budget minutes were consumed? This frames the business case for investing engineering time in preventive work rather than features.
+- **Follow-up cadence**: Schedule a 30-day review to confirm action items are closed and that any new monitoring has actually fired in test; publish the post-mortem to a shared internal wiki to build organisational learning across teams, not just the incident team.
+- **Behavioural signal as an architect**: Demonstrating that you treat post-mortems as a first-class engineering artefact — not a box-ticking exercise — is what differentiates a senior architect who builds resilient cultures from one who only designs resilient systems.

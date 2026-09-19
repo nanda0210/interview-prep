@@ -265,3 +265,15 @@ _Committed & pushed: yes_
 - Describe how you would conduct and structure a blameless post-mortem after a customer-impacting EKS incident, and how you translate its findings into durable architectural improvements rather than one-off fixes.
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-19 17:45:33
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7533 chars)
+- How do you design an EKS strategy for cross-cluster service discovery and traffic routing without a full service mesh?
+- A team wants to adopt GitOps with Flux or Argo CD on EKS, but the cluster manages sensitive production workloads. What security boundaries and operational safeguards do you enforce?
+- How do you design an EKS strategy for handling long-running, stateful gRPC streaming connections through AWS Load Balancer infrastructure, and what failure modes must you plan for?
+- Describe how you would lead a blameless post-mortem after a major EKS production incident, and what structural outputs you expect to drive lasting improvement.
+
+_Committed & pushed: yes_
