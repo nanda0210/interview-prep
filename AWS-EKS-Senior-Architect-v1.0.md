@@ -2584,3 +2584,52 @@ A high-quality post-mortem does two things: it builds shared understanding witho
 - **Reliability metrics linkage**: Map findings to SLO impact — how many error-budget minutes were consumed? This frames the business case for investing engineering time in preventive work rather than features.
 - **Follow-up cadence**: Schedule a 30-day review to confirm action items are closed and that any new monitoring has actually fired in test; publish the post-mortem to a shared internal wiki to build organisational learning across teams, not just the incident team.
 - **Behavioural signal as an architect**: Demonstrating that you treat post-mortems as a first-class engineering artefact — not a box-ticking exercise — is what differentiates a senior architect who builds resilient cultures from one who only designs resilient systems.
+
+
+---
+
+## 🗓️ Added 2026-09-20 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-20 17:55 -->
+
+### Q: How do you design an EKS strategy for managing cluster upgrades at scale across a large fleet with minimal blast radius and zero unplanned downtime?
+
+**Model Answer:**
+
+- **Upgrade rings:** Segment clusters into rings (dev → staging → canary prod → full prod) with mandatory soak periods between each ring; automate promotion gates using health checks and SLO metrics.
+- **Control-plane first:** EKS in-place control-plane upgrades are AWS-managed and non-disruptive; validate add-on compatibility (VPC CNI, CoreDNS, kube-proxy) against the target version before proceeding, using the EKS add-on version compatibility matrix.
+- **Node group strategy:** Use surge rolling updates on managed node groups (set `maxUnavailable=0`, `maxSurge=1`) or blue/green node group replacement for Karpenter-managed nodes by updating `NodePool` AMI family and draining old nodes gradually.
+- **Add-on sequencing:** Upgrade add-ons in dependency order — CNI before CoreDNS before kube-proxy — and pin versions explicitly; use EKS managed add-ons to get AWS-managed rollback on failure.
+- **Validation gates:** Run Pluto or `kubectl convert` in CI to detect deprecated API usage before each upgrade; execute smoke tests and PodDisruptionBudget compliance checks post-node-roll.
+- **Rollback posture:** Control-plane downgrade is not supported; rollback means maintaining a parallel old-version cluster or a tested restore-from-backup procedure, which reinforces the importance of pre-upgrade validation over post-upgrade recovery.
+- **Behavioral angle:** Communicate upgrade timelines and deprecation windows to application teams at least one version ahead, establishing a shared responsibility model so teams own API compatibility within their workloads.
+
+---
+
+### Q: A pod in your EKS cluster is consuming unbounded memory and triggering OOMKill repeatedly, but the owning team insists their application is functioning correctly. How do you investigate and resolve this systematically?
+
+**Model Answer:**
+
+Start by distinguishing between a genuine memory leak, working-set growth under load, and a misconfigured limit that is too low relative to legitimate usage. Pull `kubectl top pod` and Container Insights metrics to plot RSS, working set, and page cache over time — page cache inflation is benign and excluded from OOM accounting in some kernel versions but not all. Review the `oom_kill_constraint` in CloudWatch Container Insights to confirm whether OOMKill is triggered by the pod limit or node-level memory pressure (system OOM killer). Use `kubectl describe node` to check `MemoryPressure` condition and node-level allocatable vs. requested ratios. Profile the application using heap dumps, async-profiler, or language-specific tooling — coordinate with the team to capture a heap snapshot just before the OOMKill threshold. If the limit is genuinely too low, right-size it using the VPA recommendation in "Off" mode to generate a non-enforcing suggestion. Enforce `LimitRange` minimums per namespace to prevent unbounded containers, and set `requests == limits` for memory on latency-sensitive workloads to guarantee QoS class `Guaranteed`, avoiding eviction before OOMKill. As a governance outcome, require memory limits on all containers via an OPA/Gatekeeper policy and expose per-workload memory efficiency dashboards to shift ownership back to teams.
+
+---
+
+### Q: How do you design an EKS strategy for federated identity and cross-account workload access without distributing long-lived credentials?
+
+**Model Answer:**
+
+- **IRSA as the foundation:** Use IAM Roles for Service Accounts (IRSA) so every pod assumes an IAM role via OIDC token projection; the token is scoped to the service account and automatically rotated by the kubelet, eliminating static credentials entirely.
+- **Cross-account trust:** In the target account, create an IAM role with a trust policy that allows `sts:AssumeRoleWithWebIdentity` from the source cluster's OIDC provider ARN, scoped to the specific namespace and service account name using `StringEquals` conditions on `sub` and `aud` claims.
+- **EKS Pod Identity (newer alternative):** Evaluate EKS Pod Identity (GA 2023) as a simpler alternative to IRSA — it removes the need to manage per-cluster OIDC providers and supports role chaining natively, but currently lacks some fine-grained OIDC claim conditions.
+- **Secrets isolation:** Never store cross-account credentials in Kubernetes Secrets or environment variables; use IRSA to authenticate directly to Secrets Manager or Parameter Store in the target account.
+- **Audit trail:** Enable CloudTrail in all target accounts and correlate `AssumeRoleWithWebIdentity` events with the `kubernetes.io/serviceaccount` claim in the JWT to attribute API calls to specific pods and namespaces.
+- **Least privilege enforcement:** Use IAM Access Analyzer to continuously validate that cross-account role policies do not grant unintended external access; integrate checks into the IaC pipeline.
+- **Governance:** Maintain a centralised role catalogue (e.g., in Terraform or AWS Service Catalog) so cross-account roles are peer-reviewed, versioned, and linked to owning teams.
+
+---
+
+### Q: Describe how you would design an EKS platform to support developer self-service namespace provisioning while maintaining hard security and cost guardrails.
+
+**Model Answer:**
+
+The core pattern is a "namespace-as-a-service" model: developers submit a pull request or fill a portal form to declare a namespace, and automation handles provisioning with enforced guardrails rather than manual cluster-admin intervention. Use a Namespace controller or a GitOps-driven Helm/Kustomize template that creates the namespace alongside a standard bundle: `ResourceQuota`, `LimitRange`, `NetworkPolicy` (default-deny ingress/egress), RBAC role bindings scoped to the team's IdP group, and an IRSA service account. Gate namespace creation through an OPA/Gatekeeper `ValidatingAdmissionPolicy` that enforces naming conventions, mandatory labels (`team`, `cost-centre`, `environment`), and quota size tiers rather than arbitrary values. For cost guardrails, map the `cost-centre` label to an AWS Cost Allocation Tag using a Kubernetes label-to-tag propagation strategy (e.g., via the AWS Billing tag propagation feature or a custom controller), and set up per-namespace Kubecost alerts that notify teams when projected monthly spend exceeds a threshold. Use Hierarchical Namespace Controller (HNC) if teams need sub-namespace delegation, propagating policies from the parent without manual duplication. Enforce a CI lint step on namespace PRs that validates quota tiers against a policy matrix so engineers cannot approve excessive allocations without an explicit exception workflow. Behaviorally, publish a self-service runbook and SLA (e.g., namespace provisioned within 5 minutes of merge), which removes platform team bottlenecks while keeping the security boundary clear.

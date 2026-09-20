@@ -277,3 +277,15 @@ _Committed & pushed: yes_
 - Describe how you would lead a blameless post-mortem after a major EKS production incident, and what structural outputs you expect to drive lasting improvement.
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-20 17:55:56
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7024 chars)
+- How do you design an EKS strategy for managing cluster upgrades at scale across a large fleet with minimal blast radius and zero unplanned downtime?
+- A pod in your EKS cluster is consuming unbounded memory and triggering OOMKill repeatedly, but the owning team insists their application is functioning correctly. How do you investigate and resolve this systematically?
+- How do you design an EKS strategy for federated identity and cross-account workload access without distributing long-lived credentials?
+- Describe how you would design an EKS platform to support developer self-service namespace provisioning while maintaining hard security and cost guardrails.
+
+_Committed & pushed: yes_
