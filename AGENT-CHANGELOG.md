@@ -289,3 +289,15 @@ _Committed & pushed: yes_
 - Describe how you would design an EKS platform to support developer self-service namespace provisioning while maintaining hard security and cost guardrails.
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-21 19:51:58
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7771 chars)
+- How do you design an EKS strategy for managing and securing the AWS VPC CNI plugin at scale, including custom networking, prefix delegation, and security group per pod?
+- A production EKS deployment using Argo CD suddenly has hundreds of applications flipping to "OutOfSync" simultaneously with no recent git commits. How do you diagnose and resolve this?
+- How do you design an EKS strategy for cluster autoscaling decisions when workloads have highly heterogeneous resource profiles — mixing CPU-heavy, memory-heavy, and GPU jobs on the same cluster?
+- Describe a situation where an EKS platform you owned suffered an unexpected outage caused by a dependency you did not control. What happened, how did you respond, and what architectural changes did you make afterward?
+
+_Committed & pushed: yes_

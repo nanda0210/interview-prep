@@ -2633,3 +2633,79 @@ Start by distinguishing between a genuine memory leak, working-set growth under 
 **Model Answer:**
 
 The core pattern is a "namespace-as-a-service" model: developers submit a pull request or fill a portal form to declare a namespace, and automation handles provisioning with enforced guardrails rather than manual cluster-admin intervention. Use a Namespace controller or a GitOps-driven Helm/Kustomize template that creates the namespace alongside a standard bundle: `ResourceQuota`, `LimitRange`, `NetworkPolicy` (default-deny ingress/egress), RBAC role bindings scoped to the team's IdP group, and an IRSA service account. Gate namespace creation through an OPA/Gatekeeper `ValidatingAdmissionPolicy` that enforces naming conventions, mandatory labels (`team`, `cost-centre`, `environment`), and quota size tiers rather than arbitrary values. For cost guardrails, map the `cost-centre` label to an AWS Cost Allocation Tag using a Kubernetes label-to-tag propagation strategy (e.g., via the AWS Billing tag propagation feature or a custom controller), and set up per-namespace Kubecost alerts that notify teams when projected monthly spend exceeds a threshold. Use Hierarchical Namespace Controller (HNC) if teams need sub-namespace delegation, propagating policies from the parent without manual duplication. Enforce a CI lint step on namespace PRs that validates quota tiers against a policy matrix so engineers cannot approve excessive allocations without an explicit exception workflow. Behaviorally, publish a self-service runbook and SLA (e.g., namespace provisioned within 5 minutes of merge), which removes platform team bottlenecks while keeping the security boundary clear.
+
+
+---
+
+## 🗓️ Added 2026-09-21 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-21 19:51 -->
+
+### Q: How do you design an EKS strategy for managing and securing the AWS VPC CNI plugin at scale, including custom networking, prefix delegation, and security group per pod?
+
+**Model Answer:**
+
+The VPC CNI is the most operationally impactful add-on in EKS because it directly controls IP allocation and pod networking. Key design decisions:
+
+- **Prefix delegation** (`ENABLE_PREFIX_DELEGATION=true`) dramatically increases pod density per node by assigning /28 CIDR prefixes to ENIs rather than individual IPs — critical for large clusters but requires subnet CIDR planning to avoid fragmentation.
+- **Custom networking** (`AWS_VPC_K8S_CNI_CUSTOM_NETWORK_CFG=true`) lets you assign pods to different subnets and AZs than the node's primary ENI, useful for IP conservation or isolating pod traffic to private subnets while nodes live in public ones.
+- **Security Group for Pods (SGP)** enables ENI-trunking for branch ENIs, allowing pods to carry their own SGs; it's powerful for compliance but incompatible with prefix delegation, Fargate, and Windows nodes — understand these mutual exclusions before committing.
+- Manage the CNI as an EKS managed add-on with version pinning; avoid allowing auto-upgrade during business hours, and test CNI upgrades in non-production first because a bad upgrade can cause a full networking outage.
+- Apply IAM least-privilege to the `aws-node` DaemonSet's node IAM role — it needs `ec2:AssignPrivateIpAddresses` and related actions, not broad EC2 permissions.
+- Monitor `ipamd` metrics (Prometheus endpoint on port 61678) for IP pool exhaustion (`awscni_total_ip_addresses`, `awscni_assigned_ip_addresses`) and alert before pods start failing to schedule due to IP starvation.
+
+---
+
+### Q: A production EKS deployment using Argo CD suddenly has hundreds of applications flipping to "OutOfSync" simultaneously with no recent git commits. How do you diagnose and resolve this?
+
+**Model Answer:**
+
+A mass OutOfSync event with no git activity points to a cluster-side change rather than a source-of-truth change. Systematic diagnosis:
+
+1. **Check the timing**: Correlate the event with cluster activities — a Kubernetes minor-version upgrade, EKS managed add-on update, or admission webhook change can cause Argo CD to detect API version or field mutations.
+2. **Inspect the diff**: Pull a representative app's diff in the Argo CD UI or `argocd app diff`. If fields like `managedFields`, `creationTimestamp`, or server-defaulted values appear, the issue is likely normalisation — Argo CD is seeing server-side-applied defaults that differ from the declared manifests.
+3. **Common root causes**:
+   - Kubernetes upgrade changed default field values or deprecated API versions, making stored manifests mismatched.
+   - A mutation webhook started injecting sidecar fields not present in git.
+   - Argo CD itself was upgraded and its diff logic changed.
+   - Someone ran `kubectl apply` outside Argo CD, drifting live state.
+4. **Short-term**: If the diff is benign (e.g., server defaults), configure Argo CD `ignoreDifferences` for known injected fields. Do not mass-sync without understanding the diff — a blind sync could overwrite legitimate in-cluster state.
+5. **Long-term**: Enforce that all cluster mutations go through Argo CD (use a validating webhook or OPA policy to block direct `kubectl apply` in production). Pin Argo CD upgrades to maintenance windows with diff validation beforehand.
+6. **API version drift**: If an EKS upgrade removed a beta API (e.g., `networking.k8s.io/v1beta1`), update manifests in git to the stable API version and re-sync deliberately.
+
+---
+
+### Q: How do you design an EKS strategy for cluster autoscaling decisions when workloads have highly heterogeneous resource profiles — mixing CPU-heavy, memory-heavy, and GPU jobs on the same cluster?
+
+**Model Answer:**
+
+Heterogeneous workload profiles require deliberate node pool segmentation and autoscaler configuration to avoid inefficiency and scheduling deadlocks:
+
+- **Karpenter over Cluster Autoscaler**: Karpenter's `NodePool` and `EC2NodeClass` model allows fine-grained instance selection policies (e.g., `karpenter.k8s.aws/instance-family: [c7i, c6i]` for CPU-heavy, `r7i` for memory-heavy, `p4d/g5` for GPU). It evaluates the pending pod's exact resource request to right-size the instance rather than scaling up a fixed node group.
+- **NodePool per workload archetype**: Define separate Karpenter NodePools with `taints` corresponding to workload type (`workload-type: gpu`, `workload-type: memory-optimized`). Require matching `tolerations` and `nodeSelector` on pods. This prevents CPU jobs from landing on expensive GPU nodes.
+- **Bin-packing vs. spread**: For cost efficiency, prefer `consolidationPolicy: WhenUnderutilized` to right-size after scale-out. For GPU nodes (high hourly cost, slow to launch), set a tighter consolidation window.
+- **Resource requests accuracy**: Autoscalers only work as well as the resource requests they see. Use VPA in recommendation mode to surface chronically under-requested workloads, and enforce request/limit ranges via LimitRange per namespace.
+- **GPU-specific considerations**: Label GPU node pools and deploy the NVIDIA device plugin DaemonSet with a matching `nodeSelector`. Use `nvidia.com/gpu: 1` resource requests, not CPU/memory approximations. Consider time-slicing (`nvidia.com/gpu.sharing-strategy: time-slicing`) for inference workloads that don't need a full GPU.
+- **Avoid over-diversification**: Too many NodePools increases Karpenter decision complexity and can cause consolidation loops. Group instance families with similar cost/performance characteristics into a single NodePool where possible.
+
+---
+
+### Q: Describe a situation where an EKS platform you owned suffered an unexpected outage caused by a dependency you did not control. What happened, how did you respond, and what architectural changes did you make afterward?
+
+**Model Answer:**
+
+*(Behavioral — answer should be structured, specific, and show ownership without blame-shifting.)*
+
+**Situation**: At a previous role, our EKS platform used an external Vault cluster (not AWS Secrets Manager) for secret injection via the Agent Sidecar Injector. A Vault upgrade in an adjacent team's change window caused the Vault Agent Injector webhook to become unavailable for ~25 minutes. During that window, any pod restart or new deployment failed admission because the mutating webhook was configured with `failurePolicy: Fail`.
+
+**Response**:
+- Immediately identified the failing webhook via `kubectl describe pods` showing `admission webhook denied` errors.
+- Temporarily patched the webhook to `failurePolicy: Ignore` to restore pod scheduling (with the trade-off that new pods would launch without secrets injected — acceptable for a subset of stateless services in degraded mode).
+- Escalated to the Vault team and coordinated rollback of their upgrade.
+- Communicated status to engineering leads on a 15-minute cadence.
+
+**Architectural changes afterward**:
+1. Changed all non-critical mutating webhooks to `failurePolicy: Ignore` with a circuit-breaker pattern — critical webhooks (security controls) remain `Fail` but have dedicated HA deployments with PodDisruptionBudgets.
+2. Added synthetic canary tests that fire against the webhook endpoint every 60 seconds; alerts page on two consecutive failures.
+3. Migrated the most critical secrets to AWS Secrets Manager + ASCP (Secrets Store CSI Driver) so the blast radius of a Vault outage is bounded.
+4. Established a cross-team change coordination process requiring notification in a shared Slack channel before any shared-infrastructure dependency upgrade in business hours.
