@@ -301,3 +301,15 @@ _Committed & pushed: yes_
 - Describe a situation where an EKS platform you owned suffered an unexpected outage caused by a dependency you did not control. What happened, how did you respond, and what architectural changes did you make afterward?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-22 18:29:30
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (6938 chars)
+- How do you design an EKS strategy for webhook-heavy clusters where validating and mutating admission webhooks become a reliability and latency bottleneck?
+- A team migrates a stateful EKS workload from a single large StatefulSet to multiple smaller StatefulSets for operational flexibility, and immediately observes that persistent volume provisioning is intermittently failing with "volume node affinity conflict." How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing cluster-level network egress costs, particularly inter-AZ data transfer charges that are invisible until the AWS bill arrives?
+- Describe how you would handle a situation where a platform team needs to deprecate and remove a widely used internal Kubernetes Custom Resource Definition (CRD) that dozens of tenant teams depend on.
+
+_Committed & pushed: yes_

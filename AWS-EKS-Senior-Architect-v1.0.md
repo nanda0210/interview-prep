@@ -2709,3 +2709,61 @@ Heterogeneous workload profiles require deliberate node pool segmentation and au
 2. Added synthetic canary tests that fire against the webhook endpoint every 60 seconds; alerts page on two consecutive failures.
 3. Migrated the most critical secrets to AWS Secrets Manager + ASCP (Secrets Store CSI Driver) so the blast radius of a Vault outage is bounded.
 4. Established a cross-team change coordination process requiring notification in a shared Slack channel before any shared-infrastructure dependency upgrade in business hours.
+
+
+---
+
+## 🗓️ Added 2026-09-22 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-22 18:29 -->
+
+### Q: How do you design an EKS strategy for webhook-heavy clusters where validating and mutating admission webhooks become a reliability and latency bottleneck?
+
+Admission webhooks are synchronous, in-band with the API server, and can cause cascading failures if they become slow or unavailable. Key design points:
+
+- **Fail-open vs. fail-closed trade-offs**: Set `failurePolicy: Fail` only for security-critical webhooks (e.g., OPA/Gatekeeper); use `Ignore` for non-critical ones to prevent cluster-wide disruption.
+- **Scope narrowing**: Apply tight `namespaceSelector` and `objectSelector` rules so webhooks only intercept relevant resources — reducing unnecessary latency for unrelated objects.
+- **Timeout budgets**: Keep `timeoutSeconds` at 3–5 s maximum; the API server has a 30 s hard limit but long webhooks block goroutines and degrade throughput.
+- **High availability**: Run webhook servers with PodDisruptionBudgets, anti-affinity across AZs, and HPA or Karpenter-backed autoscaling so upgrade or node failure doesn't make them unavailable.
+- **Sidestepping during bootstrapping**: Use `reinvocationPolicy` carefully and exempt `kube-system` namespaces from policy webhooks to avoid chicken-and-egg problems during control-plane recovery.
+- **Latency SLOs**: Instrument webhook servers with p99 latency metrics; alert if p99 exceeds 500 ms, which is a leading indicator of API server latency degradation visible in `apiserver_admission_webhook_admission_duration_seconds`.
+
+---
+
+### Q: A team migrates a stateful EKS workload from a single large StatefulSet to multiple smaller StatefulSets for operational flexibility, and immediately observes that persistent volume provisioning is intermittently failing with "volume node affinity conflict." How do you diagnose and resolve this?
+
+This error means a PersistentVolume was provisioned in an AZ that no schedulable node for the pod exists in. Diagnosis and resolution:
+
+1. **Root cause**: When multiple StatefulSets are created simultaneously, the EBS CSI driver provisions volumes eagerly in whichever AZ the first scheduling attempt lands in; if nodes in that AZ are full or unavailable, subsequent pod scheduling fails with affinity conflict.
+2. **Check node/PV AZ alignment**: Cross-reference `kubectl get pv -o yaml` (`spec.nodeAffinity.required`) against available nodes per AZ with `kubectl get nodes --label-columns topology.kubernetes.io/zone`.
+3. **Immediate fix for stuck volumes**: Delete the PVC and pod, allow dynamic re-provisioning, or manually patch the PV's node affinity — though the safest path is deletion and re-creation.
+4. **Structural fix — WaitForFirstConsumer**: Ensure all StorageClasses use `volumeBindingMode: WaitForFirstConsumer`; this delays volume provisioning until a pod is actually scheduled, co-locating the EBS volume with the selected node's AZ.
+5. **Topology spread constraints**: Add `topologySpreadConstraints` across StatefulSets to distribute pods — and therefore volume provisioning — evenly across AZs.
+6. **Karpenter consideration**: If using Karpenter, ensure `NodePool` AZ weights align with available EBS capacity; misaligned provisioning budgets can recreate the same problem.
+
+---
+
+### Q: How do you design an EKS strategy for managing cluster-level network egress costs, particularly inter-AZ data transfer charges that are invisible until the AWS bill arrives?
+
+Inter-AZ traffic is one of the most common hidden cost drivers in EKS. A mature strategy addresses this at multiple layers:
+
+- **Topology-aware routing**: Enable `topologyAwareHints` (Kubernetes 1.24+) or `service.kubernetes.io/topology-mode: auto` so kube-proxy or the AWS Load Balancer Controller prefers endpoints in the same AZ, reducing cross-AZ service traffic.
+- **Affinity and spread alignment**: Use `podAffinity` or `topologySpreadConstraints` to co-locate tightly coupled services (e.g., app + cache) in the same AZ rather than spreading them for availability at a cost premium.
+- **VPC flow log cost attribution**: Enable VPC flow logs with per-AZ source/destination tagging and feed them into Athena or CloudWatch Contributor Insights to identify chatty cross-AZ service pairs before they escalate.
+- **CNI prefix delegation and local-zone awareness**: With prefix delegation, ensure node pools are AZ-scoped (separate node groups per AZ) so IP locality aligns with scheduling locality.
+- **NAT Gateway consolidation**: A common mistake is routing all inter-AZ traffic through a centralised NAT Gateway in one AZ — each cross-AZ hop incurs $0.01/GB. Architect one NAT Gateway per AZ for outbound internet traffic.
+- **FinOps feedback loops**: Integrate Kubecost or CAST AI with AWS Cost and Usage Reports to show per-team, per-namespace data transfer costs, creating accountability that drives architectural change organically.
+
+---
+
+### Q: Describe how you would handle a situation where a platform team needs to deprecate and remove a widely used internal Kubernetes Custom Resource Definition (CRD) that dozens of tenant teams depend on.
+
+CRD deprecation is as much an organisational challenge as a technical one, and mishandling it breaks production workloads cluster-wide. A structured approach:
+
+- **Inventory and impact assessment**: Use `kubectl get <crd-name> -A` and audit GitOps repos to enumerate every namespace, team, and manifest consuming the CRD before any communication goes out.
+- **Versioned migration path**: Introduce a replacement CRD or API version first; run both in parallel, using a conversion webhook if the schema is compatible, so teams can migrate at their own pace within a defined window (typically 60–90 days for mature orgs).
+- **Deprecation notices in-band**: Annotate existing custom resources with a deprecation warning annotation and configure an admission webhook to return warnings (`admission.k8s.io/warning`) on any CREATE or UPDATE of the old kind — surfacing the deprecation directly in CI/CD pipelines.
+- **Governance gate**: Set a hard removal date in the platform roadmap, communicate it via RFC/ADR, and require team leads to sign off on completion. Use a shared migration tracker (Jira/Linear board) with per-namespace migration status.
+- **Automated migration tooling**: Provide a migration script or Helm chart that converts old CRs to the new format, lowering the migration cost for teams and reducing the risk of inconsistent manual conversions.
+- **Staged removal**: First remove the CRD from new cluster versions, then progressively remove it from existing clusters during the next upgrade cycle — ensuring that a missed team's workload fails noisily at upgrade time rather than silently at runtime.
+- **Behavioral reflection**: In a retrospective, evaluate why the CRD became so entrenched without a versioning strategy from day one, and introduce a CRD lifecycle policy to prevent recurrence.
