@@ -2767,3 +2767,64 @@ CRD deprecation is as much an organisational challenge as a technical one, and m
 - **Automated migration tooling**: Provide a migration script or Helm chart that converts old CRs to the new format, lowering the migration cost for teams and reducing the risk of inconsistent manual conversions.
 - **Staged removal**: First remove the CRD from new cluster versions, then progressively remove it from existing clusters during the next upgrade cycle — ensuring that a missed team's workload fails noisily at upgrade time rather than silently at runtime.
 - **Behavioral reflection**: In a retrospective, evaluate why the CRD became so entrenched without a versioning strategy from day one, and introduce a CRD lifecycle policy to prevent recurrence.
+
+
+---
+
+## 🗓️ Added 2026-09-23 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-23 18:49 -->
+
+### Q: How do you design an EKS strategy for handling service account token projection and audience validation to prevent cross-service token misuse?
+
+**Model Answer:**
+EKS uses IRSA (IAM Roles for Service Accounts) backed by OIDC, projecting bound service account tokens with specific audiences. To prevent misuse, enforce the following controls:
+
+- **Restrict audience claims**: Configure `serviceAccountToken` volume projections with explicit `audience` fields matching only the target service; tokens projected for one service (e.g., Vault) should not be accepted by another (e.g., an AWS API).
+- **Short expiration windows**: Set `expirationSeconds` to the minimum viable TTL (e.g., 3600 s) rather than the default 86400 s; tokens are auto-rotated by the kubelet before expiry.
+- **Separate IAM roles per workload**: Never share an IAM role across multiple service accounts; apply least-privilege policies and enforce this via OPA/Kyverno rules that reject pods whose `serviceAccountName` maps to an overly permissive role.
+- **OIDC issuer pinning**: Validate the OIDC issuer URL in IAM trust policies to the specific cluster's issuer, preventing tokens from another cluster from being accepted.
+- **Audit token usage**: Enable CloudTrail for `sts:AssumeRoleWithWebIdentity` and alert on cross-account or unexpected `sub` claims; correlate with Kubernetes audit logs to detect token exfiltration patterns.
+- **Block automountServiceAccountToken where unnecessary**: Use Kyverno to mutate or validate that non-AWS-calling pods explicitly set `automountServiceAccountToken: false`.
+
+---
+
+### Q: A Karpenter-provisioned node fails to join the EKS cluster within the registration timeout window, causing workload scheduling delays. How do you diagnose and remediate this systematically?
+
+**Model Answer:**
+Node registration failures manifest as nodes in `NotReady` or absent from `kubectl get nodes` despite EC2 instances running. Systematic diagnosis:
+
+1. **Check EC2 instance state and user-data**: SSH (or SSM) into the instance; review `/var/log/cloud-init-output.log` and `/var/log/messages` for bootstrap errors — common causes are malformed user-data, missing `--apiserver-endpoint` or `--b64-cluster-ca` flags in `nodeadm`/`bootstrap.sh`.
+2. **VPC networking prerequisites**: Confirm the node's subnet has a route to the EKS API server endpoint; for private clusters, verify VPC endpoint SGs allow 443 from node SG, and that the node's IAM role has `eks:DescribeCluster` permission.
+3. **Karpenter NodeClaim/Machine events**: Run `kubectl describe nodeclaim <name>` and inspect Karpenter controller logs for launch template resolution errors, capacity errors, or missing AMI.
+4. **IAM node role**: Ensure the node IAM role is present in `aws-auth` ConfigMap (or EKS access entries if using the newer API); a missing entry is one of the most frequent causes.
+5. **Remediation**: Fix the root cause in the EC2NodeClass (AMI selector, user-data template, IAM instance profile); Karpenter will re-attempt provisioning. Set `spec.startupTaints` on the NodePool to hold workloads until node is fully ready.
+6. **Preventive**: Set health-check probes with `terminationGracePeriodSeconds` and configure Karpenter's `spec.disruption.expireAfter` to evict stuck nodes; use CloudWatch alarms on `karpenter_nodes_not_ready` metric.
+
+---
+
+### Q: How do you design an EKS strategy for zero-trust pod-to-pod communication within a cluster, and what are the practical limitations of each enforcement layer?
+
+**Model Answer:**
+Zero-trust pod-to-pod communication requires layered enforcement because no single control is complete:
+
+- **Layer 1 — Kubernetes NetworkPolicy**: Provides namespace/label-scoped L3/L4 rules via VPC CNI's network policy controller or Cilium. Limitation: no L7 awareness, no enforcement across cluster boundaries, and relies on correct label hygiene.
+- **Layer 2 — Service mesh mTLS (AWS App Mesh / Istio / Cilium)**: Enforces mutual TLS between sidecars, providing identity-based (SPIFFE/SPIRE) L7 auth policies. Limitation: sidecar injection overhead, certificate rotation complexity, and Fargate compatibility constraints with Istio.
+- **Layer 3 — OPA/Kyverno admission policies**: Prevent pods from using `hostNetwork`, `hostPID`, or overly broad network access patterns at admission time. Limitation: point-in-time enforcement at deploy, not runtime.
+- **Layer 4 — Security groups for pods**: AWS-native SG assignment per pod (using `ENABLE_POD_ENI=true`); allows VPC-level firewall rules enforced in hardware. Limitation: maximum ENI/IP constraints per node, not supported on Fargate for all instance types.
+- **Practical design**: Combine NetworkPolicy for baseline isolation, SGP for external resource access control, and mTLS for sensitive service-to-service calls. Use Cilium if deep L7 observability and eBPF-based enforcement are required. Accept that defence-in-depth rather than a single perfect solution is the correct posture.
+
+---
+
+### Q: Describe how you would design a disaster recovery (DR) strategy for an EKS-hosted platform with an RTO of 30 minutes and RPO of 5 minutes, and what are the hardest parts to achieve in practice?
+
+**Model Answer:**
+Meeting a 30-minute RTO / 5-minute RPO on EKS requires planning across control-plane, data, and networking layers:
+
+- **Control plane**: EKS control plane is AWS-managed and multi-AZ by default; cluster restoration from scratch (IaC via Terraform/CDK) typically takes 12–18 minutes, so a pre-provisioned standby cluster in a second region is necessary to meet 30-minute RTO.
+- **Workload state via GitOps**: All cluster configuration (Deployments, ConfigMaps, RBAC, CRDs) is stored in Git; Argo CD or Flux can reconcile a blank cluster to desired state in minutes. The hard part is ensuring `aws-auth`/access entries, add-ons, and cluster-scoped resources are codified — gaps here are the most common DR failure point.
+- **Stateful data (5-minute RPO)**: Use cross-region RDS/Aurora Global Database with sub-second replication lag, or DynamoDB global tables. For PVs backed by EBS, use AWS Backup with 5-minute snapshot frequency — but note EBS snapshot restore to a new cluster can take 10–20 minutes for large volumes; prefer application-level replication over volume-level snapshots where possible.
+- **Networking and DNS**: Route 53 health checks with 60-second TTLs on ALB endpoints; pre-warm the DR ALB with AWS Global Accelerator for near-instant failover. VPC peering, PrivateLink, and SG rules must be mirrored in IaC.
+- **Secrets**: AWS Secrets Manager and Parameter Store are regional; ensure cross-region replication is enabled and IRSA trust policies reference the DR cluster's OIDC issuer.
+- **Hardest parts in practice**: Stateful volume restore time, database promotion sequencing (avoiding split-brain), and ensuring the DR cluster's OIDC/IRSA trust chain is valid before workloads start — these three items account for the majority of RTO overruns in real DR drills.
+- **Runbook and chaos testing**: Conduct quarterly DR drills with actual failover (not tabletop); measure each step and automate recovery runbooks using AWS Systems Manager Automation documents.

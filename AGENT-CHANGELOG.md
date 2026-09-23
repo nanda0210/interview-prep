@@ -313,3 +313,15 @@ _Committed & pushed: yes_
 - Describe how you would handle a situation where a platform team needs to deprecate and remove a widely used internal Kubernetes Custom Resource Definition (CRD) that dozens of tenant teams depend on.
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-23 18:49:58
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7260 chars)
+- How do you design an EKS strategy for handling service account token projection and audience validation to prevent cross-service token misuse?
+- A Karpenter-provisioned node fails to join the EKS cluster within the registration timeout window, causing workload scheduling delays. How do you diagnose and remediate this systematically?
+- How do you design an EKS strategy for zero-trust pod-to-pod communication within a cluster, and what are the practical limitations of each enforcement layer?
+- Describe how you would design a disaster recovery (DR) strategy for an EKS-hosted platform with an RTO of 30 minutes and RPO of 5 minutes, and what are the hardest parts to achieve in practice?
+
+_Committed & pushed: yes_
