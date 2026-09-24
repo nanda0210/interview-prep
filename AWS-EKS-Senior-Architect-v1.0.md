@@ -2828,3 +2828,70 @@ Meeting a 30-minute RTO / 5-minute RPO on EKS requires planning across control-p
 - **Secrets**: AWS Secrets Manager and Parameter Store are regional; ensure cross-region replication is enabled and IRSA trust policies reference the DR cluster's OIDC issuer.
 - **Hardest parts in practice**: Stateful volume restore time, database promotion sequencing (avoiding split-brain), and ensuring the DR cluster's OIDC/IRSA trust chain is valid before workloads start — these three items account for the majority of RTO overruns in real DR drills.
 - **Runbook and chaos testing**: Conduct quarterly DR drills with actual failover (not tabletop); measure each step and automate recovery runbooks using AWS Systems Manager Automation documents.
+
+
+---
+
+## 🗓️ Added 2026-09-24 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-24 18:49 -->
+
+### Q: How do you design an EKS strategy for managing and securing Helm releases at scale across a multi-team cluster fleet, and what governance controls prevent configuration drift?
+
+**Model Answer:**
+
+At scale, ungoverned Helm usage causes value-override sprawl, chart version skew, and silent drift between rendered manifests and cluster state. The key controls I apply are:
+
+- **GitOps as the single source of truth**: All Helm releases are declared via HelmRelease CRDs (Flux) or Argo CD Applications. No `helm upgrade` is permitted directly against production clusters; CI enforces this via RBAC and cluster audit log alerting.
+- **Chart provenance and signing**: Charts are published to a private ECR OCI registry, signed with Cosign, and verified at admission time via a policy (OPA/Gatekeeper or Kyverno). Unsigned or unverified charts are rejected.
+- **Values schema enforcement**: Every chart ships a `values.schema.json`; Helm rejects releases that violate the schema. Sensitive values (credentials, keys) are never stored in Git — they reference External Secrets Operator sources.
+- **Release namespacing and RBAC**: Each team's Helm releases are scoped to their namespace. The Flux/Argo controller runs with a least-privilege ServiceAccount that cannot write to other namespaces.
+- **Drift detection**: Argo CD's self-heal or Flux's reconciliation loop continuously compares desired state to live state and alerts (or auto-remediates) on drift. A weekly `helm diff` report is posted to team channels as a soft audit.
+- **Upgrade gates**: Chart bumps go through a PR review that runs `helm template | conftest verify` against OPA policies before merge, catching deprecated API usage or missing resource limits early.
+
+---
+
+### Q: A node in your EKS cluster is marked "Ready" by the Kubernetes API but workloads on it are silently dropping requests. How do you systematically identify and remediate the root cause?
+
+**Model Answer:**
+
+A node appearing Ready to the control plane but failing at the data plane is a classic "split-brain health" problem. My diagnostic sequence:
+
+1. **Isolate the node**: Cordon it immediately to prevent new scheduling while preserving running pods for investigation.
+2. **Data-plane connectivity checks**: Run `kubectl exec` into a pod on the affected node and probe: DNS resolution (`dig`), kube-proxy iptables rules (`iptables-save | grep <svc-ClusterIP>`), and CNI interface state (`ip addr`, `ip route`). Compare against a healthy node.
+3. **kubelet and containerd logs**: SSH (via SSM) to the node. Check `journalctl -u kubelet` for certificate rotation failures, cgroup driver mismatches, or resource pressure eviction loops that don't surface as Conditions.
+4. **VPC CNI state**: Inspect `ipamd` logs (`kubectl logs -n kube-system aws-node-<id>`). IP pool exhaustion or ENI attachment failures cause silent packet drops without marking the node NotReady.
+5. **Node-level resource pressure**: Check `/proc/meminfo`, `dmesg` for OOM events, and `conntrack -S` for connection-tracking table exhaustion — a common culprit on high-connection-count nodes.
+6. **Network policy and security groups**: Verify that SG-for-Pods rules haven't drifted; a stale ENI security group association can block traffic while the node stays Ready.
+7. **Remediation**: If root cause is CNI state corruption, recycle the `aws-node` pod on that node. If it's conntrack exhaustion, tune `nf_conntrack_max` via a DaemonSet or replace the node via Karpenter node disruption. Add a synthetic prober (Blackbox Exporter or a custom readiness probe at the load-balancer target-group level) to catch this class of failure in future.
+
+---
+
+### Q: How do you design an EKS strategy for managing cluster add-on lifecycle — such as CoreDNS, kube-proxy, and VPC CNI — to avoid version skew and reduce toil across a large cluster fleet?
+
+**Model Answer:**
+
+Add-on version skew is one of the most common sources of subtle production incidents during cluster upgrades. My strategy:
+
+- **EKS Managed Add-ons as the baseline**: For CoreDNS, kube-proxy, VPC CNI, and EBS CSI, I use EKS Managed Add-ons so AWS handles compatibility guarantees per control-plane version. I set the update policy to `OVERWRITE` only after validating custom configuration fields are preserved via a ConfigMap backup step in CI.
+- **Declarative add-on versions in IaC**: Terraform (or CDK) pins each add-on version explicitly — never `latest`. A Renovate bot opens PRs when new compatible versions are available, with a changelog diff for review.
+- **Pre-upgrade compatibility matrix check**: Before any control-plane upgrade, an automated script queries the EKS `DescribeAddonVersions` API and compares current add-on versions against the supported matrix for the target Kubernetes version. Failures block the upgrade pipeline.
+- **Custom configuration preservation**: Any custom `tolerations`, `resource` overrides, or CoreDNS `Corefile` patches are stored as Helm values or ConfigMap overlays applied post-add-on reconciliation. This prevents EKS from silently overwriting tuning.
+- **Canary fleet first**: Add-on updates are applied to a canary cluster tier (non-prod or low-traffic prod namespace) and validated with synthetic DNS queries, PVC attach tests, and iptables rule counts before rolling to the full fleet.
+- **Alerting on add-on drift**: A Lambda or EventBridge rule fires when an add-on's `STATUS` moves to `DEGRADED` or `UPDATE_FAILED`, paging the platform team within minutes.
+
+---
+
+### Q: Describe a situation where you identified a systemic EKS reliability risk that was not on anyone's radar. How did you surface it, build alignment, and drive remediation?
+
+**Model Answer:**
+
+At a previous organisation, I noticed during a routine capacity review that all production EKS clusters shared a single NAT Gateway per AZ for egress, but the NAT Gateway connection-tracking table limit (approximately 55,000 concurrent connections) had never been modelled against projected WebSocket workload growth. The risk was invisible because CloudWatch showed no errors — connection exhaustion causes silent packet drops, not API errors.
+
+**Surfacing it**: I pulled `NatGatewayPacketDropCount` metrics retroactively and overlaid them with past incident timelines. Two "mysterious" production degradations 6 months prior correlated precisely with connection-count spikes — root cause had been attributed to "transient AWS issues."
+
+**Building alignment**: I wrote a one-page risk brief with a cost-of-failure estimate (based on revenue impact of those two incidents) and presented it to the VP of Engineering. I avoided framing it as a blame exercise and instead positioned it as a shared architectural debt item. I brought a simple simulation showing how growth projections would hit the limit within 90 days.
+
+**Remediation**: We implemented a two-track fix — immediate (adding a second NAT Gateway and spreading egress via weighted routing in the VPC route tables) and structural (migrating high-connection-count workloads to a VPC Lattice or PrivateLink path that bypasses NAT entirely). I also added a CloudWatch alarm on `NatGatewayPacketDropCount > 0` sustained for 5 minutes, which had never existed.
+
+**Lesson**: Reliability risks in shared infrastructure components (NAT, DNS, ENI limits) are systematically under-monitored because they don't generate application errors until they completely fail. I now include a "shared-layer saturation review" as a standing quarterly agenda item for the platform team.

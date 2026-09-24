@@ -325,3 +325,15 @@ _Committed & pushed: yes_
 - Describe how you would design a disaster recovery (DR) strategy for an EKS-hosted platform with an RTO of 30 minutes and RPO of 5 minutes, and what are the hardest parts to achieve in practice?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-24 18:49:39
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7599 chars)
+- How do you design an EKS strategy for managing and securing Helm releases at scale across a multi-team cluster fleet, and what governance controls prevent configuration drift?
+- A node in your EKS cluster is marked "Ready" by the Kubernetes API but workloads on it are silently dropping requests. How do you systematically identify and remediate the root cause?
+- How do you design an EKS strategy for managing cluster add-on lifecycle — such as CoreDNS, kube-proxy, and VPC CNI — to avoid version skew and reduce toil across a large cluster fleet?
+- Describe a situation where you identified a systemic EKS reliability risk that was not on anyone's radar. How did you surface it, build alignment, and drive remediation?
+
+_Committed & pushed: yes_
