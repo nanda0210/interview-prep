@@ -337,3 +337,15 @@ _Committed & pushed: yes_
 - Describe a situation where you identified a systemic EKS reliability risk that was not on anyone's radar. How did you surface it, build alignment, and drive remediation?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-25 19:07:33
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8005 chars)
+- How do you design an EKS strategy for managing and rotating mTLS certificates for service-to-service communication without a full service mesh, and what are the operational failure modes?
+- A team running EKS reports that their pods are being evicted at a high rate during business hours despite nodes showing available memory in `kubectl describe node`. What is your diagnostic and remediation approach?
+- How do you design an EKS strategy for multi-region active-active workloads where both regions must serve writes simultaneously, and what are the irreducible distributed-systems constraints you must communicate to stakeholders?
+- Describe a situation where a cost optimisation initiative on EKS had unintended reliability consequences, and how you detected, resolved, and institutionalised learnings from it.
+
+_Committed & pushed: yes_

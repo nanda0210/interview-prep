@@ -2895,3 +2895,77 @@ At a previous organisation, I noticed during a routine capacity review that all 
 **Remediation**: We implemented a two-track fix — immediate (adding a second NAT Gateway and spreading egress via weighted routing in the VPC route tables) and structural (migrating high-connection-count workloads to a VPC Lattice or PrivateLink path that bypasses NAT entirely). I also added a CloudWatch alarm on `NatGatewayPacketDropCount > 0` sustained for 5 minutes, which had never existed.
 
 **Lesson**: Reliability risks in shared infrastructure components (NAT, DNS, ENI limits) are systematically under-monitored because they don't generate application errors until they completely fail. I now include a "shared-layer saturation review" as a standing quarterly agenda item for the platform team.
+
+
+---
+
+## 🗓️ Added 2026-09-25 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-25 19:07 -->
+
+### Q: How do you design an EKS strategy for managing and rotating mTLS certificates for service-to-service communication without a full service mesh, and what are the operational failure modes?
+
+**Model Answer:**
+
+Without a full service mesh, the most practical approach is to use **cert-manager** with a private CA backed by **AWS Private CA (ACM PCA)**, issuing short-lived X.509 certificates to pods via projected volumes or init containers. Key design decisions:
+
+- **Certificate lifetime**: Issue certs with 24–72 hour TTLs and rotate at 70% of lifetime to avoid expiry races; cert-manager's renewal loop handles this automatically when the issuer is healthy.
+- **IRSA for cert-manager**: Grant cert-manager's service account the `acm-pca:IssueCertificate` permission scoped to a single CA ARN; avoid wildcard permissions.
+- **Distribution**: Use `csi-driver-spiffe` or cert-manager's CSI driver to mount certificates directly into pod filesystems without Kubernetes Secrets, reducing secret sprawl in etcd.
+- **Failure modes to anticipate**: cert-manager controller pod crash during a rotation window leaves expiring certs unrenewed; solve with PodDisruptionBudgets and leader-election health checks. ACM PCA API throttling during mass pod restarts (e.g., post-upgrade) causes bulk issuance failures — implement exponential backoff and pre-warm certificates before cluster events. Applications that cache TLS contexts in memory won't pick up rotated certs without a SIGHUP or restart signal; this must be documented as an application contract.
+- **Observability**: Export `certmanager_certificate_expiration_timestamp_seconds` to Prometheus and alert at 48 hours before expiry to catch stuck renewals before they become outages.
+
+---
+
+### Q: A team running EKS reports that their pods are being evicted at a high rate during business hours despite nodes showing available memory in `kubectl describe node`. What is your diagnostic and remediation approach?
+
+**Model Answer:**
+
+This pattern typically indicates **eviction based on ephemeral storage pressure, not memory**, or a mismatch between allocatable resources and what the kubelet's eviction manager actually measures.
+
+**Diagnostic steps:**
+1. Check `kubectl describe node` for `Conditions` — look for `DiskPressure` or `MemoryPressure` alongside the eviction events in kubelet logs (`journalctl -u kubelet`).
+2. Review kubelet eviction thresholds: the default `memory.available` soft/hard thresholds (100Mi/100Mi) can trigger eviction even when `kubectl describe node` reports headroom, because the kubelet measures working set memory, not the simple `Allocatable - Requested` figure shown in `describe`.
+3. Inspect pod `ephemeral-storage` requests/limits; if absent, pods with large log output or writable layers can consume node ephemeral storage silently until the kubelet evicts them.
+4. Run `kubectl get events --field-selector reason=Evicted -A` and cross-reference with node-level `df -h` and `du` on the image/log directories.
+
+**Remediation:**
+- Set explicit `requests.ephemeral-storage` and `limits.ephemeral-storage` on all pods to give the scheduler and kubelet accurate data.
+- Tune kubelet eviction thresholds via a custom `kubelet-config` ConfigMap in EKS managed node groups to raise soft eviction thresholds and introduce a grace period before hard eviction.
+- Configure log rotation (`/etc/docker/daemon.json` or containerd log options) to bound container log size on node disk.
+- For memory: ensure VPA or right-sizing exercises have set accurate `requests.memory` so the kubelet's working-set calculation has realistic headroom.
+
+---
+
+### Q: How do you design an EKS strategy for multi-region active-active workloads where both regions must serve writes simultaneously, and what are the irreducible distributed-systems constraints you must communicate to stakeholders?
+
+**Model Answer:**
+
+Active-active write workloads across AWS regions are one of the hardest distributed systems problems; the architecture must be designed around CAP theorem constraints, not around business wishes.
+
+**Architecture approach:**
+- **Data layer**: Only a handful of databases support multi-region active-active writes without application-level conflict resolution — **DynamoDB Global Tables** (last-writer-wins), **Aurora Global Database** (single primary, read replicas only — this is *active-passive* for writes), and **CockroachDB** or **YugabyteDB** (consensus-based, higher latency). Clarify which is actually required.
+- **EKS topology**: Deploy independent EKS clusters per region; use **AWS Global Accelerator** or **Route 53 latency-based routing** with health checks to direct clients to their nearest region. Clusters must be operationally independent — a control plane failure in us-east-1 must not affect eu-west-1.
+- **State partitioning**: Where possible, shard write ownership by key range or tenant to a home region, turning the problem into active-passive per shard — this sidesteps conflict resolution entirely.
+- **Conflict resolution**: If true concurrent writes to the same record from both regions are required, the application must implement CRDTs, vector clocks, or last-write-wins with business-acceptable semantics. This is an application design contract, not an infrastructure one.
+- **Irreducible constraints to communicate**: Cross-region replication lag (typically 100–300 ms for DynamoDB Global Tables) means reads after writes in a different region may not be consistent; WAN latency adds to every consensus round-trip for strongly consistent stores; and **no infrastructure choice eliminates the need for a conflict resolution policy** — stakeholders must decide, not defer, this question.
+
+---
+
+### Q: Describe a situation where a cost optimisation initiative on EKS had unintended reliability consequences, and how you detected, resolved, and institutionalised learnings from it.
+
+**Model Answer:**
+
+At a previous organisation, we consolidated three lightly-loaded EKS clusters into one to reduce per-cluster fixed costs (NAT gateways, load balancers, management overhead). We moved approximately 40 microservices from separate clusters into a single multi-tenant cluster and implemented namespace-based isolation.
+
+**Unintended consequence**: Three weeks post-migration, a poorly-written batch job in one namespace triggered API server request flooding — it ran a list-watch loop with no exponential backoff against the Kubernetes API. Because we were now on a shared control plane, API server throttling (429s) cascaded to unrelated namespaces, causing Deployments to fail rollouts and HPA to stop scaling decisions cluster-wide. We had reduced our blast radius isolation in exchange for cost savings.
+
+**Detection**: We caught it via a spike in `apiserver_request_total{code="429"}` in our Prometheus stack and correlated it with the batch job's start time in audit logs.
+
+**Resolution**: We immediately applied a `FlowSchema` and `PriorityLevelConfiguration` to rate-limit the offending service account to a low-priority queue, protecting system and leader-election traffic. We patched the batch job's client to use informers with shared caches. We also applied a ResourceQuota on API request rate (using webhook-based enforcement) for that namespace.
+
+**Institutionalised learnings**:
+1. Added a **pre-migration reliability review gate** that explicitly assesses blast-radius changes when consolidating clusters.
+2. Established **per-namespace API server audit dashboards** so noisy tenants are visible by default.
+3. Updated our cost-optimisation runbook to require a 30-day canary period on any cluster consolidation, with SLO monitoring for API error rates as an explicit success criterion.
+4. Introduced the trade-off explicitly into our platform team's cost-vs-isolation decision framework — consolidation saves money but transfers reliability risk; that risk must be quantified, not assumed away.
