@@ -349,3 +349,15 @@ _Committed & pushed: yes_
 - Describe a situation where a cost optimisation initiative on EKS had unintended reliability consequences, and how you detected, resolved, and institutionalised learnings from it.
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-26 18:17:29
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (6998 chars)
+- How do you design an EKS strategy for managing and enforcing Pod Security Standards (PSS) across a multi-team cluster fleet, and what are the operational gaps left by the built-in admission controller?
+- A team reports that their EKS service's P99 latency spikes sharply every 30 minutes like clockwork, even under constant load. How do you systematically diagnose and resolve this?
+- How do you design an EKS strategy for managing and surfacing Kubernetes events at scale for operational awareness without overwhelming your observability backend?
+- Describe a situation where a platform decision you made early in an EKS architecture created significant operational debt later. What would you do differently, and how do you now guard against this class of mistake?
+
+_Committed & pushed: yes_

@@ -2969,3 +2969,70 @@ At a previous organisation, we consolidated three lightly-loaded EKS clusters in
 2. Established **per-namespace API server audit dashboards** so noisy tenants are visible by default.
 3. Updated our cost-optimisation runbook to require a 30-day canary period on any cluster consolidation, with SLO monitoring for API error rates as an explicit success criterion.
 4. Introduced the trade-off explicitly into our platform team's cost-vs-isolation decision framework — consolidation saves money but transfers reliability risk; that risk must be quantified, not assumed away.
+
+
+---
+
+## 🗓️ Added 2026-09-26 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-26 18:17 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing Pod Security Standards (PSS) across a multi-team cluster fleet, and what are the operational gaps left by the built-in admission controller?
+
+**Model Answer:**
+
+Pod Security Standards (Baseline, Restricted, Privileged) are enforced via the built-in `PodSecurity` admission controller using namespace labels, which is the successor to the deprecated PSP. The strategy involves:
+
+- **Namespace labeling at provisioning time** via GitOps or a Namespace-as-a-Service controller so teams cannot self-assign permissive labels; enforce via OPA/Gatekeeper or Kyverno policies that reject namespace objects lacking an approved `pod-security.kubernetes.io/enforce` label.
+- **Graduated enforcement**: new namespaces default to `Restricted`; exceptions require a documented, time-bounded waiver approved through a policy-as-code PR review process.
+- **Operational gaps**: PSS only validates at admission — it does not detect drift on already-running pods, does not evaluate workload identity or network posture, and has no per-rule exemption granularity. Fill these gaps with Falco or AWS GuardDuty for EKS runtime detection and Kyverno for richer, auditable policy with `audit` mode reporting.
+- **Fargate caveat**: Fargate enforces its own isolation model but still requires PSS labels; `hostPath`, `hostNetwork`, and `privileged` are blocked at the Fargate level regardless.
+- Report `warn`-mode violations to a central Prometheus/CloudWatch sink so teams see failures before enforce mode is activated during upgrades.
+
+---
+
+### Q: A team reports that their EKS service's P99 latency spikes sharply every 30 minutes like clockwork, even under constant load. How do you systematically diagnose and resolve this?
+
+**Model Answer:**
+
+A 30-minute periodic spike is a strong signal of a **scheduled or timer-driven event** rather than traffic-driven load. The systematic approach:
+
+1. **Correlate timing exactly**: align spike timestamps against CronJobs, HPA scale events, Karpenter node recycling, CoreDNS cache TTL flushes, JVM/GC stop-the-world cycles, or application-level cron tasks.
+2. **Inspect GC and runtime metrics** first if the workload is JVM- or Go-based; 30-minute GC pauses or large heap compactions are common culprits masked as "latency" rather than garbage collection time.
+3. **Check CPU throttling**: even if CPU *requests* are met, aggressive *limits* cause CFS quota throttling that manifests as latency, not CPU saturation — examine `container_cpu_cfs_throttled_seconds_total` in Prometheus.
+4. **DNS resolution storms**: if connection pools refresh every 30 minutes and re-resolve DNS, a slow or overloaded CoreDNS under momentary burst can cause P99 spikes; check `coredns_dns_request_duration_seconds` histograms.
+5. **Node-level interference**: Bottlerocket or AL2 nodes run `systemd` timer jobs (e.g., containerd image garbage collection) that can saturate disk I/O; correlate with `node_disk_io_time_seconds_total`.
+6. **Resolution levers**: remove CPU limits (keep requests), tune GC settings, stagger CronJob schedules, increase CoreDNS replicas with `PodAntiAffinity`, and use `ndots:2` to reduce DNS search path lookups.
+
+---
+
+### Q: How do you design an EKS strategy for managing and surfacing Kubernetes events at scale for operational awareness without overwhelming your observability backend?
+
+**Model Answer:**
+
+Kubernetes events are stored in etcd with a default 1-hour TTL and are not persisted to CloudWatch or any external sink by default, creating blind spots for post-incident analysis:
+
+- **Deploy an event exporter** (e.g., `kubernetes-event-exporter` or `eventrouter`) that streams events to CloudWatch Logs, S3, or an OpenSearch cluster. Filter at the exporter level — export `Warning` events always; sample `Normal` events at 1–5% unless they match specific reasons like `OOMKilling`, `BackOff`, `Evicted`, or `FailedScheduling`.
+- **Cardinality control**: group events by `reason` and `involvedObject.kind` before shipping; avoid emitting raw per-pod event objects at full volume into time-series metrics systems, which causes cardinality explosion.
+- **Alerting**: create CloudWatch Metric Filters or Prometheus rules on high-signal reasons — `FailedMount`, `NodeNotReady`, `Evicted` — and route to PagerDuty. Avoid alerting on every `Pulling` or `Scheduled` event.
+- **Audit vs. events**: distinguish Kubernetes *events* (informational, cluster-scoped) from *audit logs* (security-relevant, API-server-generated); manage them through separate pipelines with different retention and access controls.
+- **Cost control**: route events to S3 via CloudWatch Logs with a short 7-day CWL retention and long S3 Glacier retention for compliance; avoid indexing all events in OpenSearch without field-level filtering.
+- For fleet-scale clusters, co-locate the event exporter as a DaemonSet sidecar pattern is wrong — use a single Deployment with leader election to avoid duplicate event shipping.
+
+---
+
+### Q: Describe a situation where a platform decision you made early in an EKS architecture created significant operational debt later. What would you do differently, and how do you now guard against this class of mistake?
+
+**Model Answer:**
+
+Early in a platform build I chose to use a **single large multi-tenant EKS cluster** with namespace-based isolation to minimise operational overhead and reduce AWS service quotas consumption. Within 18 months, this created compounding debt: blast radius from a misconfigured admission webhook took down admission for all 40 teams simultaneously; noisy-neighbour API server throttling became a weekly escalation; and the upgrade cycle required coordinating 40 teams' readiness simultaneously, stretching a 2-week upgrade to 4 months.
+
+**What I'd do differently:**
+- **Design for cluster boundaries as a product**: treat cluster-per-team or cluster-per-environment as the default for isolation, and multi-tenancy as the exception requiring explicit justification.
+- **Prove the upgrade path early**: the single largest indicator of future pain is how long a test upgrade takes in week 1; if it's hard then, it will be harder at scale.
+- **Introduce a "cluster cell" model**: groups of workloads with similar criticality, upgrade cadence, and team ownership share a cluster; this bounds blast radius while keeping cluster count manageable.
+
+**How I guard against this now:**
+- Require a written **Architectural Decision Record (ADR)** for any decision that is expensive to reverse (cluster topology, CNI choice, service mesh adoption); include an explicit "cost to undo" section.
+- Run **1-year operational load simulations** during design: "what does this look like with 10x the current team count and a mandatory quarterly upgrade?"
+- Build **reversibility metrics** into quarterly architecture reviews so debt is surfaced before it becomes critical-path work.
