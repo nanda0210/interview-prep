@@ -3036,3 +3036,72 @@ Early in a platform build I chose to use a **single large multi-tenant EKS clust
 - Require a written **Architectural Decision Record (ADR)** for any decision that is expensive to reverse (cluster topology, CNI choice, service mesh adoption); include an explicit "cost to undo" section.
 - Run **1-year operational load simulations** during design: "what does this look like with 10x the current team count and a mandatory quarterly upgrade?"
 - Build **reversibility metrics** into quarterly architecture reviews so debt is surfaced before it becomes critical-path work.
+
+
+---
+
+## 🗓️ Added 2026-09-27 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-27 18:53 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing fine-grained IAM permissions for workloads using IRSA at scale, and what failure modes should architects anticipate?
+
+**Model Answer:**
+
+At scale, IRSA (IAM Roles for Service Accounts) management requires a structured approach to prevent sprawl and privilege creep:
+
+- **Role vending automation:** Use a GitOps-driven or IaC pipeline (Terraform + Atlantis, or a custom controller) to provision IRSA roles with least-privilege policies per team/namespace, with mandatory peer review for any `*` actions.
+- **Trust policy hygiene:** Each IRSA trust policy must scope the `sub` condition to the exact namespace and service account name — omitting this allows any pod in the cluster to assume the role if it can spoof the service account.
+- **Audit and drift detection:** Periodically diff live IAM policies against the IaC source of truth using AWS Config rules or `iam-policy-validator`; flag any out-of-band changes.
+- **Token audience validation:** Ensure the OIDC audience in the projected token matches the role's trust policy; misconfigured audiences cause silent 403s that are hard to trace.
+- **Common failure modes:** Stale OIDC thumbprints after EKS control-plane rotation, missing `sts:AssumeRoleWithWebIdentity` permission, pod identity agent not injecting the `AWS_ROLE_ARN` env var due to webhook bypass, and cross-account trust policies missing `sts:TagSession` for attribute-based access.
+- **EKS Pod Identity (2024+):** For new clusters, evaluate EKS Pod Identity over IRSA — it removes the OIDC provider dependency and simplifies trust policy management, but lacks cross-account support without additional configuration.
+
+---
+
+### Q: A production EKS cluster's CoreDNS pods are healthy, but intermittent DNS resolution failures are causing cascading service timeouts. How do you systematically diagnose and resolve this?
+
+**Model Answer:**
+
+DNS failures in EKS are frequently misdiagnosed as application bugs. Systematic approach:
+
+1. **Distinguish NXDomain vs. timeout:** Use `kubectl exec` + `dig` with `+stats` to separate NXDOMAIN (wrong name) from timeout (infrastructure problem) — they have very different root causes.
+2. **conntrack table exhaustion:** On high-throughput nodes, the Linux conntrack table fills up causing UDP DNS packets to be silently dropped. Check `conntrack -S` for `insert_failed` or `drop` counters; tune `nf_conntrack_max` or enable NodeLocal DNSCache to reduce conntrack pressure.
+3. **NodeLocal DNSCache:** Deploying `node-local-dns` as a DaemonSet moves most DNS traffic to a local cache, eliminating the hairpin NAT through the conntrack table for in-cluster lookups and dramatically reducing CoreDNS load.
+4. **VPC CNI ndots issue:** Default `ndots:5` causes every short hostname to generate 5 DNS queries before resolving. Tune `ndots` to `2` or `3` in pod `dnsConfig`, or use FQDN in service URLs to cut query volume.
+5. **CoreDNS autoscaling:** Verify CoreDNS HPA or proportional autoscaler is active; a 2-replica CoreDNS deployment for a 200-node cluster is chronically undersized and causes queueing latency under load.
+6. **Upstream resolver throttling:** For external DNS, VPC resolver has a limit of 1,024 queries/second/interface. Large clusters may need Route 53 Resolver endpoints or caching to avoid hitting this.
+
+---
+
+### Q: How do you design an EKS strategy for secure, auditable, and operationally safe `kubectl` access for engineers across multiple teams and clusters, without distributing long-lived kubeconfig credentials?
+
+**Model Answer:**
+
+Long-lived kubeconfig files are a persistent security anti-pattern — lost laptops, leaked CI configs, and stale tokens are common breach vectors:
+
+- **AWS IAM Identity Center (SSO) + `eks get-token`:** Engineers authenticate via SSO; temporary STS credentials are exchanged for short-lived Kubernetes API tokens via the `aws eks get-token` exec credential plugin. No static credentials are stored.
+- **EKS Access Entries (API-native RBAC):** Use EKS Access Entries (GA 2024) to bind IAM principals to Kubernetes RBAC roles directly through the EKS API, replacing the error-prone `aws-auth` ConfigMap. Changes are auditable via CloudTrail.
+- **Just-in-time access:** Integrate with a JIT broker (e.g., AWS IAM Identity Center permission sets with time-bound assignments, or a tool like Teleport) so elevated `kubectl` access is granted on-demand with approval workflow and auto-expires.
+- **Bastion/proxy pattern for prod:** Production cluster API server endpoints should be private; engineers access via an SSM-connected bastion or a Kubernetes API proxy (e.g., Teleport Kubernetes Access) that records session activity for compliance.
+- **Namespace-scoped RBAC by default:** Developers receive `edit` role scoped to their namespace only; cluster-admin equivalent requires a separate JIT escalation with audit trail.
+- **Audit log review:** Enable EKS control-plane audit logs, ship to CloudWatch or S3, and alert on `cluster-admin` usage, `exec` into pods, and `secrets get` operations outside approved service accounts.
+
+---
+
+### Q: Describe a situation where a seemingly routine EKS cluster upgrade caused a production incident that wasn't caught in staging. What systemic controls did you put in place afterward?
+
+**Model Answer:**
+
+In one case, a minor-version upgrade (1.24 → 1.25) removed the `PodSecurityPolicy` API that had been deprecated for two versions. Staging clusters were using a newer add-on version that had already migrated to PSS, but production still had PSP-dependent admission webhooks from a third-party operator. The upgrade silently disabled PSPs, the operator fell back to permissive mode, and a misconfigured privileged pod reached production before anyone noticed.
+
+**Root cause:** Staging and production had diverged in add-on versions; the staging upgrade path did not faithfully reproduce the production API surface.
+
+**Systemic controls added:**
+
+- **API deprecation scanning in CI:** Integrated `pluto` and `kubent` into the pre-upgrade pipeline; any manifest referencing a deprecated or removed API blocks promotion.
+- **Version parity enforcement:** IaC enforces that staging cluster add-on versions must match production within one patch version; drift alerts fire in Slack daily.
+- **Pre-upgrade dry-run gate:** A dedicated "canary cluster" running identical add-on versions and a traffic replay (read-only) validates the upgrade before production proceeds.
+- **Blast radius sequencing:** Upgrades now follow a strict order — control plane, system node groups, then workload node groups — with automated health checks (rollout status, HPA metrics, synthetic probes) between each phase before proceeding.
+- **PSP migration completed immediately:** Migrated all workloads to Pod Security Standards with `warn` mode first across all environments simultaneously, enforced via Kyverno policies, eliminating the class of divergence entirely.
+- **Behavioral retrospective:** Embedded a "what would staging miss?" question into the upgrade runbook as a mandatory pre-flight review step to surface environmental assumptions.

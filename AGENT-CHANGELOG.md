@@ -361,3 +361,15 @@ _Committed & pushed: yes_
 - Describe a situation where a platform decision you made early in an EKS architecture created significant operational debt later. What would you do differently, and how do you now guard against this class of mistake?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-27 18:53:25
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7230 chars)
+- How do you design an EKS strategy for managing and enforcing fine-grained IAM permissions for workloads using IRSA at scale, and what failure modes should architects anticipate?
+- A production EKS cluster's CoreDNS pods are healthy, but intermittent DNS resolution failures are causing cascading service timeouts. How do you systematically diagnose and resolve this?
+- How do you design an EKS strategy for secure, auditable, and operationally safe `kubectl` access for engineers across multiple teams and clusters, without distributing long-lived kubeconfig credentials?
+- Describe a situation where a seemingly routine EKS cluster upgrade caused a production incident that wasn't caught in staging. What systemic controls did you put in place afterward?
+
+_Committed & pushed: yes_
