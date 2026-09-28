@@ -373,3 +373,15 @@ _Committed & pushed: yes_
 - Describe a situation where a seemingly routine EKS cluster upgrade caused a production incident that wasn't caught in staging. What systemic controls did you put in place afterward?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-28 21:03:52
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7172 chars)
+- How do you design an EKS strategy for managing and enforcing network segmentation between tenants in a shared cluster using a combination of Kubernetes NetworkPolicy and AWS-native controls?
+- A production EKS cluster's Cluster Autoscaler (or Karpenter) is consistently under-provisioning during sudden, sharp traffic spikes, causing 30–60 seconds of pod-pending time before new nodes are ready. How do you diagnose and architect a solution?
+- Describe a situation where a change to an EKS cluster's IAM or RBAC configuration caused an unintended privilege escalation. How did you detect it, contain it, and what systemic changes did you make afterward?
+- How do you design an EKS strategy for observability data cardinality explosions caused by high-label-count metrics from large-scale workloads, and what are the architectural trade-offs between Prometheus, AMP, and ADOT?
+
+_Committed & pushed: yes_

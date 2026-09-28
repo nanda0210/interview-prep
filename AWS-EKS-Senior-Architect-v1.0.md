@@ -3105,3 +3105,80 @@ In one case, a minor-version upgrade (1.24 → 1.25) removed the `PodSecurityPol
 - **Blast radius sequencing:** Upgrades now follow a strict order — control plane, system node groups, then workload node groups — with automated health checks (rollout status, HPA metrics, synthetic probes) between each phase before proceeding.
 - **PSP migration completed immediately:** Migrated all workloads to Pod Security Standards with `warn` mode first across all environments simultaneously, enforced via Kyverno policies, eliminating the class of divergence entirely.
 - **Behavioral retrospective:** Embedded a "what would staging miss?" question into the upgrade runbook as a mandatory pre-flight review step to surface environmental assumptions.
+
+
+---
+
+## 🗓️ Added 2026-09-28 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-28 21:03 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing network segmentation between tenants in a shared cluster using a combination of Kubernetes NetworkPolicy and AWS-native controls?
+
+**Model Answer:**
+
+Pure Kubernetes NetworkPolicy enforced by the VPC CNI's network policy controller provides pod-level east-west isolation, but it has gaps: it cannot block node-to-pod bypass paths, it is namespace-scoped, and policy sprawl across teams is hard to audit. A layered approach is required:
+
+- **Namespace-per-tenant with default-deny ingress/egress** NetworkPolicy as a baseline; admission webhooks (OPA/Gatekeeper or Kyverno) ensure no team can deploy without that default-deny policy in place.
+- **Security Groups for Pods (SGfP)** assigns an AWS Security Group to a pod's ENI, enabling VPC-layer enforcement independent of kube-proxy or CNI policy—useful for cross-VPC or cross-account isolation.
+- **Dedicated node groups per sensitive tenant** with node selectors and taints, so SGfP rules at the node level act as a second control plane even if a kube policy is misconfigured.
+- **AWS Network Firewall or Gateway Load Balancer** for north-south and inter-VPC flows where tenant workloads egress to shared services or the internet.
+- Audit NetworkPolicy coverage continuously with tools like `netassert` or Cilium's policy verdict logs; surface gaps in a central SIEM.
+- The key trade-off: SGfP consumes additional ENIs per node, reducing max-pods, so plan node sizing and prefix delegation accordingly.
+
+---
+
+### Q: A production EKS cluster's Cluster Autoscaler (or Karpenter) is consistently under-provisioning during sudden, sharp traffic spikes, causing 30–60 seconds of pod-pending time before new nodes are ready. How do you diagnose and architect a solution?
+
+**Model Answer:**
+
+The root cause is usually the combination of node bootstrap latency (AMI pull + kubelet init + CNI warm-up) and autoscaler reaction lag. Diagnosis steps:
+
+1. Check autoscaler/Karpenter logs for scale-out decision timestamps vs. node `Ready` time—isolate where latency lives (decision lag vs. bootstrap lag).
+2. Review pending pod events for `FailedScheduling` reasons; confirm it is capacity, not taint/affinity mismatch.
+3. Check VPC CNI IP warm pool (`WARM_IP_TARGET`, `MINIMUM_IP_TARGET`) — IP exhaustion at the ENI level can delay pod assignment even after the node is `Ready`.
+
+**Architectural mitigations:**
+- **Proactive overprovisioning**: deploy a low-priority "pause" pod Deployment consuming spare capacity; real workloads preempt it instantly, eliminating cold-start time.
+- **Pre-warmed node pools**: Karpenter `NodePool` with `startupTaints` and a separate Deployment that holds warm nodes by keeping them tainted until needed.
+- **Faster AMIs**: use pre-cached Bottlerocket or custom AL2023 AMIs with the container runtime and common images already pulled (EC2 Image Builder pipeline).
+- **HPA lead time tuning**: scale HPA aggressively (lower `stabilizationWindowSeconds`, higher scaling policies) so pod replicas increase ahead of saturation, giving the autoscaler earlier signal.
+- Accept a small cost premium from over-provisioning in exchange for sub-10-second scheduling; quantify this against the revenue impact of latency spikes.
+
+---
+
+### Q: Describe a situation where a change to an EKS cluster's IAM or RBAC configuration caused an unintended privilege escalation. How did you detect it, contain it, and what systemic changes did you make afterward?
+
+**Model Answer:**
+
+In a prior role, a platform engineer added a new ClusterRoleBinding granting a CI service account `cluster-admin` to unblock a deployment pipeline quickly — the intent was temporary, but it was never reverted. We detected it three weeks later when a routine `kubectl auth can-i --list` audit script flagged the binding as out-of-policy.
+
+**Containment:**
+- Immediately deleted the ClusterRoleBinding and rotated the service account token.
+- Reviewed CloudTrail for all API calls made by that service account's IRSA role over the preceding three weeks; no evidence of abuse, but the review itself took significant time.
+- Patched the CI pipeline to use a least-privilege Role scoped to the target namespace.
+
+**Systemic changes afterward:**
+- Deployed **rbac-police** and **kube-bench** as scheduled jobs, with findings pushed to Security Hub; any `cluster-admin` binding outside the `kube-system` namespace pages on-call automatically.
+- Enforced a **Kyverno policy** that blocks ClusterRoleBindings referencing `cluster-admin` unless the requester is in a specific IAM group, with a break-glass exception workflow.
+- Introduced a mandatory peer-review step in the GitOps pipeline for any RBAC manifest change, with a separate approver group from the author's team.
+- Added quarterly RBAC access reviews as a compliance control, producing a report for the security team.
+
+The behavioral lesson: "temporary" privileges are a systemic pattern risk, not a one-off; the fix must be process and automation, not just reverting the change.
+
+---
+
+### Q: How do you design an EKS strategy for observability data cardinality explosions caused by high-label-count metrics from large-scale workloads, and what are the architectural trade-offs between Prometheus, AMP, and ADOT?
+
+**Model Answer:**
+
+High-cardinality metrics (pod name, request ID, or user ID as labels) cause Prometheus TSDB to grow exponentially, scrape latency to increase, and query performance to degrade — eventually threatening cluster stability if Prometheus itself runs on the cluster.
+
+**Design approach:**
+
+- **Label hygiene at the source**: enforce via Kyverno or OPA that teams may not emit metrics with unbounded label dimensions (e.g., user IDs); provide a recording rule layer to aggregate before storage.
+- **Recording rules and metric federation**: pre-aggregate high-frequency series into lower-cardinality rollups at the Prometheus level; only the rollups are remote-written to AMP, reducing ingestion volume by 10–100×.
+- **ADOT Collector as the scrape layer**: run ADOT as a DaemonSet or Deployment, offloading scraping from a central Prometheus; ADOT's `filter` and `metricstransform` processors drop or relabel high-cardinality labels before they enter the pipeline.
+- **Amazon Managed Prometheus (AMP)**: removes the operational burden of Prometheus storage scaling but does not eliminate cardinality costs — AMP pricing is per sample ingested and per sample queried, so unbounded cardinality is a cost risk, not just a performance risk. Set ingestion alerts on sample rate.
+- **Trade-offs**: AMP + ADOT reduces ops overhead but increases AWS spend at scale and introduces remote-write latency (typically 5–30 s); a self-managed Prometheus with Thanos gives more control and lower per-sample cost at the expense of significant operational complexity (compaction, store gateway sizing, object storage lifecycle).
+- For very high cardinality use cases (tracing-style metrics), redirect to AWS X-Ray or OpenTelemetry traces instead of metrics — metrics are the wrong tool for per-request dimensionality.
