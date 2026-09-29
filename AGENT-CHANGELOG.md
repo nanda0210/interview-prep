@@ -385,3 +385,15 @@ _Committed & pushed: yes_
 - How do you design an EKS strategy for observability data cardinality explosions caused by high-label-count metrics from large-scale workloads, and what are the architectural trade-offs between Prometheus, AMP, and ADOT?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-29 19:46:58
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8113 chars)
+- How do you design an EKS strategy for managing and enforcing resource-based network policies at the AWS level (security groups per pod) alongside Kubernetes-native network policies, and what are the operational pitfalls of running both simultaneously?
+- A critical EKS workload is experiencing periodic "context deadline exceeded" errors on API server calls from within the cluster, but external kubectl commands succeed. How do you systematically diagnose and resolve this?
+- How do you design an EKS strategy for managing multi-architecture (x86_64 and ARM64/Graviton) node pools within the same cluster, and what are the failure modes teams encounter when they first migrate workloads?
+- Describe a situation where you had to re-architect EKS networking mid-flight because the initial design could not support the scale the platform reached. What were the signals, the constraints, and the migration path?
+
+_Committed & pushed: yes_

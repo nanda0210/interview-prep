@@ -3182,3 +3182,81 @@ High-cardinality metrics (pod name, request ID, or user ID as labels) cause Prom
 - **Amazon Managed Prometheus (AMP)**: removes the operational burden of Prometheus storage scaling but does not eliminate cardinality costs — AMP pricing is per sample ingested and per sample queried, so unbounded cardinality is a cost risk, not just a performance risk. Set ingestion alerts on sample rate.
 - **Trade-offs**: AMP + ADOT reduces ops overhead but increases AWS spend at scale and introduces remote-write latency (typically 5–30 s); a self-managed Prometheus with Thanos gives more control and lower per-sample cost at the expense of significant operational complexity (compaction, store gateway sizing, object storage lifecycle).
 - For very high cardinality use cases (tracing-style metrics), redirect to AWS X-Ray or OpenTelemetry traces instead of metrics — metrics are the wrong tool for per-request dimensionality.
+
+
+---
+
+## 🗓️ Added 2026-09-29 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-29 19:46 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing resource-based network policies at the AWS level (security groups per pod) alongside Kubernetes-native network policies, and what are the operational pitfalls of running both simultaneously?
+
+**Model Answer:**
+
+Security Groups for Pods (SGfP) and Kubernetes network policies address different layers and should be treated as complementary, not interchangeable. SGfP operates at the ENI level via the VPC CNI's `ENABLE_POD_ENI` feature, enforcing AWS-level firewall rules useful for controlling access to RDS, ElastiCache, or cross-VPC resources without opening entire node CIDRs. Kubernetes network policies (enforced by a CNI plugin like the VPC CNI policy controller, Calico, or Cilium) operate at the pod-IP level within the cluster.
+
+Key pitfalls when running both:
+- **Trunk/branch ENI limits** — SGfP requires branch ENIs; each node has a hard limit on trunk ENIs (one per node) and branch ENIs per trunk, constraining pod density on instances that otherwise support more pods via secondary IPs.
+- **Incompatibility with custom networking** — SGfP is incompatible with the VPC CNI's `AWS_VPC_K8S_CNI_CUSTOM_NETWORK_CFG` option without careful ordering; enabling both without understanding interactions causes pods to fail to get IPs.
+- **Policy drift** — teams may apply security group rules assuming they cover intra-cluster traffic, which they don't; intra-cluster east-west must still be covered by network policies.
+- **Audit complexity** — effective connectivity requires reasoning across two policy planes; tooling like Reachability Analyzer helps but is not real-time.
+
+Governance approach: restrict `SecurityGroupPolicy` CRD creation to platform team via RBAC and OPA/Kyverno, publish a decision matrix to workload teams clarifying when to use each mechanism, and run automated policy-consistency checks in CI.
+
+---
+
+### Q: A critical EKS workload is experiencing periodic "context deadline exceeded" errors on API server calls from within the cluster, but external kubectl commands succeed. How do you systematically diagnose and resolve this?
+
+**Model Answer:**
+
+"Context deadline exceeded" from in-cluster clients hitting the API server points to a different network path than external kubectl, so the first step is isolating the specific path. In-cluster traffic typically routes through the `kubernetes` ClusterIP service (port 443 → API server ENI), whereas external kubectl goes through the EKS-managed API server endpoint (public or private NLB).
+
+**Systematic diagnosis steps:**
+1. **Check kube-proxy / iptables rules** — verify the `kubernetes` service ClusterIP resolves correctly and iptables DNAT rules on the failing node are intact; a stale or corrupted kube-proxy state on specific nodes can black-hole API traffic from pods on those nodes.
+2. **Node-level connectivity test** — exec into a debug pod on the affected node and `curl -k https://kubernetes.default.svc` with timing; compare against a healthy node.
+3. **VPC CNI / security group rules** — confirm the node's primary ENI security group allows outbound 443 to the EKS control plane ENIs (these are in AWS-managed subnets and often missed in custom SGs).
+4. **API server throttling** — check `apiserver_request_total` with `code=429` in CloudWatch metrics; in-cluster clients (controllers, operators) often generate high QPS that external kubectl does not.
+5. **AWS PrivateLink / endpoint routing** — if using private endpoint, confirm VPC DNS resolution returns the private IP, not public; split-horizon DNS misconfiguration can route in-cluster traffic inefficiently.
+6. **Client-side timeout settings** — some operators default to very short client timeouts; tuning `--kube-api-qps`, `--kube-api-burst`, and exponential backoff settings in the controller resolves transient overload.
+
+Resolution usually combines fixing the network path (SG rules, kube-proxy) and implementing API priority-and-fairness (APF) flow schemas to protect critical in-cluster traffic from noisy neighbours.
+
+---
+
+### Q: How do you design an EKS strategy for managing multi-architecture (x86_64 and ARM64/Graviton) node pools within the same cluster, and what are the failure modes teams encounter when they first migrate workloads?
+
+**Model Answer:**
+
+Multi-arch support in EKS is operationally viable but requires consistent governance across the image build pipeline, scheduling layer, and add-on management.
+
+**Architecture:**
+- Maintain distinct managed node groups or Karpenter `NodePools` for `amd64` and `arm64`, with node labels (`kubernetes.io/arch`) and taints to prevent accidental cross-scheduling during migration.
+- Require all platform-owned container images to be built and pushed as multi-arch manifests (Docker manifest lists) using `docker buildx` or Buildkite/GitHub Actions multi-platform builds; single-arch images must be explicitly flagged in CI.
+- EKS-managed add-ons (CoreDNS, kube-proxy, VPC CNI) publish multi-arch images; validate this for any third-party operators before enabling Graviton nodes.
+
+**Common failure modes teams encounter:**
+- **Single-arch base images** — a workload references a public base image (e.g., a custom sidecar) that only has an `amd64` manifest; pod fails with `exec format error` on Graviton nodes, often misread as an app crash.
+- **Native compiled binaries in init containers** — build pipelines that compile binaries at image build time work correctly locally (x86 dev machines) but produce wrong-arch binaries baked into ARM images.
+- **Performance assumptions invalidated** — some cryptography-heavy or SIMD-optimised workloads perform differently on Graviton; right-sizing requires re-benchmarking, not just copying resource requests.
+- **Karpenter consolidation moving pods across arch** — without proper `nodeAffinity` or `nodeSelector`, Karpenter's consolidation logic can reschedule a pod from x86 to Graviton if the image happens to be multi-arch but the binary isn't tested on ARM.
+
+**Governance:** enforce a Kyverno policy requiring `kubernetes.io/arch` nodeSelector or affinity on all pods during the migration window; lift the policy once all images are validated multi-arch.
+
+---
+
+### Q: Describe a situation where you had to re-architect EKS networking mid-flight because the initial design could not support the scale the platform reached. What were the signals, the constraints, and the migration path?
+
+**Model Answer:**
+
+In a previous role, we initially deployed EKS using the default VPC CNI in secondary-IP mode across three /24 subnets per AZ, which comfortably supported ~400 pods at launch. As the platform grew to 1,200+ pods and onboarded stateful workloads, we hit two simultaneous limits: subnet IP exhaustion causing pod scheduling failures, and the 110-pod-per-node ceiling on our chosen instance type (m5.4xlarge) limiting density.
+
+**Signals:** `FailedScheduling` events citing `Insufficient memory` were actually masking IP exhaustion — the CNI was failing to allocate IPs silently and Pending pods looked resource-constrained. CloudWatch metric `awscni_total_ip_addresses` versus `awscni_assigned_ip_addresses` revealed the real gap.
+
+**Constraints:** We could not re-CIDR the VPC (shared with legacy services), could not migrate to a new VPC without a multi-month dependency negotiation, and had to maintain zero downtime for live production traffic throughout.
+
+**Migration path:**
+1. Enabled **VPC CNI custom networking** (`AWS_VPC_K8S_CNI_CUSTOM_NETWORK_CFG`) to assign pod IPs from dedicated, larger subnets (/21s) added to the VPC, while node primary IPs remained in the original /24s — decoupling pod IP space from node IP space.
+2. Rolled new node groups with `ENI_CONFIG_LABEL_DEF` set to AZ labels, validated ENIConfig CRDs per AZ, and drained old nodes in waves using PDBs.
+3. Switched instance type to `m5.8xlarge` (higher ENI/IP limits) to restore density.
+4. Implemented IP prefix delegation (`ENABLE_PREFIX_DELEGATION=true`) on net-new node groups to further increase pod
