@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interview Prep — How This Site Works</title>
+<style>
+  :root{--fg:#16161d;--muted:#6b7280;--line:#e6e6ef;--accent:#4f46e5;--accent2:#7c3aed;--bg:#f6f7fb;--card:#fff;
+  --ok:#16a34a;--warn:#d97706;--code:#0f1020;}
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;
+  background:linear-gradient(180deg,#eef0fb,#f6f7fb 300px);color:var(--fg);line-height:1.55}
+  .wrap{max-width:940px;margin:0 auto;padding:40px 20px 80px}
+  header{display:flex;align-items:center;gap:16px;margin-bottom:6px}
+  .logo{width:54px;height:54px;border-radius:15px;flex:none;color:#fff;font-size:26px;font-weight:800;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center}
+  h1{margin:0;font-size:27px;letter-spacing:-.02em;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--muted);font-size:14.5px;margin:2px 0 22px}
+  .sub a{color:var(--accent);text-decoration:none}
+  .toc{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 24px}
+  .toc a{background:#eef0fb;color:var(--accent);padding:7px 13px;border-radius:20px;font-size:13px;font-weight:600;text-decoration:none}
+  .toc a:hover{background:var(--accent);color:#fff}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px 26px;margin-bottom:22px;
+  box-shadow:0 1px 2px rgba(16,16,29,.04),0 8px 24px rgba(16,16,29,.05)}
+  h2{font-size:20px;margin:0 0 6px;padding-left:14px;position:relative}
+  h2:before{content:"";position:absolute;left:0;top:4px;bottom:4px;width:5px;border-radius:3px;
+  background:linear-gradient(var(--accent),var(--accent2))}
+  h2 .e{margin-right:6px}
+  h3{font-size:15px;margin:20px 0 8px}
+  p{margin:8px 0}.lead{color:var(--muted);font-size:14.5px;margin-top:0}
+  .feat{display:flex;gap:14px;align-items:flex-start;padding:12px 0;border-bottom:1px solid var(--line)}
+  .feat:last-child{border-bottom:0}
+  .feat .fic{font-size:22px;flex:none;width:30px;text-align:center;line-height:1.3}
+  .feat b{display:block;margin-bottom:2px;font-size:15px}.feat span{color:var(--muted);font-size:13.8px}
+  ol.flow{list-style:none;counter-reset:s;padding:0;margin:10px 0 0}
+  ol.flow li{counter-increment:s;position:relative;padding:6px 0 16px 44px;font-size:14.3px}
+  ol.flow li:before{content:counter(s);position:absolute;left:0;top:2px;width:28px;height:28px;border-radius:50%;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-weight:700;font-size:13px;
+  display:flex;align-items:center;justify-content:center}
+  ol.flow li b{color:var(--fg)}
+  table{width:100%;border-collapse:collapse;font-size:13.8px;margin-top:6px}
+  th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+  code{background:#f3f4ff;color:var(--accent);padding:1px 6px;border-radius:5px;font-size:12.5px}
+  pre{background:var(--code);color:#e6e6f0;border-radius:12px;padding:16px 18px;overflow:auto;font-size:12.8px;line-height:1.6}
+  pre .c{color:#8b8ba7}
+  .callout{background:#f3f4ff;border:1px solid #dfe1f7;border-radius:11px;padding:13px 15px;font-size:13.8px;margin-top:14px}
+  .pill{display:inline-block;font-size:12px;font-weight:700;padding:3px 11px;border-radius:20px;margin:0 6px 6px 0}
+  .p-free{background:#ecfdf5;color:var(--ok)} .p-auth{background:#eef2ff;color:var(--accent)} .p-note{background:#fff7ed;color:var(--warn)}
+  .diagram{background:#0f1020;color:#e6e6f0;border-radius:14px;padding:20px;font-size:12.5px;line-height:1.7;overflow:auto;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .diagram b{color:#a5b4fc}
+  footer{color:var(--muted);font-size:12.5px;text-align:center;margin-top:10px;line-height:1.7}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><div class="logo">🎯</div><div><h1>Interview Prep — How This Site Works</h1></div></header>
+  <p class="sub">The document hub, the daily AI agent, and the full workflow ·
+  Site: <a href="https://nanda0210.github.io/interview-prep/">nanda0210.github.io/interview-prep</a></p>
+
+  <div>
+    <span class="pill p-auth">📄 Static hub on GitHub Pages</span>
+    <span class="pill p-free">🤖 Self-updating via AI agent</span>
+    <span class="pill p-note">⏰ Runs daily in the cloud</span>
+  </div>
+
+  <div class="toc">
+    <a href="#what">What it is</a><a href="#parts">The two parts</a><a href="#hub">The document hub</a>
+    <a href="#agent">The daily agent</a><a href="#invoke">How it's invoked</a><a href="#flow">Step-by-step run</a>
+    <a href="#files">Files &amp; where things live</a><a href="#operate">Operate it</a>
+  </div>
+
+  <div class="card" id="what">
+    <h2><span class="e">🧭</span>What this site is</h2>
+    <p class="lead">A living interview-preparation library. A single web page links every study document, and an
+    <b>AI agent automatically writes fresh interview Q&amp;A into the material every day</b> — so the content keeps
+    growing without anyone editing it by hand.</p>
+    <div class="feat"><div class="fic">📚</div><div><b>Document hub</b><span>One page (<code>index.html</code>) that links all PDFs and Markdown study docs, grouped by topic (Python, DevOps, AWS, NVIDIA, handbooks…).</span></div></div>
+    <div class="feat"><div class="fic">🤖</div><div><b>Daily agent</b><span>A scheduled program that generates new Q&amp;A with Claude and appends them to the topic files — append-only, never deleting your content.</span></div></div>
+  </div>
+
+  <div class="card" id="parts">
+    <h2><span class="e">🧩</span>The two parts, at a glance</h2>
+    <table>
+      <tr><th>Part</th><th>What it does</th><th>Where it runs</th></tr>
+      <tr><td><b>Document hub</b></td><td>Serves the index page + all documents to visitors</td><td>GitHub Pages (free static hosting)</td></tr>
+      <tr><td><b>Daily agent</b></td><td>Generates &amp; appends new Q&amp;A, commits the changes back to the repo</td><td>GitHub Actions (cloud, on a schedule)</td></tr>
+    </table>
+    <div class="callout">Both live in the same GitHub repository — <code>github.com/nanda0210/interview-prep</code>. The hub is what people <em>see</em>; the agent is what keeps it <em>fresh</em>.</div>
+  </div>
+
+  <div class="card" id="hub">
+    <h2><span class="e">📚</span>The document hub</h2>
+    <p class="lead"><code>index.html</code> is a hand-built static page — no framework — that lists every study document with a link, organized into sections.</p>
+    <div class="feat"><div class="fic">📑</div><div><b>Sections</b><span>Start-here index &amp; guides · Handbooks (AWS/K8s/Linux/AI SRE) · Python · DevOps · AWS &amp; Cloud · NVIDIA · Agent &amp; skill files.</span></div></div>
+    <div class="feat"><div class="fic">📄</div><div><b>PDFs</b><span>Open directly in the browser.</span></div></div>
+    <div class="feat"><div class="fic">📝</div><div><b>Markdown files</b><span>Open on GitHub's rendered view (e.g. the AWS-EKS guide the agent updates daily).</span></div></div>
+    <div class="feat"><div class="fic">🌐</div><div><b>Hosting</b><span>GitHub Pages serves it at a public URL. A <code>.nojekyll</code> file makes PDFs/archives serve as raw static files.</span></div></div>
+  </div>
+
+  <div class="card" id="agent">
+    <h2><span class="e">🤖</span>The daily agent — functionality</h2>
+    <p class="lead">A small Python program (in the <code>_agent/</code> folder) that uses the Claude API to author new interview questions and answers.</p>
+    <div class="feat"><div class="fic">🧠</div><div><b>AI model</b><span>Anthropic <b>Claude Sonnet 4.6</b> (<code>claude-sonnet-4-6</code>) via the official <code>anthropic</code> SDK, using prompt caching.</span></div></div>
+    <div class="feat"><div class="fic">🗂️</div><div><b>Orchestrator</b><span><code>_agent/orchestrator.py</code> — the "manager": pulls the repo, finds the topic <code>.md</code> files, runs one sub-agent per file, writes the changelog, commits &amp; pushes.</span></div></div>
+    <div class="feat"><div class="fic">✍️</div><div><b>Sub-agent</b><span><code>_agent/subagent.py</code> — the "writer": for one file, asks Claude for <b>4 new Q&amp;A</b> (<code>PREP_ITEMS=4</code>) and appends them under a dated heading. Append-only — it never edits or deletes existing content.</span></div></div>
+    <div class="feat"><div class="fic">🧾</div><div><b>De-duplication</b><span><code>_agent/state.json</code> remembers previously-asked questions so the agent never repeats itself.</span></div></div>
+    <div class="feat"><div class="fic">📈</div><div><b>Changelog</b><span>Each run appends a timestamped summary to <code>AGENT-CHANGELOG.md</code> (which files changed, which questions were added).</span></div></div>
+  </div>
+
+  <div class="card" id="invoke">
+    <h2><span class="e">⏰</span>How the agent is invoked</h2>
+    <p class="lead">It runs <b>in the cloud on a schedule</b> — not on anyone's computer. GitHub Actions is the trigger.</p>
+    <h3>The schedule (<code>.github/workflows/daily-prep.yml</code>)</h3>
+    <pre><span class="c"># Runs every day at 15:00 UTC (~8 AM PDT)</span>
+schedule:
+  - cron: "0 15 * * *"
+workflow_dispatch: {}   <span class="c"># also allows manual "Run workflow"</span>
+
+env:
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  PREP_MODEL: claude-sonnet-4-6
+  PREP_ITEMS: "4"
+run: python3 _agent/orchestrator.py</pre>
+    <div class="feat"><div class="fic">🔑</div><div><b>API key</b><span>Stored as a GitHub <b>repo secret</b> (<code>ANTHROPIC_API_KEY</code>) — never committed to the code.</span></div></div>
+    <div class="feat"><div class="fic">🖐️</div><div><b>Manual run</b><span>Anytime via the repo's <b>Actions</b> tab → "Run workflow", or the CLI <code>gh workflow run daily-prep.yml</code>.</span></div></div>
+    <div class="callout">It previously ran on a Mac via <code>launchd</code>, but macOS blocked background access to the folder — so it was moved to GitHub Actions, which runs reliably regardless of whether your computer is on.</div>
+  </div>
+
+  <div class="card" id="flow">
+    <h2><span class="e">🔄</span>What happens on each daily run</h2>
+    <ol class="flow">
+      <li>GitHub Actions wakes at <b>15:00 UTC</b> and checks out the repo (Python 3.12, installs <code>anthropic</code>).</li>
+      <li><b>Git pull</b> — get the latest content first.</li>
+      <li><b>Discover</b> every topic <code>.md</code> file in the repo.</li>
+      <li>For each file, run a <b>sub-agent</b>: send the subject + previously-asked questions to <b>Claude Sonnet 4.6</b>, get <b>4 fresh Q&amp;A</b>.</li>
+      <li><b>Append</b> the new Q&amp;A under a dated heading (existing content untouched); update <code>state.json</code>.</li>
+      <li>Write a timestamped entry to <b>AGENT-CHANGELOG.md</b>.</li>
+      <li><b>Commit &amp; push</b> back to the repo (as <code>github-actions[bot]</code>).</li>
+      <li>GitHub Pages <b>auto-rebuilds</b> → the site now shows the updated documents.</li>
+    </ol>
+
+    <h3>The flow, visualized</h3>
+    <div class="diagram">
+⏰ <b>GitHub Actions</b> (cron: daily 15:00 UTC)
+        │  runs
+        ▼
+🗂️  <b>orchestrator.py</b>  ── git pull → discover *.md files
+        │  one per file
+        ▼
+✍️  <b>subagent.py</b>  ──►  🧠 <b>Claude Sonnet 4.6 API</b>  ──►  4 new Q&amp;A
+        │                         (dedup via state.json)
+        ▼
+📄  append to topic .md  +  📈 AGENT-CHANGELOG.md
+        │
+        ▼
+⬆️  git commit &amp; push  ──►  🌐 <b>GitHub Pages</b> rebuilds  ──►  live site updated
+    </div>
+  </div>
+
+  <div class="card" id="files">
+    <h2><span class="e">📁</span>Files &amp; where things live</h2>
+    <table>
+      <tr><th>Path</th><th>Role</th></tr>
+      <tr><td><code>index.html</code></td><td>The document hub (links every study doc)</td></tr>
+      <tr><td><code>guide.html</code></td><td>This page — how the site works</td></tr>
+      <tr><td><code>_agent/orchestrator.py</code></td><td>Manager: pull → discover → run sub-agents → changelog → commit/push</td></tr>
+      <tr><td><code>_agent/subagent.py</code></td><td>Writer: calls Claude, appends 4 Q&amp;A per file</td></tr>
+      <tr><td><code>_agent/state.json</code></td><td>Memory of past questions (prevents repeats)</td></tr>
+      <tr><td><code>_agent/.env</code></td><td>API key for local runs (gitignored — not published)</td></tr>
+      <tr><td><code>.github/workflows/daily-prep.yml</code></td><td>The daily cloud schedule (GitHub Actions)</td></tr>
+      <tr><td><code>AGENT-CHANGELOG.md</code></td><td>Human-readable log of every run</td></tr>
+      <tr><td><code>*.pdf / *.md</code></td><td>The study documents themselves</td></tr>
+    </table>
+  </div>
+
+  <div class="card" id="operate">
+    <h2><span class="e">🕹️</span>Operating it</h2>
+    <table>
+      <tr><th>Task</th><th>How</th></tr>
+      <tr><td>See past runs</td><td>Repo → <b>Actions</b> tab (or <code>gh run list --workflow=daily-prep.yml</code>)</td></tr>
+      <tr><td>Run it now</td><td>Actions → Run workflow (or <code>gh workflow run daily-prep.yml</code>)</td></tr>
+      <tr><td>Change the AI model</td><td>Edit <code>PREP_MODEL</code> in <code>daily-prep.yml</code> (e.g. to <code>claude-opus-4-8</code>)</td></tr>
+      <tr><td>Change Q&amp;A per run</td><td>Edit <code>PREP_ITEMS</code> (currently 4)</td></tr>
+      <tr><td>Add a document</td><td>Add the file to the repo &amp; link it in <code>index.html</code>; the agent then keeps <code>.md</code> topics growing</td></tr>
+    </table>
+  </div>
+
+  <footer>
+    Interview Prep — site workflow &amp; agent guide<br>
+    Hub: <a href="https://nanda0210.github.io/interview-prep/">nanda0210.github.io/interview-prep</a> ·
+    Source: <a href="https://github.com/nanda0210/interview-prep">github.com/nanda0210/interview-prep</a>
+  </footer>
+</div>
+</body>
+</html>
