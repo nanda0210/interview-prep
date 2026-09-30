@@ -3260,3 +3260,66 @@ In a previous role, we initially deployed EKS using the default VPC CNI in secon
 2. Rolled new node groups with `ENI_CONFIG_LABEL_DEF` set to AZ labels, validated ENIConfig CRDs per AZ, and drained old nodes in waves using PDBs.
 3. Switched instance type to `m5.8xlarge` (higher ENI/IP limits) to restore density.
 4. Implemented IP prefix delegation (`ENABLE_PREFIX_DELEGATION=true`) on net-new node groups to further increase pod
+
+
+---
+
+## 🗓️ Added 2026-09-30 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-09-30 19:48 -->
+
+### Q: How do you design an EKS strategy for managing persistent volume lifecycle — including provisioning, resizing, snapshotting, and cross-AZ recovery — for stateful workloads at scale?
+
+**Key points an interviewer wants to hear:**
+
+- Use the **EBS CSI Driver** (managed add-on) with `StorageClass` parameters tuned per workload tier (gp3 with explicit IOPS/throughput for latency-sensitive workloads; sc1 for cold storage).
+- **Cross-AZ risk**: EBS volumes are AZ-scoped, so StatefulSets must have pod anti-affinity and topology-aware scheduling (`volumeBindingMode: WaitForFirstConsumer`) to co-locate the pod and volume in the same AZ, preventing perpetual `Pending` states after node failure.
+- **Resizing**: Enable `allowVolumeExpansion: true` on StorageClasses and automate PVC resize via policy; the CSI driver handles online expansion for ext4/xfs without pod restart, but validate filesystem resize actually propagated inside the container.
+- **Snapshotting and DR**: Deploy the **EBS CSI Snapshot Controller** and `VolumeSnapshotClass`; use scheduled `VolumeSnapshot` objects (via Argo Workflows or a CronJob) and replicate snapshots cross-region with Lambda + EventBridge for RPO alignment.
+- **EFS as a complement**: For workloads requiring cross-AZ or cross-pod shared access, use the EFS CSI Driver; understand the throughput mode trade-offs (Elastic vs. Provisioned) and the NFS latency ceiling (~1–3 ms) for latency-sensitive workloads.
+- **Lifecycle hygiene**: Implement a `PersistentVolume` reclaim policy of `Retain` for production StatefulSets and use a reconciliation job to detect and clean up orphaned PVs after StatefulSet deletion to avoid cost accumulation.
+- **Observability**: Scrape `kubelet` volume metrics (`kubelet_volume_stats_*`) and alert on >80% utilisation before hitting capacity, since EBS auto-resize is not automatic at the OS layer without an agent.
+
+---
+
+### Q: A production EKS cluster running a service mesh (Istio or AWS App Mesh) is exhibiting a sudden increase in 503 errors between two services that were communicating correctly the day before. No application code was changed. Walk me through your investigation.
+
+**Key points an interviewer wants to hear:**
+
+1. **Rule out the application layer first**: Confirm 503s are mesh-generated (check `response_flags` in Envoy access logs — `UF`, `UO`, `URX` flags indicate upstream failures, connection limits, or retries exceeded, not application errors).
+2. **Check Envoy sidecar config drift**: Run `istioctl proxy-status` to identify any proxies in `STALE` sync state; a control-plane version mismatch or xDS push backlog can cause stale upstream endpoints, routing rules, or mTLS policy.
+3. **Inspect DestinationRule and mTLS policy**: A recent `PeerAuthentication` change to `STRICT` mode without a matching `DestinationRule` setting `tls.mode: ISTIO_MUTUAL` on the client side causes immediate 503s; verify with `istioctl analyze`.
+4. **Endpoint health and circuit breaking**: Check if a `DestinationRule` circuit breaker (`outlierDetection`) ejected all or most upstream endpoints after a transient failure — ejected hosts won't recover until the ejection interval expires.
+5. **Certificate expiry**: Istio rotates Envoy certs via istiod; if istiod was unavailable or the CA root rotated without proper propagation, mTLS handshakes fail with 503. Check `istio-proxy` logs for `CERTIFICATE_VERIFY_FAILED`.
+6. **Node-level network change**: Correlate the timestamp of first 503s with any Security Group rule changes, VPC CNI upgrades, or Calico/eBPF policy changes that might block Envoy's inbound port (15006) or the control-plane port (15012 to istiod).
+7. **Resolution pattern**: Use `istioctl proxy-config cluster <pod>` and `istioctl proxy-config endpoint <pod>` to validate the downstream pod sees the correct, healthy upstream endpoints before any code change rollback.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing cost allocation and chargeback for shared multi-tenant clusters, and what are the gaps you cannot fully close?
+
+**Key points an interviewer wants to hear:**
+
+- **Namespace-as-tenant model with labels**: Tag every namespace with `team`, `cost-center`, and `environment` labels propagated to all pod specs via a mutating webhook; these labels become the join key between Kubernetes resource consumption and AWS billing.
+- **AWS Cost Allocation Tags + EKS cost allocation feature**: Enable the EKS cost allocation tags feature (GA 2024) which splits EC2 node cost by pod-level resource *requests* across namespaces; combine with AWS Cost Explorer filtered views per tag.
+- **In-cluster tooling**: Deploy **OpenCost** or **Kubecost** to provide per-namespace, per-workload cost visibility based on request/limit ratios and actual AWS pricing; expose this via a self-service dashboard per team.
+- **Idle cost attribution**: Define a policy for how unallocated node capacity (overhead, DaemonSets, system pods) is spread — typically split proportionally by request-weighted utilisation across tenants; communicate this clearly in a chargeback SLA document.
+- **Gaps you cannot fully close**:
+  - Cost attribution is based on *requests*, not *actual consumption* — a pod requesting 8 CPU but using 0.5 CPU is charged 8 CPU worth; this creates incentives to under-request (leading to reliability risk) or over-request (leading to waste).
+  - Shared cluster overhead (control plane hourly fee, LB costs, data transfer) must be approximated and split; it cannot be precisely attributed.
+  - Short-lived pods (jobs, Karpenter-provisioned nodes) create attribution gaps if the billing granularity (per hour on EC2 Spot) exceeds the pod lifetime.
+- **Governance**: Enforce `ResourceQuota` per namespace as a hard spending guardrail alongside the chargeback model so teams self-regulate consumption.
+
+---
+
+### Q: Describe a situation where you had to design or rescue an EKS cluster that was approaching or hitting Kubernetes API rate limits (client-side 429s), and how you systematically identified and remediated the top throttling sources.
+
+**Key points an interviewer wants to hear:**
+
+- **Detection**: The signal was a rise in `apiserver_flowcontrol_rejected_requests_total` and client-side `429 Too Many Requests` errors surfacing in controller logs; correlated with `apiserver_request_duration_seconds` latency increase and elevated `etcd` round-trip times.
+- **Identifying top offenders**: Used `kubectl get --raw /metrics | grep apiserver_request_total` filtered by `verb`, `resource`, and `user_agent` to rank the noisiest clients; found a custom controller performing a full `LIST` of all pods cluster-wide every 10 seconds without a Watch, generating O(n) API load at scale.
+- **API Priority and Fairness (APF)**: Reviewed `FlowSchema` and `PriorityLevelConfiguration` objects; the misbehaving controller was classified under `global-default` which shared capacity with user kubectl traffic; created a dedicated lower-priority `FlowSchema` to isolate it from critical system controllers.
+- **Controller fix**: Replaced the full `LIST`+poll pattern with a `SharedInformer` with label-selector filtering and `resourceVersion`-based Watch restart, reducing API calls by ~98% for that controller.
+- **Helm/Argo CD thundering herd**: A secondary source was Argo CD reconciliation loops hitting the API simultaneously after a bulk sync event; tuned `--requeue-failed-after` and enabled server-side apply to reduce diff computation overhead.
+- **Structural remediations**: Enforced a review gate requiring all new controllers to use informer-based patterns; added APF monitoring alerts on `rejected_requests_total > 0` per flow schema as a permanent early warning system.
+- **Outcome**: API server request rate dropped by 60% within 24 hours of remedi

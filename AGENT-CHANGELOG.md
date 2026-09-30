@@ -397,3 +397,15 @@ _Committed & pushed: yes_
 - Describe a situation where you had to re-architect EKS networking mid-flight because the initial design could not support the scale the platform reached. What were the signals, the constraints, and the migration path?
 
 _Committed & pushed: yes_
+
+## Run · 2026-09-30 19:48:27
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7890 chars)
+- How do you design an EKS strategy for managing persistent volume lifecycle — including provisioning, resizing, snapshotting, and cross-AZ recovery — for stateful workloads at scale?
+- A production EKS cluster running a service mesh (Istio or AWS App Mesh) is exhibiting a sudden increase in 503 errors between two services that were communicating correctly the day before. No application code was changed. Walk me through your investigation.
+- How do you design an EKS strategy for managing and enforcing cost allocation and chargeback for shared multi-tenant clusters, and what are the gaps you cannot fully close?
+- Describe a situation where you had to design or rescue an EKS cluster that was approaching or hitting Kubernetes API rate limits (client-side 429s), and how you systematically identified and remediated the top throttling sources.
+
+_Committed & pushed: yes_
