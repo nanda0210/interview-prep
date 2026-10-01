@@ -409,3 +409,15 @@ _Committed & pushed: yes_
 - Describe a situation where you had to design or rescue an EKS cluster that was approaching or hitting Kubernetes API rate limits (client-side 429s), and how you systematically identified and remediated the top throttling sources.
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-01 20:05:52
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7984 chars)
+- How do you design an EKS strategy for managing and enforcing OPA/Gatekeeper or Kyverno policy-as-code at scale across a multi-team cluster fleet, and how do you handle policy drift and exemption management?
+- A production EKS workload suddenly shows a large number of pods stuck in "Terminating" for hours. The owning team has already tried `kubectl delete pod --force`. Walk through your systematic diagnosis and resolution approach.
+- How do you design an EKS strategy for managing cluster-level audit log ingestion, retention, and alerting without incurring runaway costs as cluster scale and API call volume grow?
+- Describe a situation where you had to design or significantly evolve the EKS platform team's operating model — including on-call, SLO ownership, and the boundary between platform and application teams. What were the hardest organisational trade-offs?
+
+_Committed & pushed: yes_

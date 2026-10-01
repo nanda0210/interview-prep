@@ -3323,3 +3323,60 @@ In a previous role, we initially deployed EKS using the default VPC CNI in secon
 - **Helm/Argo CD thundering herd**: A secondary source was Argo CD reconciliation loops hitting the API simultaneously after a bulk sync event; tuned `--requeue-failed-after` and enabled server-side apply to reduce diff computation overhead.
 - **Structural remediations**: Enforced a review gate requiring all new controllers to use informer-based patterns; added APF monitoring alerts on `rejected_requests_total > 0` per flow schema as a permanent early warning system.
 - **Outcome**: API server request rate dropped by 60% within 24 hours of remedi
+
+
+---
+
+## 🗓️ Added 2026-10-01 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-01 20:05 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing OPA/Gatekeeper or Kyverno policy-as-code at scale across a multi-team cluster fleet, and how do you handle policy drift and exemption management?
+
+**Key points an interviewer wants to hear:**
+
+- **Policy engine selection trade-offs:** Gatekeeper uses Rego (powerful but steep learning curve); Kyverno uses Kubernetes-native YAML policies (lower barrier, better GitOps integration). For large fleets, Kyverno's generate/mutate rules and ClusterPolicy propagation align better with GitOps tooling like Argo CD or Flux.
+- **Fleet-wide distribution:** Store policies in a central Git repository and sync to all clusters via a GitOps controller. Use `ClusterPolicy` for fleet-wide baselines and `Policy` (namespaced) for per-team overrides. Tag clusters with labels and use Argo CD `ApplicationSets` with cluster selectors to target policy tiers (dev, staging, prod).
+- **Exemption management:** Model exemptions as `PolicyException` (Kyverno 1.9+) or Gatekeeper `exemptions` fields, stored in Git with a PR approval gate. Require a business justification comment and expiry date in the PR description to prevent permanent exceptions accumulating silently.
+- **Policy drift detection:** Run `kyverno policy-report` or Gatekeeper audit mode continuously and export `PolicyReport`/`ClusterPolicyReport` CRDs to a central observability store (e.g., Prometheus + Grafana or OpenSearch). Alert on any violation count delta above zero for `enforce`-mode policies.
+- **Shift-left enforcement:** Integrate `kyverno` or `conftest` into CI pipelines so teams receive policy feedback before a PR is merged, reducing admission webhook rejections in production.
+- **Rollout safety:** Introduce new policies in `Audit` mode first, measure violation counts across the fleet for a defined soak period, then promote to `Enforce` mode via a GitOps PR. This prevents surprise pod scheduling failures.
+- **Operational risk:** Admission webhooks are in the critical path of all API server object creation; configure `failurePolicy: Ignore` during initial rollout for non-security-critical policies, and use `namespaceSelector` to exclude `kube-system` from disruptive policies.
+
+---
+
+### Q: A production EKS workload suddenly shows a large number of pods stuck in "Terminating" for hours. The owning team has already tried `kubectl delete pod --force`. Walk through your systematic diagnosis and resolution approach.
+
+**Key points an interviewer wants to hear:**
+
+- **Immediate check — finalizers:** The most common cause is a custom finalizer blocking garbage collection. Run `kubectl get pod <name> -o json | jq '.metadata.finalizers'`. If a finalizer is present and its controller is absent or crashing, the pod will never complete termination. Patch the finalizer array to `[]` with `kubectl patch pod <name> -p '{"metadata":{"finalizers":[]}}' --type=merge` after confirming the controller is truly dead.
+- **Volume detach races:** Check if an EBS volume attached to the pod is stuck in a `detaching` state in the AWS console. This blocks `kubelet` from completing unmount and terminates the pod's graceful shutdown. Force-detach the volume from the EC2 console if the node is known-healthy, or cordon and drain the node first.
+- **Node-level issues:** If the node itself is in `NotReady` or has a stale kubelet, the API server cannot receive the pod deletion acknowledgement. Check `kubectl describe node` for conditions and inspect kubelet logs via SSM or node-problem-detector events.
+- **`--force --grace-period=0` behavior:** This removes the API object immediately but does **not** guarantee the container process is killed on the node. The node-level container may still be running, causing resource leaks. Confirm with `kubectl get pod -A --field-selector spec.nodeName=<node>` after force deletion.
+- **Long preStop hooks:** Review the pod spec for a `preStop` hook that blocks beyond `terminationGracePeriodSeconds`. If the hook is a script that hangs, the kubelet waits the full grace period before SIGKILL.
+- **PodDisruptionBudget (PDB) interference:** A `maxUnavailable: 0` PDB can prevent eviction-triggered terminations from completing during a drain. Temporarily patch the PDB or coordinate with the app team for a maintenance window.
+- **Prevention:** Set explicit `terminationGracePeriodSeconds`, ensure controllers owning finalizers have liveness/readiness probes and PodDisruptionBudgets, and add alerting on pod `Terminating` duration exceeding 10 minutes.
+
+---
+
+### Q: How do you design an EKS strategy for managing cluster-level audit log ingestion, retention, and alerting without incurring runaway costs as cluster scale and API call volume grow?
+
+**Key points an interviewer wants to hear:**
+
+- **Source and verbosity tuning:** EKS control-plane audit logs are emitted to CloudWatch Logs. Enable only the log types you need (`audit`, `authenticator`, `controllerManager`) and set audit policy verbosity carefully — avoid `RequestResponse` level for high-volume read endpoints like `watch` on pods or secrets, as response bodies balloon log size 10–50×.
+- **Custom audit policy via EKS audit policy (1.27+):** As of Kubernetes 1.27, EKS supports a managed audit policy override. Define rules that set `None` level for noisy, low-value verbs (e.g., `get`/`list`/`watch` on `events`, `endpointslices`) and reserve `RequestResponse` for mutations on sensitive resources (`secrets`, `configmaps`, RBAC objects).
+- **Log routing and cost control:** Stream CloudWatch Logs to Kinesis Data Firehose → S3 with Parquet conversion and Snappy compression. Query via Athena for forensics. Reserve CloudWatch Insights queries for near-real-time alerting on a filtered subset (e.g., only `403`/`401` responses, mutations to `ClusterRoleBinding`).
+- **Alerting patterns:** Use CloudWatch Metric Filters to create metrics for: (1) privilege escalation attempts (mutations to `clusterrolebindings`/`clusterroles`), (2) secrets access by unexpected principals, (3) exec into pods (`pods/exec` verb). Route metrics to SNS → PagerDuty for P1 patterns.
+- **Retention tiering:** Hot retention in CloudWatch Logs: 7–14 days. Cold retention in S3 Intelligent-Tiering: 1 year for compliance. Delete from CloudWatch after the hot window to avoid double-paying for storage.
+- **Multi-cluster aggregation:** For a fleet, centralise logs into a single S3 bucket per AWS Organisation using a log archive account. Prefix by `cluster-name/date/` for Athena partitioning efficiency.
+- **Cardinality trap:** Avoid exporting raw audit logs to a time-series metrics backend like Prometheus — the label cardinality (user, verb, resource, namespace) explodes. Use a purpose-built SIEM or Athena + S3 for analytics instead.
+
+---
+
+### Q: Describe a situation where you had to design or significantly evolve the EKS platform team's operating model — including on-call, SLO ownership, and the boundary between platform and application teams. What were the hardest organisational trade-offs?
+
+**Key points an interviewer wants to hear:**
+
+- **Context setting:** Briefly describe the scale (e.g., 12 product teams, 3 clusters, platform team of 5) and the trigger — typically a rising incident rate where neither platform nor app teams felt accountable for cross-cutting failures like DNS flapping or autoscaler lag.
+- **SLO boundary design:** Established a two-layer SLO model: the platform team owns **infrastructure SLOs** (control plane availability, node join latency, CNI pod scheduling success rate, CoreDNS query error rate); application teams own **workload SLOs** (request success rate, P99 latency). This created clear escalation paths — if a workload SLO was breached and the platform SLOs were green, it was an app-team incident.
+- **On-call structure:** Platform team took primary on-call for infrastructure-layer alerts using a PagerDuty escalation
