@@ -3380,3 +3380,70 @@ In a previous role, we initially deployed EKS using the default VPC CNI in secon
 - **Context setting:** Briefly describe the scale (e.g., 12 product teams, 3 clusters, platform team of 5) and the trigger — typically a rising incident rate where neither platform nor app teams felt accountable for cross-cutting failures like DNS flapping or autoscaler lag.
 - **SLO boundary design:** Established a two-layer SLO model: the platform team owns **infrastructure SLOs** (control plane availability, node join latency, CNI pod scheduling success rate, CoreDNS query error rate); application teams own **workload SLOs** (request success rate, P99 latency). This created clear escalation paths — if a workload SLO was breached and the platform SLOs were green, it was an app-team incident.
 - **On-call structure:** Platform team took primary on-call for infrastructure-layer alerts using a PagerDuty escalation
+
+
+---
+
+## 🗓️ Added 2026-10-02 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-02 19:44 -->
+
+### Q: How do you design an EKS strategy for managing IPv4 address exhaustion in large-scale clusters, and what are the trade-offs between available mitigation approaches?
+
+**Model Answer:**
+
+IPv4 exhaustion is one of the most common scaling blockers in EKS because each pod consumes a VPC IP by default with the VPC CNI. The primary mitigations are:
+
+- **Prefix delegation** (`ENABLE_PREFIX_DELEGATION=true` on VPC CNI): assigns /28 prefixes to ENIs, dramatically increasing pod density per node without requiring additional ENIs. It's the lowest-friction fix for most clusters but requires instance types that support it and wastes IPs if pods are sparse.
+- **Custom networking**: routes pod IPs from a secondary CIDR (RFC 1918 or CGNAT 100.64.0.0/10) attached to the VPC, fully decoupling pod IP space from the primary VPC CIDR. Trade-off: adds CNI complexity, requires `AWS_VPC_K8S_CNI_CUSTOM_NETWORK_CFG` and per-AZ ENIConfig CRDs, and nodes still consume primary-CIDR IPs for their primary ENI.
+- **IPv6 dual-stack or IPv6-only**: eliminates the exhaustion problem entirely but requires application and tooling readiness and has implications for external connectivity and security group rules.
+- **Cluster splitting**: distributing workloads across multiple clusters each with their own VPC/CIDR is operationally expensive but sometimes the right answer for hard tenant isolation.
+
+At scale I recommend prefix delegation as the first step, combined with VPC CIDR expansion and subnet planning using /19 or larger subnets per AZ, and treating IPv6 migration as a longer-term strategic goal. The architectural decision should be driven by how much runway each option buys versus its operational cost.
+
+---
+
+### Q: A production EKS cluster's AWS Load Balancer Controller stops reconciling Ingress objects after a routine IAM policy update. Services are unreachable for newly deployed applications. How do you diagnose and recover?
+
+**Model Answer:**
+
+The controller is almost certainly receiving `AccessDenied` errors from AWS APIs, which causes its reconciliation loop to error and back off. Diagnosis steps:
+
+1. **Check controller logs immediately** (`kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller`): look for `AccessDenied`, `UnauthorizedOperation`, or STS assume-role failures.
+2. **Verify IRSA binding**: confirm the service account annotation points to the correct IAM role ARN, and that the OIDC provider trust policy still matches the cluster's issuer URL — IAM policy updates can accidentally detach or change role trust policies.
+3. **Simulate permissions**: use `aws iam simulate-principal-policy` against the role ARN with the specific actions the controller needs (e.g., `elasticloadbalancing:CreateLoadBalancer`, `ec2:DescribeSubnets`) to identify exactly which permissions are missing.
+4. **Check for permission boundary or SCP changes**: a seemingly scoped IAM policy update may have introduced a permission boundary or an SCP at the OU level that blocks specific actions.
+5. **Recovery**: restore the missing permissions, then force reconciliation by annotating or re-saving the affected Ingress objects to trigger a re-enqueue.
+
+Preventively, treat the ALB controller's IAM policy as infrastructure-as-code with drift detection, and run permission simulation in CI before any IAM policy change reaches production.
+
+---
+
+### Q: How do you design an EKS strategy for managing workload identity at the boundary between Kubernetes and on-premises systems that cannot use AWS IAM, and what are the security controls you apply?
+
+**Model Answer:**
+
+On-premises systems that can't assume IAM roles require a different identity bridge. The recommended architecture layers:
+
+- **SPIFFE/SPIRE as a common identity plane**: deploy a SPIRE server (or use AWS Private CA Connector for SPIRE) that issues SVID X.509 certificates to both EKS pods (via the SPIRE Kubernetes workload attestor) and on-premises workloads (via node attestation). Both sides trust the same SPIFFE trust domain, enabling mTLS without IAM on either side.
+- **Alternatively, a secrets broker pattern**: EKS pods with IRSA fetch short-lived credentials or tokens from Secrets Manager or Parameter Store and forward them to on-premises callers via an API gateway with mutual TLS, keeping IAM entirely inside the AWS boundary.
+- **JWT/OIDC federation**: if the on-premises system supports OIDC, project the Kubernetes service account token with a custom audience and have the on-premises system validate it against the EKS OIDC issuer endpoint — works well for read-heavy integrations.
+
+Security controls regardless of approach: enforce token/certificate TTLs under 1 hour, rotate automatically, log all cross-boundary calls to CloudTrail and a SIEM, apply network policy restricting which pods can initiate cross-boundary connections, and treat the on-premises endpoint as an untrusted external network (TLS required, no plaintext).
+
+---
+
+### Q: Describe a situation where you had to make a significant architectural trade-off between EKS operational simplicity and security posture under business time pressure. What did you decide, and what did you do to manage the residual risk?
+
+**Model Answer / Behavioral Guidance:**
+
+*(Structure with Situation → Tension → Decision → Risk Mitigation → Outcome)*
+
+A strong answer describes a concrete scenario — for example, a compliance deadline requiring a new cluster to be production-ready in two weeks, where the secure path (full IRSA per workload, OPA policies, private endpoint only, VPN-gated kubectl access) would take six weeks to implement properly. The candidate should demonstrate:
+
+- **They did not silently accept the shortcut**: they documented the delta between the "launched" state and the target security posture as formal risk items with owners and deadlines, not as vague backlog tickets.
+- **They applied compensating controls**: e.g., if kube-apiserver had to be semi-public temporarily, they locked it to specific CIDR ranges, enabled CloudTrail for all API calls, and set up GuardDuty EKS runtime monitoring from day one.
+- **They time-boxed the debt**: committed to a specific hardening sprint post-launch with measurable acceptance criteria, and got sign-off from the CISO or security team rather than just the engineering manager.
+- **They communicated trade-offs clearly**: presented the risk in business terms (likelihood × impact) rather than technical jargon so stakeholders could make an informed decision.
+
+The interviewer wants to see judgment, accountability, and the ability to operate under real-world constraints without abandoning engineering standards entirely.

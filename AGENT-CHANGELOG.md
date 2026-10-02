@@ -421,3 +421,15 @@ _Committed & pushed: yes_
 - Describe a situation where you had to design or significantly evolve the EKS platform team's operating model — including on-call, SLO ownership, and the boundary between platform and application teams. What were the hardest organisational trade-offs?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-02 19:44:42
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (6752 chars)
+- How do you design an EKS strategy for managing IPv4 address exhaustion in large-scale clusters, and what are the trade-offs between available mitigation approaches?
+- A production EKS cluster's AWS Load Balancer Controller stops reconciling Ingress objects after a routine IAM policy update. Services are unreachable for newly deployed applications. How do you diagnose and recover?
+- How do you design an EKS strategy for managing workload identity at the boundary between Kubernetes and on-premises systems that cannot use AWS IAM, and what are the security controls you apply?
+- Describe a situation where you had to make a significant architectural trade-off between EKS operational simplicity and security posture under business time pressure. What did you decide, and what did you do to manage the residual risk?
+
+_Committed & pushed: yes_
