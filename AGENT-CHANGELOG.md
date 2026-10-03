@@ -433,3 +433,15 @@ _Committed & pushed: yes_
 - Describe a situation where you had to make a significant architectural trade-off between EKS operational simplicity and security posture under business time pressure. What did you decide, and what did you do to manage the residual risk?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-03 18:32:01
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7548 chars)
+- How do you design an EKS strategy for managing and enforcing image supply-chain security — from build to runtime — across a multi-team cluster fleet?
+- A production EKS cluster's VPC CNI (aws-node) DaemonSet is exhausting ENI and IP address capacity on nodes, causing new pods to remain in "ContainerCreating" indefinitely. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing cluster-level API server availability and request prioritisation when a runaway controller or batch job floods the API server with requests?
+- Describe a situation where you had to design or justify a move from a shared multi-tenant EKS cluster to dedicated per-team clusters, or vice versa. What drove the decision and what did you learn?
+
+_Committed & pushed: yes_

@@ -3447,3 +3447,88 @@ A strong answer describes a concrete scenario — for example, a compliance dead
 - **They communicated trade-offs clearly**: presented the risk in business terms (likelihood × impact) rather than technical jargon so stakeholders could make an informed decision.
 
 The interviewer wants to see judgment, accountability, and the ability to operate under real-world constraints without abandoning engineering standards entirely.
+
+
+---
+
+## 🗓️ Added 2026-10-03 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-03 18:32 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing image supply-chain security — from build to runtime — across a multi-team cluster fleet?
+
+**Model Answer:**
+
+A mature image supply-chain strategy spans four phases: build, publish, admission, and runtime.
+
+- **Build:** Enforce signed commits and reproducible container builds in CI (CodeBuild or GitHub Actions). Integrate Trivy or Grype to fail pipelines on HIGH/CRITICAL CVEs before images are pushed.
+- **Sign and attest:** Use AWS Signer or Cosign (keyless via OIDC) to sign images and generate SBOM attestations stored alongside the image in ECR. ECR's built-in image scanning (Inspector v2) provides continuous re-scanning of already-pushed images.
+- **Admission enforcement:** Deploy a Kyverno or Connaisseur policy that verifies the Cosign signature and optionally the SBOM attestation before a pod is admitted. Unsigned or unscanned images are rejected cluster-wide; exemptions require a documented, time-bounded namespace annotation.
+- **Runtime:** Use Falco or Amazon GuardDuty for EKS Runtime Monitoring to detect unexpected syscalls (e.g., shell spawned inside a container, unexpected network connections) as a defence-in-depth layer for images that pass admission but are later found vulnerable.
+- **Policy-as-code lifecycle:** Store Kyverno policies in Git; a platform GitOps pipeline (Argo CD) syncs them to every cluster. Policy changes go through a `audit` → `warn` → `enforce` promotion cycle to avoid breaking live workloads.
+- **Key trade-off:** Keyless signing simplifies key management but depends on OIDC provider availability; consider a fallback KMS-backed key for air-gapped or highly regulated environments.
+
+---
+
+### Q: A production EKS cluster's VPC CNI (aws-node) DaemonSet is exhausting ENI and IP address capacity on nodes, causing new pods to remain in "ContainerCreating" indefinitely. How do you diagnose and resolve this?
+
+**Model Answer:**
+
+**Immediate diagnosis:**
+1. `kubectl describe node <node>` — check `Allocatable` vs consumed IPs; look for the annotation `vpc.amazonaws.com/PrivateIPv4Capacity`.
+2. `kubectl logs -n kube-system <aws-node-pod>` — look for `InsufficientCIDRBlocks`, `failed to allocate`, or EC2 API throttling errors.
+3. Check EC2 ENI limits for the instance type (ENIs × IPs-per-ENI) and confirm the subnet has free IPs.
+
+**Root causes and fixes:**
+
+| Cause | Fix |
+|---|---|
+| Subnet IP exhaustion | Expand subnet CIDR or enable VPC CNI prefix delegation (`ENABLE_PREFIX_DELEGATION=true`) to assign /28 prefixes, multiplying available IPs per ENI |
+| EC2 ENI attachment limit hit | Right-size nodes to larger instance types with higher ENI limits, or spread across more nodes via Karpenter NodePools |
+| Warm pool over-provisioning | Tune `WARM_ENI_TARGET`, `WARM_IP_TARGET`, and `MINIMUM_IP_TARGET` env vars on aws-node to reduce pre-allocated but unused IPs |
+| IAM throttling | Add `ec2:DescribeNetworkInterfaces` to a higher-rate limit IAM boundary or enable VPC CNI IRSA to isolate API call identity |
+
+**Prefix delegation** is typically the highest-leverage change: a single ENI attachment yields 16 IPs per /28 prefix rather than 1, so an m5.xlarge can address ~180+ pods instead of ~58.
+
+**Preventative controls:** CloudWatch alarm on `IPAddressesAvailable` metric per subnet; Karpenter `NodePool` constraints to bias scheduling toward nodes with available IP capacity.
+
+---
+
+### Q: How do you design an EKS strategy for managing cluster-level API server availability and request prioritisation when a runaway controller or batch job floods the API server with requests?
+
+**Model Answer:**
+
+The Kubernetes API Priority and Fairness (APF) framework (GA since 1.29) is the primary control plane:
+
+- **FlowSchemas and PriorityLevelConfigurations:** Define FlowSchemas to classify traffic by user, service account, or verb (e.g., batch jobs → `low-priority`, platform controllers → `workload-high`). Assign corresponding PriorityLevelConfigurations with bounded concurrency shares and queue depths.
+- **Default EKS hardening:** Override the `catch-all` PriorityLevelConfiguration to have a tight concurrency limit; give `system:masters` and critical controllers (`kube-controller-manager`, `kube-scheduler`) dedicated exempt or high-priority buckets.
+- **Runaway detection:** Enable API server audit logs filtered on `responseStatus.code=429` and alert when any single subject's 429 rate exceeds a threshold. Ship to CloudWatch Logs Insights or OpenSearch for dashboarding.
+- **IRSA-level isolation:** Runaway workloads using IRSA have distinct service accounts, making it straightforward to identify the FlowSchema subject and throttle or block them without impacting others.
+- **Karpenter / controller rate limiting:** For application controllers (Argo CD, external-secrets), configure their `--qps` and `--burst` flags to safe values. Enforce these via OPA/Kyverno mutation on Deployment env vars as a guardrail.
+- **Emergency break-glass:** If a controller is actively degrading the API server, `kubectl scale deployment <controller> --replicas=0` is the fastest mitigation; document this in a runbook with rollback steps.
+- **EKS-specific:** EKS manages the control plane, so you cannot tune `--max-requests-inflight` directly — APF is the only lever available to cluster operators. Monitor `apiserver_flowcontrol_rejected_requests_total` in CloudWatch Container Insights.
+
+---
+
+### Q: Describe a situation where you had to design or justify a move from a shared multi-tenant EKS cluster to dedicated per-team clusters, or vice versa. What drove the decision and what did you learn?
+
+**Model Answer:**
+
+**Situation:** At a previous employer, we ran a shared EKS cluster serving ~15 product teams to minimise operational overhead. As teams grew, we encountered: noisy-neighbour CPU/memory contention despite LimitRanges, namespace-level RBAC complexity that frequently produced privilege creep, conflicting admission webhook requirements, and a single upgrade window that required coordinating 15 teams simultaneously.
+
+**Analysis framework I used:**
+
+| Factor | Shared Cluster | Dedicated Clusters |
+|---|---|---|
+| Cost | Lower (better bin-packing) | Higher (control-plane × N, node floor) |
+| Blast radius | High — one bad deploy can affect all | Contained per team |
+| Upgrade agility | Low — must coordinate all tenants | Each team upgrades independently |
+| Operational overhead | Low for team count, high per incident | High scaling overhead, lower incident complexity |
+| Compliance isolation | Hard to demonstrate hard tenancy | Clear boundary for auditors |
+
+**Decision:** We migrated the two teams with PCI-DSS scope and the two teams whose admission webhook requirements conflicted to dedicated clusters. The remaining ~11 teams stayed on the shared cluster, but we restructured it with stricter namespace isolation, Karpenter NodePools with topology spread, and Kyverno policies replacing manual RBAC review.
+
+**What I learned:**
+- The "one cluster vs. many" decision is not binary — a tiered model (shared dev/staging, dedicated prod for regulated workloads) often gives the best cost-isolation balance.
+- The hidden cost of shared clusters is incident coordination time, not just infrastructure spend; quantify this when building the business case.
+- Invest in a cluster API or Crossplane-based cluster vending machine early; retrofitting one after you already have 10+ dedicated clusters is painful.
