@@ -3532,3 +3532,95 @@ The Kubernetes API Priority and Fairness (APF) framework (GA since 1.29) is the 
 - The "one cluster vs. many" decision is not binary — a tiered model (shared dev/staging, dedicated prod for regulated workloads) often gives the best cost-isolation balance.
 - The hidden cost of shared clusters is incident coordination time, not just infrastructure spend; quantify this when building the business case.
 - Invest in a cluster API or Crossplane-based cluster vending machine early; retrofitting one after you already have 10+ dedicated clusters is painful.
+
+
+---
+
+## 🗓️ Added 2026-10-04 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-04 18:31 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing namespace-level resource quotas and LimitRanges across a large multi-team cluster without becoming a bottleneck to team velocity?
+
+**Model Answer:**
+
+The core challenge is balancing governance with developer autonomy, so the approach must be both policy-driven and self-service.
+
+- **Tiered quota profiles**: Define a small set of standard T-shirt-sized quota bundles (small/medium/large) covering CPU, memory, and object counts. Teams request a tier via a GitOps PR against a namespace manifest; admission policy (Kyverno or Gatekeeper) enforces that raw `ResourceQuota` objects cannot be created manually.
+- **LimitRanges as defaults, not ceilings**: Apply cluster-wide LimitRanges via a mutating webhook to inject default `requests` and `limits` into pods that omit them, preventing the most common quota exhaustion pattern (requests at zero).
+- **Automated namespace provisioning**: Use a Namespace-as-a-Service controller (e.g., Capsule, HNC, or a custom operator) that creates the namespace, ServiceAccount, RBAC, NetworkPolicy, and ResourceQuota atomically from a CRD manifest. This removes the platform team from the critical path.
+- **Quota utilisation feedback loop**: Expose per-namespace quota utilisation as Prometheus metrics (via `kube-state-metrics`) and publish dashboards/alerts to team Slack channels. Teams approaching 80% utilisation receive automated notifications and a self-service upgrade path.
+- **Burst headroom via priority classes**: Assign a `burstable` PriorityClass to batch workloads and a `guaranteed` class to latency-sensitive services; Cluster Autoscaler/Karpenter respects these during scale decisions, giving teams flexibility without requiring quota increases.
+- **Quarterly right-sizing reviews**: Automate a report comparing quota vs. actual peak usage over 90 days; teams consistently below 40% utilisation are automatically downtiered to reclaim capacity.
+
+The key interview signal is separating the policy enforcement layer from the provisioning layer, and making quota management self-service rather than a platform team approval gate.
+
+---
+
+### Q: A security audit finds that several EKS workloads are sharing a single IAM role via IRSA, granting them collectively more permissions than any individual workload needs. How do you remediate this at scale without causing service disruption?
+
+**Model Answer:**
+
+This is a least-privilege remediation problem that requires discovery, decomposition, and safe rollout.
+
+**Discovery phase**: Use AWS IAM Access Analyzer and CloudTrail's `serviceEventDetails` to build a per-workload permission heatmap — which actions each pod actually called in the past 90 days. IAM Access Analyzer's policy generation feature can synthesise minimal policies from CloudTrail automatically.
+
+**Decomposition strategy**:
+- Map each distinct workload (Deployment/StatefulSet) to its own dedicated IAM role following the `cluster-namespace-serviceaccount` naming convention.
+- Use the Access Analyzer-generated policy as a baseline, then add a small forward-looking buffer for operations that are seasonal or infrequent.
+- Create new roles and annotate new ServiceAccounts without touching existing ones, so rollout is decoupled from remediation.
+
+**Safe rollout**:
+- Deploy new ServiceAccounts alongside existing ones; update one Deployment at a time with a canary rollout, monitoring for IAM `AccessDenied` errors in CloudWatch or application logs before proceeding.
+- Use a feature flag or `configmap` to allow rapid rollback to the original shared ServiceAccount if permission gaps are discovered.
+
+**Preventing recurrence**: Enforce via Kyverno policy that any ServiceAccount with an IRSA annotation must map to a role whose name contains the workload identifier; shared roles with IRSA annotations on multiple ServiceAccounts fail admission. Integrate IAM policy generation into the CI pipeline so teams get a least-privilege role scaffold at deployment creation time.
+
+The interviewer wants to hear that you don't just fix the gap — you instrument for detection and build enforcement to prevent drift.
+
+---
+
+### Q: How do you design an EKS strategy for graceful node termination that ensures zero in-flight request loss during Spot reclamation, cluster autoscaler scale-in, or rolling node group upgrades?
+
+**Model Answer:**
+
+Graceful termination is a layered problem spanning AWS lifecycle hooks, Kubernetes drain mechanics, and application-level readiness.
+
+**AWS layer**:
+- For Spot, subscribe to EC2 Spot Instance Interruption Notices (2-minute warning) via the Node Termination Handler (NTH) DaemonSet. NTH cordons and drains the node the moment the notice arrives, giving the full 2 minutes for in-flight requests to complete.
+- For managed node group upgrades and Cluster Autoscaler scale-in, use EC2 Auto Scaling lifecycle hooks (`autoscaling:EC2_INSTANCE_TERMINATING`) to pause termination until NTH or a custom Lambda confirms drain completion.
+
+**Kubernetes layer**:
+- Set `terminationGracePeriodSeconds` to a value larger than the P99 request duration (typically 60–120 seconds for most services), never the default 30 seconds.
+- Configure `preStop` hooks with a short sleep (5–10 seconds) to absorb the delay between the pod receiving `SIGTERM` and load balancer target deregistration completing — this is the most commonly missed gap.
+- Ensure `PodDisruptionBudgets` (PDBs) are defined for every critical workload so `kubectl drain` never takes more than N pods simultaneously.
+
+**Load balancer layer**:
+- Enable ALB/NLB target deregistration delay and tune it to match `terminationGracePeriodSeconds`. This ensures the load balancer stops routing new connections before the pod process exits.
+- For gRPC or WebSocket workloads, implement server-side graceful shutdown that drains streams before exiting, since connection-level draining differs from HTTP/1.1.
+
+**Validation**: Chaos-test the entire path in staging using `aws ec2 terminate-instances` against a Spot node while driving load, and assert zero 5xx errors in the load balancer access logs.
+
+---
+
+### Q: Describe a situation where you had to design or enforce a migration from kube-proxy iptables mode to a more scalable networking data plane (e.g., eBPF/Cilium) on a live EKS cluster. What were the risks, and how did you manage them?
+
+**Model Answer:**
+
+This is a high-risk, high-reward migration because the data plane change affects every packet traversing the cluster, and a misconfiguration causes total connectivity loss.
+
+**Context and motivation**: At scale (3,000+ pods, 500+ Services), iptables rule chains become a scalability bottleneck — `kube-proxy` rule propagation latency grows O(n²) with Service count, causing transient connectivity drops during rolling deployments. The business trigger was P99 latency spikes correlating with Service churn during deployments.
+
+**Preparation**:
+- Built a parallel test cluster running Cilium in kube-proxy replacement mode, replicated all production Services and NetworkPolicies, and ran synthetic load tests validating parity.
+- Audited all existing NetworkPolicy objects for constructs Cilium handles differently (e.g., `ipBlock` with exceptions), and converted them to CiliumNetworkPolicy equivalents in advance.
+- Established a rollback plan: keep the managed node group running kube-proxy; if Cilium fails, drain Cilium nodes and shift workloads back.
+
+**Migration execution**:
+- Used a blue/green node group approach: new node group launched with `--skip-kube-proxy=true` and Cilium DaemonSet deployed first. Workloads migrated namespace-by-namespace by updating node selectors/taints, allowing per-team validation.
+- Disabled kube-proxy on migrated nodes only; the old node group continued running kube-proxy, so both data planes coexisted during transition.
+- Key risk: Cilium and kube-proxy both managing the same Service VIPs simultaneously causes undefined behaviour — strict node group separation prevented this.
+
+**Outcome and lessons**:
+- iptables rule propagation latency dropped from ~800ms to <5ms for a 600-Service cluster. The migration took 6 weeks end-to-end.
+- The most important lesson: treat the CNI as a control-plane dependency equivalent to the API server — it warrants the same change management rigour, not a routine maintenance window

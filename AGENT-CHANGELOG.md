@@ -445,3 +445,15 @@ _Committed & pushed: yes_
 - Describe a situation where you had to design or justify a move from a shared multi-tenant EKS cluster to dedicated per-team clusters, or vice versa. What drove the decision and what did you learn?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-04 18:31:42
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8434 chars)
+- How do you design an EKS strategy for managing and enforcing namespace-level resource quotas and LimitRanges across a large multi-team cluster without becoming a bottleneck to team velocity?
+- A security audit finds that several EKS workloads are sharing a single IAM role via IRSA, granting them collectively more permissions than any individual workload needs. How do you remediate this at scale without causing service disruption?
+- How do you design an EKS strategy for graceful node termination that ensures zero in-flight request loss during Spot reclamation, cluster autoscaler scale-in, or rolling node group upgrades?
+- Describe a situation where you had to design or enforce a migration from kube-proxy iptables mode to a more scalable networking data plane (e.g., eBPF/Cilium) on a live EKS cluster. What were the risks, and how did you manage them?
+
+_Committed & pushed: yes_
