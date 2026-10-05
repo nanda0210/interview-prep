@@ -457,3 +457,15 @@ _Committed & pushed: yes_
 - Describe a situation where you had to design or enforce a migration from kube-proxy iptables mode to a more scalable networking data plane (e.g., eBPF/Cilium) on a live EKS cluster. What were the risks, and how did you manage them?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-05 21:48:59
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8630 chars)
+- How do you design an EKS strategy for managing workload disruption budgets (PodDisruptionBudgets) at scale to prevent cascading unavailability during cluster maintenance or node recycling events?
+- A high-throughput EKS workload suddenly begins experiencing elevated TCP connection reset errors after AWS announced an underlying EC2 instance type retirement and nodes were automatically migrated. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing secrets rotation — including database credentials, API keys, and TLS certificates — with zero application downtime and full auditability?
+- Describe a situation where you had to design a strategy to handle EKS control plane API server rate limiting (HTTP 429 / "client-side throttling" errors) caused by a proliferation of controllers and operators running in the cluster.
+
+_Committed & pushed: yes_

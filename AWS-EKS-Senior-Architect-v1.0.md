@@ -3624,3 +3624,82 @@ This is a high-risk, high-reward migration because the data plane change affects
 **Outcome and lessons**:
 - iptables rule propagation latency dropped from ~800ms to <5ms for a 600-Service cluster. The migration took 6 weeks end-to-end.
 - The most important lesson: treat the CNI as a control-plane dependency equivalent to the API server — it warrants the same change management rigour, not a routine maintenance window
+
+
+---
+
+## 🗓️ Added 2026-10-05 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-05 21:48 -->
+
+### Q: How do you design an EKS strategy for managing workload disruption budgets (PodDisruptionBudgets) at scale to prevent cascading unavailability during cluster maintenance or node recycling events?
+
+**Model Answer:**
+
+PodDisruptionBudgets (PDBs) are critical but easy to misconfigure at scale — overly restrictive PDBs block node drains indefinitely, while absent ones allow correlated evictions across all replicas simultaneously.
+
+**Key design points:**
+- **Enforce PDB presence via policy-as-code** (Kyverno or Gatekeeper): any Deployment or StatefulSet with `replicas > 1` must have a matching PDB with `minAvailable ≥ 1` or `maxUnavailable < 100%` before admission.
+- **Detect blocking PDBs proactively**: run a scheduled job or Prometheus alerting rule that identifies PDBs where `disruptionsAllowed == 0` for longer than a configurable threshold (e.g., 15 minutes), signalling a stuck drain condition.
+- **Coordinate drain ordering in Karpenter/Cluster Autoscaler**: use Karpenter's `terminationGracePeriod` and consolidation settings to spread node terminations across AZs, reducing the probability that multiple replicas share a draining node simultaneously.
+- **Anti-affinity as a complementary control**: mandate pod anti-affinity rules so replicas land on different nodes, which makes a PDB of `minAvailable: 1` actually protective rather than illusory.
+- **Operational runbook for stuck drains**: document and automate a time-bounded override path — after a defined escalation window, an operator can temporarily delete and recreate the PDB with approval, preserving safety without blocking indefinite maintenance.
+- **Distinguish stateful vs. stateless PDB policies**: StatefulSets managing leader-election or quorum (e.g., Kafka, ZooKeeper) require stricter PDBs (`maxUnavailable: 0` during leadership transition); encode this as a separate policy variant.
+
+The net result is that cluster maintenance windows become predictable and bounded rather than prone to hours-long hangs caused by an invisible blocking PDB.
+
+---
+
+### Q: A high-throughput EKS workload suddenly begins experiencing elevated TCP connection reset errors after AWS announced an underlying EC2 instance type retirement and nodes were automatically migrated. How do you diagnose and resolve this?
+
+**Model Answer:**
+
+Instance type migrations can subtly change NIC behaviour, ENA driver versions, kernel network stack parameters, and SR-IOV capabilities — none of which surface as Kubernetes-level events.
+
+**Diagnosis approach:**
+1. **Correlate timing**: confirm the error rate increase aligns with node replacement events by cross-referencing CloudTrail EC2 `TerminateInstances` events and Kubernetes node join timestamps.
+2. **Compare instance characteristics**: check whether the new instance type uses a different NIC driver (e.g., ENA Express eligibility), has different TCP offload settings, or enforces stricter connection tracking table limits.
+3. **Inspect kernel net stack parameters on new nodes**: `net.ipv4.tcp_tw_reuse`, `net.ipv4.ip_local_port_range`, `net.core.somaxconn`, and NF conntrack table size — these may differ between AMI versions if node groups were rebuilt with a new EKS-optimised AMI.
+4. **Capture RSTs at the source**: use `tcpdump` or VPC Flow Logs (with TCP flag fields) to confirm whether RSTs originate from the server pod, the new node's kernel, or the AWS network fabric.
+5. **Check ENA Express**: if migrated to Nitro-based instances that support ENA Express, verify whether it was inadvertently enabled/disabled on the ENI, as it changes behaviour for high-PPS workloads.
+
+**Resolution:**
+- Pin conntrack table limits and TCP stack parameters via a custom launch template `userData` bootstrap script or a DaemonSet that applies `sysctl` tuning at node start.
+- If the root cause is AMI-version divergence, implement a **managed node group custom AMI pipeline** with validated sysctl baselines tested in a staging cluster before promotion.
+- Add a post-migration canary test in the CI/CD pipeline that runs a sustained TCP connection load test against a new node before marking the node group healthy.
+
+---
+
+### Q: How do you design an EKS strategy for managing secrets rotation — including database credentials, API keys, and TLS certificates — with zero application downtime and full auditability?
+
+**Model Answer:**
+
+Secrets rotation in EKS is a cross-cutting concern that spans AWS Secrets Manager, the Kubernetes secret store, and application-level hot-reload capability. A naive approach that forces pod restarts on every rotation creates unnecessary disruption.
+
+**Architecture:**
+- **Use the AWS Secrets Manager CSI driver (Secrets Store CSI Driver + AWS provider)**: mount secrets as volumes rather than Kubernetes Secrets objects; the driver polls Secrets Manager and updates the mounted file automatically at a configurable `rotationPollInterval`.
+- **Decouple rotation from pod restart**: applications must be designed to watch the mounted file path for changes and reload credentials without restarting. Enforce this requirement as a platform contract documented in the developer onboarding guide.
+- **For workloads that cannot hot-reload**: use a sidecar pattern — a lightweight watcher sidecar detects file changes and sends a `SIGHUP` or calls a local reload API, abstracting the reload logic from the application.
+- **Automate rotation schedules in Secrets Manager**: configure automatic rotation Lambdas for RDS credentials and verify the rotation Lambda holds the `secretsmanager:RotateSecret` permission scoped to specific secret ARNs only.
+- **Audit trail**: every secret access is captured in CloudTrail; additionally, configure Secrets Manager resource policies to deny access from any principal outside the expected IRSA role ARN, providing an anomaly signal if credentials are accessed from an unexpected identity.
+- **TLS certificates**: use cert-manager with ACM Private CA issuer for internal certificates, setting a renewal threshold at 2/3 of certificate lifetime; cert-manager rotates and triggers a rolling restart of affected pods automatically.
+- **Test rotation continuously**: inject rotation events in a staging environment as part of scheduled chaos tests to validate that zero-downtime rotation actually holds before it matters in production.
+
+---
+
+### Q: Describe a situation where you had to design a strategy to handle EKS control plane API server rate limiting (HTTP 429 / "client-side throttling" errors) caused by a proliferation of controllers and operators running in the cluster.
+
+**Model Answer:**
+
+In a large platform cluster we had onboarded roughly 40 Custom Resource-backed controllers — a mix of in-house operators and third-party ones — all competing for API server bandwidth. Symptom was cascading "client-side throttling" log lines and delayed reconciliation loops, eventually causing cert-manager to miss renewals.
+
+**Root-cause analysis:**
+- Used `apiserver_request_total` and `apiserver_request_duration_seconds` metrics (available via EKS control plane logging to CloudWatch and scraped via CloudWatch Container Insights) to identify which UserAgents were consuming the highest request rates — three operators accounted for 60% of LIST calls.
+- Two controllers were doing **unbounded full LIST + re-sync every 30 seconds** rather than using informers with shared caches; one was a vendor operator with no tuning options.
+
+**Architectural response:**
+- **Enforce informer-based watch patterns** for all in-house controllers: added a mandatory code-review gate requiring controllers to use `controller-runtime` with `cache.New()` rather than direct client LISTs in reconcile loops.
+- **Tune resync periods**: set a cluster-wide convention of resync intervals ≥ 10 minutes for non-critical controllers; updated Helm chart values for each deployed operator accordingly.
+- **API Priority and Fairness (APF)**: configured custom `PriorityLevelConfiguration` and `FlowSchema` objects to cap lower-priority operators (e.g., cost-reporting controllers) to a lower concurrency share while protecting cert-manager and Karpenter in a high-priority band.
+- **Namespace-scoped RBAC for operators**: restricting operators to specific namespaces reduced the scope of LIST/WATCH calls, materially cutting request volume for operators that had previously been cluster-scoped unnecessarily.
+- **Vendor escalation**: filed a support case with the vendor whose operator lacked watch support; in the interim, deployed it at a reduced replica count with a custom `--resync
