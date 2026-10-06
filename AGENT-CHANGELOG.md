@@ -469,3 +469,15 @@ _Committed & pushed: yes_
 - Describe a situation where you had to design a strategy to handle EKS control plane API server rate limiting (HTTP 429 / "client-side throttling" errors) caused by a proliferation of controllers and operators running in the cluster.
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-06 19:58:27
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7187 chars)
+- How do you design an EKS strategy for managing node-level kernel and OS-level tuning (sysctl, ulimits, hugepages) for performance-sensitive workloads without violating Pod Security Standards?
+- A production EKS cluster's Horizontal Pod Autoscaler is oscillating — scaling up and immediately back down in rapid cycles — causing repeated pod churn and degraded service availability. How do you diagnose and resolve this?
+- Describe a situation where you had to justify and implement an EKS control plane logging and observability strategy to satisfy a regulatory compliance requirement (e.g., PCI-DSS, SOC 2, or FedRAMP). What architectural decisions did you make and what were the hardest trade-offs?
+- How do you design an EKS strategy for managing and enforcing topology-aware scheduling — including AZ spread, node affinity, and pod topology spread constraints — to maximise both availability and cost efficiency simultaneously?
+
+_Committed & pushed: yes_

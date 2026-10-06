@@ -3703,3 +3703,76 @@ In a large platform cluster we had onboarded roughly 40 Custom Resource-backed c
 - **API Priority and Fairness (APF)**: configured custom `PriorityLevelConfiguration` and `FlowSchema` objects to cap lower-priority operators (e.g., cost-reporting controllers) to a lower concurrency share while protecting cert-manager and Karpenter in a high-priority band.
 - **Namespace-scoped RBAC for operators**: restricting operators to specific namespaces reduced the scope of LIST/WATCH calls, materially cutting request volume for operators that had previously been cluster-scoped unnecessarily.
 - **Vendor escalation**: filed a support case with the vendor whose operator lacked watch support; in the interim, deployed it at a reduced replica count with a custom `--resync
+
+
+---
+
+## 🗓️ Added 2026-10-06 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-06 19:58 -->
+
+### Q: How do you design an EKS strategy for managing node-level kernel and OS-level tuning (sysctl, ulimits, hugepages) for performance-sensitive workloads without violating Pod Security Standards?
+
+**Model Answer:**
+
+- For cluster-wide OS tuning, bake kernel parameters into a custom AMI using EC2 Image Builder with Amazon Linux 2023 or Bottlerocket, applying settings via `bootstrap.sh` user-data or Bottlerocket's TOML configuration — this avoids privileged pods entirely.
+- For per-workload tuning, use the `allowedUnsafeSysctls` field in the pod spec (available under PSS "Baseline" for namespaced sysctls like `net.core.somaxconn`) and document which sysctls are safe versus node-wide.
+- Hugepages are exposed as a schedulable resource (`hugepages-2Mi`) via the kubelet; request them explicitly in pod specs and pre-allocate them at node boot through a Bottlerocket setting or a systemd unit in a custom AMI — not via a privileged DaemonSet.
+- Use Karpenter `NodeClass` or managed node group launch templates to segment tuned node pools, then apply node selectors or taints so only the workloads that require the tuning land on those nodes.
+- Audit compliance with a Kyverno policy that blocks `securityContext.privileged: true` and flags unsafe sysctl usage outside approved namespaces.
+- **Trade-off:** Custom AMIs increase golden-image maintenance burden; Bottlerocket's immutable OS reduces that burden but limits tuning surface — choose based on the tuning depth required.
+
+---
+
+### Q: A production EKS cluster's Horizontal Pod Autoscaler is oscillating — scaling up and immediately back down in rapid cycles — causing repeated pod churn and degraded service availability. How do you diagnose and resolve this?
+
+**Model Answer:**
+
+HPA oscillation ("thrashing") typically stems from metrics lag, aggressive scaling thresholds, or conflicting signals from multiple metrics sources.
+
+**Diagnosis steps:**
+1. `kubectl describe hpa <name>` — inspect `AbleToScale`, `ScalingLimited`, and the current/desired metric values over time.
+2. Check the `kube-controller-manager` logs (via CloudWatch if control plane logging is enabled) for HPA reconciliation events.
+3. Correlate pod startup latency with the metrics scrape interval — if pods take 60 s to become Ready but HPA evaluates every 15 s, it over-provisions before the new pods contribute to capacity.
+
+**Resolutions:**
+- Increase `--horizontal-pod-autoscaler-downscale-stabilization` (default 5 min) to give newly scaled pods time to absorb load before a downscale is permitted.
+- Set `behavior.scaleDown.stabilizationWindowSeconds` and `scaleUp.stabilizationWindowSeconds` in the HPA `v2` spec for fine-grained control per workload.
+- If using custom metrics via KEDA, ensure the scaler's polling interval and cooldown periods are tuned to match workload ramp time.
+- Add `minReplicas` headroom so the HPA never scales to zero and removes the spike-sensitive lower bound.
+- For CPU-based HPA, ensure requests are accurately set — HPA scales on utilisation *percentage of request*, so under-set requests cause false positives.
+
+---
+
+### Q: Describe a situation where you had to justify and implement an EKS control plane logging and observability strategy to satisfy a regulatory compliance requirement (e.g., PCI-DSS, SOC 2, or FedRAMP). What architectural decisions did you make and what were the hardest trade-offs?
+
+**Model Answer:**
+
+In a PCI-DSS scoped environment, the audit requirement mandated 12-month retention of all API server audit logs with tamper-evident storage and near-real-time alerting on privileged actions.
+
+**Architectural decisions:**
+- Enabled all five EKS control plane log types (`api`, `audit`, `authenticator`, `controllerManager`, `scheduler`) to CloudWatch Logs; these cannot be redirected elsewhere natively — CloudWatch is the only destination.
+- Created a Kinesis Data Firehose subscription filter on the `/aws/eks/<cluster>/cluster` log group to stream audit events to S3 with AES-256 SSE-KMS encryption and Object Lock (WORM, compliance mode) for tamper evidence.
+- Deployed a Lambda function downstream of Firehose to detect high-risk audit events (e.g., `verb=delete` on `secrets`, `impersonatedUser` fields) and publish to an SNS topic feeding the SOC team's SIEM.
+- Used CloudWatch Logs Insights for ad-hoc forensic queries during incident response, with saved queries shared via Terraform for reproducibility.
+
+**Hardest trade-offs:**
+- CloudWatch Logs costs scaled non-linearly with cluster size; we reduced ingestion cost by 40% by raising the audit policy level from `RequestResponse` to `Metadata` for non-sensitive resource groups, after reviewing which fields were actually required by the QSA.
+- FedRAMP additionally required that logs never leave the AWS GovCloud partition, which constrained third-party SIEM options and forced a native AWS OpenSearch Service deployment rather than the team's preferred Datadog.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing topology-aware scheduling — including AZ spread, node affinity, and pod topology spread constraints — to maximise both availability and cost efficiency simultaneously?
+
+**Model Answer:**
+
+Availability and cost efficiency pull in opposite directions with topology scheduling; the goal is a deliberate, workload-class-aware policy rather than a blanket rule.
+
+**Core design:**
+- Use `topologySpreadConstraints` with `topologyKey: topology.kubernetes.io/zone` and `whenUnsatisfiable: DoNotSchedule` for Tier-1 (revenue-critical) services, enforcing hard AZ spread; accept the cost of cross-AZ data transfer as a reliability premium.
+- For Tier-2 batch and async workloads, switch to `whenUnsatisfiable: ScheduleAnyway` combined with a `maxSkew: 2` to allow bin-packing into cheaper spot capacity in the dominant AZ without full hard spread.
+- Use Karpenter's `topology.kubernetes.io/zone` weighted node pool preferences to bias new node provisioning toward AZs with the lowest Spot interruption rate (surfaced via the EC2 Spot Interruption rate API or AWS Fault Injection data).
+- Apply `podAntiAffinity` with `requiredDuringSchedulingIgnoredDuringExecution` for singleton control-plane components (e.g., one Argo CD application controller) to prevent co-location on the same node, providing both AZ and node-level blast radius reduction.
+- Enforce these patterns via a Kyverno `ClusterPolicy` that mutates deployments lacking topology spread constraints in `production` namespaces, injecting the approved default, so teams benefit without needing platform expertise.
+- **Cost control lever:** Enable the EKS VPC CNI's `ENABLE_PREFIX_DELEGATION` and pair with Karpenter's `consolidation` policy so under-utilised single-AZ nodes are drained and terminated after spread constraints are satisfied, reclaiming idle capacity.
+- **Observability:** Export `scheduler_pending_pods` and `kube_pod_scheduler_binding_duration_seconds` to Prometheus and alert when spread constraints cause persistent pending states, which signals VPC subnet exhaustion or AZ capacity constraints requiring subnet expansion.
