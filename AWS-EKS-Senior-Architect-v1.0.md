@@ -3776,3 +3776,64 @@ Availability and cost efficiency pull in opposite directions with topology sched
 - Enforce these patterns via a Kyverno `ClusterPolicy` that mutates deployments lacking topology spread constraints in `production` namespaces, injecting the approved default, so teams benefit without needing platform expertise.
 - **Cost control lever:** Enable the EKS VPC CNI's `ENABLE_PREFIX_DELEGATION` and pair with Karpenter's `consolidation` policy so under-utilised single-AZ nodes are drained and terminated after spread constraints are satisfied, reclaiming idle capacity.
 - **Observability:** Export `scheduler_pending_pods` and `kube_pod_scheduler_binding_duration_seconds` to Prometheus and alert when spread constraints cause persistent pending states, which signals VPC subnet exhaustion or AZ capacity constraints requiring subnet expansion.
+
+
+---
+
+## 🗓️ Added 2026-10-07 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-07 20:24 -->
+
+### Q: How do you design an EKS strategy for managing etcd-backed Kubernetes object bloat — such as excessive ConfigMaps, Secrets, and Events — to prevent API server degradation at scale?
+
+**Key points an interviewer wants to hear:**
+
+- **Root cause awareness:** etcd has a default 8 GiB storage limit; uncontrolled object proliferation (stale Helm release Secrets, unbounded Event objects, orphaned ConfigMaps) causes etcd compaction pressure and API server latency spikes.
+- **Event TTL tuning:** Set `--event-ttl` on the API server (via EKS managed config where possible) to reduce Event retention; for managed EKS use external Event exporters (e.g., `kubernetes-event-exporter`) and rely on CloudWatch or OpenSearch for retention instead of etcd.
+- **Helm Secret cleanup:** Enforce `--history-max` in Helm values and Argo CD projects to cap stored release Secrets; implement a CronJob or use `helm-cleanup` tooling to purge superseded revisions.
+- **Quota enforcement:** Apply `ResourceQuota` on `count/configmaps`, `count/secrets`, and `count/persistentvolumeclaims` per namespace to cap object counts before they become a platform problem.
+- **Monitoring signals:** Alert on etcd `etcd_mvcc_db_total_size_in_bytes` approaching 6 GiB and `apiserver_storage_objects` per resource type; these are early indicators before compaction failures surface.
+- **GitOps hygiene:** In Argo CD or Flux, avoid storing large binary blobs in ConfigMaps committed to Git; redirect those to S3 or Parameter Store and reference them at runtime.
+- **Compaction and defragmentation:** Understand that EKS manages etcd compaction, but customer-side object hygiene is the only lever available; document this boundary clearly in the platform runbook.
+
+---
+
+### Q: A blue/green EKS cluster upgrade is underway and traffic has been shifted to the green cluster, but post-cutover you observe that the green cluster's Service accounts are not inheriting the correct IRSA annotations from the blue cluster. How do you diagnose and prevent this class of migration failure?
+
+**Key points an interviewer wants to hear:**
+
+- **Immediate diagnosis:** Compare `kubectl get serviceaccounts -A -o yaml` output between clusters; IRSA bindings live as annotations (`eks.amazonaws.com/role-arn`) on ServiceAccount objects, not in IAM — they must be explicitly migrated, not assumed to carry over from Helm charts or manifests that omit them.
+- **Common root cause:** Helm charts or Kustomize bases often omit IRSA annotations because they are environment-specific; they get applied manually or via a post-install hook in blue but are absent in green's declarative source of truth.
+- **GitOps fix:** Enforce that IRSA annotations are expressed in the GitOps repository (Kustomize overlays or Helm `values.yaml` per environment), never applied ad hoc. A pre-migration checklist verifies parity between live cluster state and repo state.
+- **Trust policy validation:** Even if the annotation is present, the IAM role trust policy must reference the green cluster's OIDC provider ARN; verify with `aws iam get-role --role-name <role>` and confirm `oidc.eks.<region>.amazonaws.com/id/<GREEN_OIDC_ID>` is listed.
+- **Automated parity check:** Run a pre-cutover script that diffs ServiceAccount annotations between clusters and compares OIDC provider ARNs in all role trust policies referenced by those annotations; block cutover if drift is detected.
+- **Token projection reminder:** After cutover, if pods started before annotation correction are still running, they hold tokens issued for the wrong audience; a rolling restart is required to force re-projection.
+- **Behavioral signal:** The failure mode is silent at the pod level — AWS SDK calls return `AccessDenied`, not a Kubernetes error — so pre-cutover smoke tests must explicitly exercise IAM-dependent code paths.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing Kubernetes API deprecation across a large cluster fleet ahead of version upgrades, and how do you operationalize this at the platform team level?
+
+**Key points an interviewer wants to hear:**
+
+- **Detection tooling:** Deploy `pluto` or `kubent` (kube-no-trouble) in CI pipelines and as scheduled cluster scans to identify deprecated or removed API versions in live manifests, Helm releases, and GitOps repositories before an upgrade window.
+- **Shift-left in CI:** Integrate `pluto` into pull-request pipelines so teams receive deprecation warnings at merge time, not at upgrade time; configure it with the target Kubernetes version to surface removals relevant to the planned upgrade.
+- **Fleet-wide scanning:** Run `kubent` as a CronJob in each cluster and ship results to a central SIEM or dashboard (e.g., Grafana via CloudWatch Logs Insights); track deprecation debt across the fleet over time.
+- **Platform team ownership boundary:** The platform team owns the tooling and reporting; individual product teams own remediation within a defined SLA (e.g., 60 days before the target upgrade date). Encode this in the platform operating model.
+- **Helm chart governance:** Many deprecations originate in upstream Helm charts; establish a policy that charts must be pinned to versions that support the target API version before cluster upgrade proceeds.
+- **Upgrade gate:** In the upgrade runbook, include an automated pre-flight check that fails the upgrade pipeline if any removed API versions are detected in the cluster; this prevents "upgrade first, fix later" patterns.
+- **Admission webhook risk:** Admission webhooks using deprecated APIs can silently break during an upgrade; specifically validate webhook configurations (`ValidatingWebhookConfiguration`, `MutatingWebhookConfiguration`) reference stable API versions.
+
+---
+
+### Q: Describe a situation where you had to design or enforce a strategy for managing EKS node group AMI currency — balancing security patching cadence against stability — and what organizational friction you encountered.
+
+**Key points an interviewer wants to hear:**
+
+- **Context:** At a regulated financial services firm, EKS managed node groups were running EKS-optimized AMIs that were 90+ days behind the latest release, accumulating kernel CVEs that violated the organization's 30-day patching SLA.
+- **Design approach:** Implemented a pipeline using AWS Systems Manager Automation to detect when the latest EKS-optimized AMI for a given Kubernetes version differed from the AMI in use across node groups; the pipeline triggered a staged rolling node group update (using `aws eks update-nodegroup-version`) with PDB awareness.
+- **Karpenter path:** For Karpenter-managed nodes, configured `EC2NodeClass` to always reference the latest EKS-optimized AMI alias (`al2023@latest`) and set a maximum node age TTL via Karpenter's disruption policy so nodes were recycled on a defined cadence regardless of idle status.
+- **Stability tension:** Teams pushed back because AMI updates triggered node replacements that caused brief scheduling disruptions; resolved this by enforcing PodDisruptionBudgets for all critical workloads and requiring teams to declare `minAvailable` before the policy took effect.
+- **Organizational friction:** The security team wanted weekly AMI rotation; engineering teams wanted quarterly; negotiated a 21-day maximum AMI age enforced by an automated compliance check that blocked new deployments to non-compliant node groups after a grace period.
+- **Canary pattern:** Introduced a canary node group per cluster that always ran the latest AMI; workloads not sensitive to disruption were scheduled there first, providing an early signal of AMI regressions before fleet-wide rollout.
+- **Lesson:** AMI currency is primarily an organizational problem, not a technical one; the tooling is straightforward, but enforcing it requires executive sponsorship, clear SLA ownership, and automated enforcement rather than relying on voluntary compliance.

@@ -481,3 +481,15 @@ _Committed & pushed: yes_
 - How do you design an EKS strategy for managing and enforcing topology-aware scheduling — including AZ spread, node affinity, and pod topology spread constraints — to maximise both availability and cost efficiency simultaneously?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-07 20:24:40
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8008 chars)
+- How do you design an EKS strategy for managing etcd-backed Kubernetes object bloat — such as excessive ConfigMaps, Secrets, and Events — to prevent API server degradation at scale?
+- A blue/green EKS cluster upgrade is underway and traffic has been shifted to the green cluster, but post-cutover you observe that the green cluster's Service accounts are not inheriting the correct IRSA annotations from the blue cluster. How do you diagnose and prevent this class of migration failure?
+- How do you design an EKS strategy for managing and enforcing Kubernetes API deprecation across a large cluster fleet ahead of version upgrades, and how do you operationalize this at the platform team level?
+- Describe a situation where you had to design or enforce a strategy for managing EKS node group AMI currency — balancing security patching cadence against stability — and what organizational friction you encountered.
+
+_Committed & pushed: yes_
