@@ -3837,3 +3837,67 @@ Availability and cost efficiency pull in opposite directions with topology sched
 - **Organizational friction:** The security team wanted weekly AMI rotation; engineering teams wanted quarterly; negotiated a 21-day maximum AMI age enforced by an automated compliance check that blocked new deployments to non-compliant node groups after a grace period.
 - **Canary pattern:** Introduced a canary node group per cluster that always ran the latest AMI; workloads not sensitive to disruption were scheduled there first, providing an early signal of AMI regressions before fleet-wide rollout.
 - **Lesson:** AMI currency is primarily an organizational problem, not a technical one; the tooling is straightforward, but enforcing it requires executive sponsorship, clear SLA ownership, and automated enforcement rather than relying on voluntary compliance.
+
+
+---
+
+## 🗓️ Added 2026-10-08 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-08 20:29 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing Pod disruption and termination safety for batch and ML training workloads that cannot tolerate mid-job node preemption?
+
+**Key points an interviewer wants to hear:**
+
+- Batch and ML training jobs (e.g., distributed PyTorch with NCCL) treat mid-run node loss as catastrophic; the strategy must minimise both probability and blast radius.
+- Use Karpenter `Disruption` budgets (`disruption.budgets`) to restrict voluntary termination windows — e.g., allow zero voluntary disruptions during business-critical training hours using cron-based budget schedules.
+- Pin training node pools to On-Demand Capacity Reservations (ODCRs) or `zonal-shift`-aware dedicated node groups to eliminate Spot interruption risk for long-running jobs entirely; reserve Spot for short, checkpoint-tolerant phases.
+- Enforce checkpoint-aware termination via a custom pre-stop hook or a SIGTERM handler that writes a checkpoint to S3/EFS before allowing the container to exit; pair with `terminationGracePeriodSeconds` tuned to actual checkpoint write time (can be several minutes for large models).
+- Use `priorityClass` with high values and corresponding `PodDisruptionBudgets` with `maxUnavailable: 0` so cluster-level operations (node drain, upgrades) cannot evict running jobs without operator approval.
+- For multi-node jobs using `Kubeflow Training Operator` or `PyTorchJob`, configure `restartPolicy: OnFailure` with a shared checkpoint path so the operator can reschedule on new nodes from the last checkpoint rather than from scratch.
+- Gate node drain in CI/CD upgrade pipelines with a pre-drain check: query the Training Operator for active jobs on the target node and block drain until the job finishes or a human approves forced eviction.
+- Track MTTR-per-interrupted-job as an SLI and surface it to platform and ML-infra teams to create accountability around scheduling decisions.
+
+---
+
+### Q: A production EKS cluster suddenly shows a sharp rise in `etcd request duration` and API server `watch` event latency. Control-plane metrics are healthy otherwise. How do you diagnose and remediate?
+
+**Key points an interviewer wants to hear:**
+
+- Start with the EKS control-plane CloudWatch metrics: `etcd_request_duration_seconds` histograms, `apiserver_watch_events_total`, and `apiserver_current_inflight_requests` broken down by verb. Distinguish whether the spike is read-heavy (LIST/WATCH) or write-heavy (PUT/DELETE).
+- A common culprit is a LIST storm — a newly deployed controller, a misconfigured Informer without a label selector, or a rogue CI job calling `kubectl get` in a tight loop — causing etcd to serve large object dumps rather than watch streams. Check `audit logs` filtered on `verb=list` and `responseObjectCount` to identify the offending client.
+- Inspect `apiserver_watch_cache_events_dispatched_total` vs `apiserver_watch_cache_capacity` — if the watch cache is frequently evicting events, watchers fall back to expensive etcd reads.
+- Check object count per resource type using `kubectl get --all-namespaces -o json <resource> | jq '.items | length'` for known "bloat" resources (Events, leases, ConfigMaps). Large object counts increase etcd B-tree scan time even for well-indexed queries.
+- Remediation tier 1 (immediate): identify and rate-limit or kill the offending client; add `--watch-cache-sizes` tuning if the EKS managed control plane exposes it via support case.
+- Remediation tier 2 (structural): enforce server-side field selectors and label selectors on all controller Informers; split large shared clusters to reduce per-cluster etcd object count; use `APIListChunking` (pagination with `limit=500`) for batch tooling.
+- For EKS specifically, you cannot directly restart etcd — open a support case if `etcd` latency does not recover after reducing API server load, as AWS may need to remediate on the managed side.
+- Post-incident: add a CloudWatch alarm on p99 `etcd_request_duration_seconds > 200ms` sustained for 5 minutes and create a runbook mapping the alarm to the triage steps above.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing GPU resource allocation, isolation, and observability for multi-tenant ML workloads on the same cluster?
+
+**Key points an interviewer wants to hear:**
+
+- Use the **NVIDIA Device Plugin** for whole-GPU allocation (`nvidia.com/gpu: N` requests) and evaluate **MIG (Multi-Instance GPU)** partitioning on A100/H100 nodes for tenants with smaller per-job GPU needs — MIG provides hardware-level memory and compute isolation that software namespace quotas cannot match.
+- Enforce GPU `ResourceQuota` per namespace (e.g., `requests.nvidia.com/gpu: 8`) so no single team monopolises the GPU node pool; pair with `LimitRange` to prevent pods from requesting GPUs without explicit declarations.
+- Prevent GPU sharing contention: set `nvidia.com/gpu` as an integer resource (not fractional) unless using **time-slicing** or **MPS** explicitly. If time-slicing is enabled via the device plugin ConfigMap, document the noisy-neighbour risk and isolate time-shared pools to separate node groups from whole-GPU pools using taints.
+- For observability, deploy **DCGM Exporter** as a DaemonSet and scrape GPU metrics (utilisation, memory used, SM clock, NVLink errors, XID errors) into Prometheus; build per-namespace Grafana dashboards using the `pod` and `namespace` labels DCGM attaches.
+- Alert on GPU utilisation below a threshold (e.g., `gpu_utilization < 10%` sustained 15 min) per reserved GPU to surface idle allocations — a key chargeback signal in multi-tenant environments.
+- Use node taints (`nvidia.com/gpu=present:NoSchedule`) and team-specific tolerations enforced by Kyverno to prevent CPU-only workloads from landing on expensive GPU nodes.
+- Implement Karpenter `NodePool` objects per GPU SKU (e.g., `p4d.24xlarge`, `g5.48xlarge`) with `disruption: budgets` set to allow no voluntary disruption during training windows; use topology spread to ensure jobs spread across AZs when multi-node.
+- Track GPU-hours consumed per team via DCGM metrics joined to pod labels for accurate chargeback, and review quarterly with team leads to right-size quotas.
+
+---
+
+### Q: Describe a situation where you had to design or enforce an EKS cluster fleet-wide incident response and forensics capability — including what data you preserved, how you contained blast radius, and what you changed architecturally afterwards.
+
+**Key points an interviewer wants to hear:**
+
+- **Situation**: A compromised CI/CD credential led to a malicious container being deployed to a shared EKS cluster. The pod attempted lateral movement via the Kubernetes API using a highly permissive service account token it found mounted at the default path.
+- **Immediate containment**: Isolated the namespace by applying a `NetworkPolicy` denying all ingress/egress, then cordoned and drained the affected nodes to stop any kernel-level escape attempt, and revoked the service account's IRSA role in IAM to cut cloud-plane reach.
+- **Forensic data preserved**: Enabled VPC Flow Logs capture for the node subnet (already on), pulled EKS audit logs from CloudWatch for the compromised service account filtered by `userAgent` and `sourceIPs` to reconstruct the API call timeline; used Falco ring-buffer events (Falco was deployed as a DaemonSet) to capture syscall sequences from the container PID namespace; took EBS snapshots of any attached volumes on affected nodes before termination.
+- **Root cause**: Default automounting of service account tokens (`automountServiceAccountToken: true`) combined with a cluster-wide `ClusterRoleBinding` a team had added for debugging six months earlier and never removed.
+- **Architectural changes post-incident**:
+  - Set `automountServiceAccountToken: false` as the cluster default and enforced opt-in via a Kyverno mutation policy.
+  - Implemented a weekly automated audit of `ClusterRoleBindings` and `RoleBindings

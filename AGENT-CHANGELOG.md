@@ -493,3 +493,15 @@ _Committed & pushed: yes_
 - Describe a situation where you had to design or enforce a strategy for managing EKS node group AMI currency — balancing security patching cadence against stability — and what organizational friction you encountered.
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-08 20:29:42
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8066 chars)
+- How do you design an EKS strategy for managing and enforcing Pod disruption and termination safety for batch and ML training workloads that cannot tolerate mid-job node preemption?
+- A production EKS cluster suddenly shows a sharp rise in `etcd request duration` and API server `watch` event latency. Control-plane metrics are healthy otherwise. How do you diagnose and remediate?
+- How do you design an EKS strategy for managing and enforcing GPU resource allocation, isolation, and observability for multi-tenant ML workloads on the same cluster?
+- Describe a situation where you had to design or enforce an EKS cluster fleet-wide incident response and forensics capability — including what data you preserved, how you contained blast radius, and what you changed architecturally afterwards.
+
+_Committed & pushed: yes_
