@@ -3901,3 +3901,74 @@ Availability and cost efficiency pull in opposite directions with topology sched
 - **Architectural changes post-incident**:
   - Set `automountServiceAccountToken: false` as the cluster default and enforced opt-in via a Kyverno mutation policy.
   - Implemented a weekly automated audit of `ClusterRoleBindings` and `RoleBindings
+
+
+---
+
+## 🗓️ Added 2026-10-09 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-09 19:59 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing FinOps practices around Spot Instance usage at scale, including handling interruption-driven cost spikes and ensuring workload suitability gates?
+
+**Model Answer:**
+
+- **Workload classification first:** gate Spot eligibility at the namespace or workload level using Kyverno/Gatekeeper policies — stateless, interruption-tolerant workloads (batch, background workers, non-latency-sensitive APIs) are Spot candidates; stateful or latency-critical workloads default to On-Demand.
+- **Diversification as a first principle:** configure Karpenter `NodePool` or MNG with 8–12 instance types per pool across multiple families (m5, m5a, m6i, m6a, c5, c6i) and all AZs to maximise Spot capacity pools and minimise correlated interruptions.
+- **Interruption pre-emption, not reaction:** deploy the AWS Node Termination Handler (NTH) or rely on Karpenter's native interruption queue (SQS + EventBridge) to drain nodes 2 minutes before reclamation, ensuring graceful pod termination and zero dropped in-flight requests.
+- **Cost attribution guardrails:** tag Spot nodes distinctly (`capacity-type: spot`) and propagate tags to Cost Explorer; create per-team chargeback dashboards that surface Spot savings rates alongside interruption frequency so teams can self-regulate workload placement.
+- **Spike containment:** set On-Demand baseline capacity (typically 20–30% of fleet) via Karpenter weight or MNG On-Demand base, ensuring interruption-driven re-provisioning doesn't cascade into full On-Demand fallback at scale and cause sudden cost spikes.
+- **Suitability SLOs:** track interruption rate per pool in CloudWatch; if a pool exceeds a defined threshold (e.g., >5% hourly interruption rate), automated runbooks adjust instance type weights or temporarily shift the affected workload to On-Demand until Spot capacity stabilises.
+
+---
+
+### Q: A production EKS cluster's Vertical Pod Autoscaler (VPA) is causing repeated pod evictions and OOMKills in a feedback loop. How do you diagnose and resolve this without disabling VPA entirely?
+
+**Model Answer:**
+
+The root cause is typically VPA in `Auto` mode aggressively lowering memory limits based on recent low-utilisation windows, leaving pods under-provisioned for periodic bursts, which then OOMKill, causing restarts that reset resource history and perpetuate the cycle.
+
+**Diagnosis steps:**
+1. Inspect `VerticalPodAutoscaler` status (`kubectl describe vpa`) and compare `recommendation.containerRecommendations` lower-bound vs. current requests/limits.
+2. Cross-reference OOMKill events with VPA recommendation timestamps — confirm limits were reduced just before the kill.
+3. Check `--history-length` and `--recommender-interval` on the VPA recommender; short windows cause volatile recommendations.
+
+**Resolution:**
+- Switch impacted VPA objects to `updateMode: "Off"` immediately to stop evictions; use recommendations as advisory only while resolving.
+- Set explicit `minAllowed` and `maxAllowed` resource bounds on the VPA object to prevent recommendations from dropping below a safe operational floor.
+- Increase the recommender's history window (`--history-length=24h`) and tune `--recommender-interval` to reduce volatility from short-lived traffic dips.
+- For bursty workloads, prefer **VPA + HPA separation**: VPA manages CPU/memory requests based on baseline, HPA handles burst scaling — never combine VPA memory management with HPA on the same metric to avoid conflicting signals.
+- Introduce a `PodDisruptionBudget` to cap concurrent VPA-driven evictions and prevent fleet-wide simultaneous restarts.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing cluster-wide admission control rollout safely — ensuring new webhook policies don't cause unintended deployment failures across teams?
+
+**Model Answer:**
+
+- **Policy lifecycle gates — warn before enforce:** deploy new Kyverno or Gatekeeper policies in `Audit` (Kyverno: `action: Audit`) or OPA `warn` mode first; surface violations as audit events and team-facing reports for a defined soak period (typically 1–2 sprint cycles) before switching to `Enforce`.
+- **Canary namespace targeting:** use `namespaceSelector` to apply new policies to a designated canary namespace containing representative workloads from each team; validate zero breakage before broadening scope to production namespaces.
+- **Webhook failure policy discipline:** set `failurePolicy: Fail` only for security-critical webhooks (e.g., image registry enforcement); set `failurePolicy: Ignore` for advisory or observability webhooks so a webhook pod crash doesn't block all cluster admissions.
+- **Webhook availability hardening:** run at least 2 replicas of webhook controllers with `PodAntiAffinity` across AZs, set aggressive `timeoutSeconds` (≤5s) with circuit-breaker `matchPolicy`, and exclude `kube-system` and control-plane namespaces from non-critical webhooks.
+- **Pre-deployment policy simulation:** integrate `kyverno test` or `conftest` in CI pipelines so teams get policy failure feedback at PR time, not at `kubectl apply` time in production.
+- **Rollback path:** version all policies in Git with tagged releases; a policy rollback is a GitOps revert + ArgoCD sync, completing in under 2 minutes without manual webhook intervention.
+- **Change communication:** maintain a policy changelog published to an internal developer portal so teams aren't surprised by enforcement mode transitions.
+
+---
+
+### Q: Describe a situation where EKS cross-account or cross-cluster service mesh federation introduced unexpected latency or reliability problems, and how you resolved it.
+
+**Model Answer:**
+
+**Situation:** A platform serving multiple business units federated Istio service meshes across two EKS clusters in different AWS accounts (prod and data-platform) using Istio's `ServiceEntry` and remote secret-based endpoint discovery. After federation, inter-cluster API calls showed P99 latency increases of 200–400ms and intermittent 503s that didn't appear in single-cluster testing.
+
+**Diagnosis:**
+- Distributed tracing (Jaeger/X-Ray) revealed latency was concentrated at the Envoy sidecar egress on the calling cluster, not network transit.
+- `istioctl proxy-config cluster` showed remote endpoints were being resolved via the Istio east-west gateway's external NLB DNS name, which had a 60-second DNS TTL — causing stale endpoint resolution during NLB target group rebalancing events.
+- The 503s correlated with Istio control plane (Istiod) certificate rotation events; the remote cluster's Istio CA root wasn't trusted consistently because the cross-cluster remote secret had been manually rotated and the intermediate cert chain wasn't fully propagated.
+
+**Resolution:**
+- Replaced DNS-based east-west gateway discovery with static NLB IP targets registered via `ServiceEntry` with `resolution: STATIC`, eliminating DNS TTL staleness.
+- Automated cross-cluster remote secret rotation using External Secrets Operator syncing Istiod CA bundles across accounts, with a validation step confirming trust chain before old secrets were deleted.
+- Tuned Envoy outlier detection (`consecutiveGatewayErrors`, `interval`) on the `DestinationRule` for cross-cluster traffic to eject unhealthy endpoints faster during transient NLB rebalances.
+- Introduced dedicated mesh-to-mesh latency SLOs in Grafana with alerting on P95 > 150ms, making future regressions visible before they escalate to incidents.

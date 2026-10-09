@@ -505,3 +505,15 @@ _Committed & pushed: yes_
 - Describe a situation where you had to design or enforce an EKS cluster fleet-wide incident response and forensics capability — including what data you preserved, how you contained blast radius, and what you changed architecturally afterwards.
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-09 19:59:29
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7569 chars)
+- How do you design an EKS strategy for managing and enforcing FinOps practices around Spot Instance usage at scale, including handling interruption-driven cost spikes and ensuring workload suitability gates?
+- A production EKS cluster's Vertical Pod Autoscaler (VPA) is causing repeated pod evictions and OOMKills in a feedback loop. How do you diagnose and resolve this without disabling VPA entirely?
+- How do you design an EKS strategy for managing and enforcing cluster-wide admission control rollout safely — ensuring new webhook policies don't cause unintended deployment failures across teams?
+- Describe a situation where EKS cross-account or cross-cluster service mesh federation introduced unexpected latency or reliability problems, and how you resolved it.
+
+_Committed & pushed: yes_
