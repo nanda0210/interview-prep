@@ -3972,3 +3972,60 @@ The root cause is typically VPA in `Auto` mode aggressively lowering memory limi
 - Automated cross-cluster remote secret rotation using External Secrets Operator syncing Istiod CA bundles across accounts, with a validation step confirming trust chain before old secrets were deleted.
 - Tuned Envoy outlier detection (`consecutiveGatewayErrors`, `interval`) on the `DestinationRule` for cross-cluster traffic to eject unhealthy endpoints faster during transient NLB rebalances.
 - Introduced dedicated mesh-to-mesh latency SLOs in Grafana with alerting on P95 > 150ms, making future regressions visible before they escalate to incidents.
+
+
+---
+
+## 🗓️ Added 2026-10-10 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-10 19:07 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing cluster-wide egress traffic control to prevent data exfiltration while minimising operational friction for development teams?
+
+**Key points an interviewer wants to hear:**
+
+- **Layered controls:** Combine Kubernetes `NetworkPolicy` (via Cilium or Calico) for pod-level egress with AWS security group rules and VPC-level controls (NAT Gateway restrictions, VPC Endpoint policies) for infrastructure-level enforcement.
+- **DNS-based egress filtering:** Deploy a DNS firewall (Route 53 Resolver DNS Firewall or an in-cluster proxy like Squid/Envoy) to allowlist FQDNs rather than raw IP ranges, since SaaS endpoints rotate IPs frequently.
+- **Kyverno/Gatekeeper policies:** Enforce that every namespace must have a default-deny egress `NetworkPolicy` applied at namespace creation time via admission webhook; teams opt-in additional egress rules through GitOps PRs reviewed by the platform team.
+- **Developer experience:** Publish a self-service egress allowlist request process (GitHub issue template → policy PR → automated merge after approval), with sandbox namespaces that have relaxed egress for experimentation but hard deny in production.
+- **Observability:** Use Cilium Hubble or VPC Flow Logs shipped to CloudWatch/OpenSearch to alert on unexpected egress destinations; integrate with a SIEM for data-exfiltration anomaly detection.
+- **Trade-off acknowledgement:** Pure IP-based `NetworkPolicy` rules break when SaaS endpoints change; DNS-based solutions add latency and a potential SPOF — size and HA the DNS firewall accordingly.
+
+---
+
+### Q: A production EKS cluster's pod startup latency has increased from under 5 seconds to over 90 seconds. Nodes are available and images are cached. Walk through your systematic diagnosis.
+
+**Key points an interviewer wants to hear:**
+
+- **Isolate the phase:** Use `kubectl describe pod` and pod condition timestamps (`Initialized`, `PodScheduled`, `ContainersReady`) to pinpoint which phase (scheduling, image pull, container init, readiness probe) is consuming time.
+- **Scheduler throughput:** Check kube-scheduler logs and `scheduler_e2e_scheduling_duration_seconds` metrics; high API server list/watch latency or a full scheduling queue (caused by PodAffinity/Topology constraints that are hard to satisfy) can stall scheduling.
+- **Admission webhook latency:** `MutatingAdmissionWebhook` calls are synchronous and serial; use API server audit logs and `apiserver_admission_webhook_admission_duration_seconds` to identify a slow webhook (e.g., a misconfigured Istio sidecar injector or OPA instance under load).
+- **CNI initialisation:** A slow `aws-node` or CNI plugin assigning IPs (ENI warming lag, IP exhaustion) directly delays `ContainersReady`; check `aws_node` logs and VPC CNI metrics like `awscni_assigned_ip_addresses`.
+- **Node-level:** Containerd or kubelet logs may reveal slow image layer decompression (even when "cached," layers can need decompression on first run), slow volume attach/mount (EBS CSI driver delays), or kubelet `syncPod` queue backlog.
+- **Remediation examples:** Increase CNI warm pool (`WARM_IP_TARGET`), pre-pull images via DaemonSet, tune `failureThreshold`/`initialDelaySeconds` on readiness probes, scale or add timeout circuit-breaking to admission webhooks.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing compliance with data residency and sovereignty requirements when workloads span multiple AWS regions?
+
+**Key points an interviewer wants to hear:**
+
+- **Cluster topology:** Deploy dedicated EKS clusters per regulated region rather than stretching a single cluster across regions; Kubernetes control plane components and etcd must never replicate data across a sovereignty boundary.
+- **IRSA and data-plane scoping:** Ensure IRSA role trust policies are scoped to specific EKS OIDC providers, and that IAM policies restrict S3/RDS/KMS actions to resources in the compliant region (`aws:RequestedRegion` condition key).
+- **Admission control:** Use Kyverno or OPA/Gatekeeper policies to reject workload manifests that reference cross-region endpoints, external secrets, or image registries hosted outside the approved region; this is enforced at deploy time, not just at runtime.
+- **Image registry:** Run a regional ECR in each sovereign zone; block cross-region image pulls via VPC Endpoint policy and Kyverno `allowed-image-registries` rule.
+- **Logging and telemetry:** Ensure CloudWatch Logs, S3 audit trails, and any third-party observability SaaS endpoints are also within the regulated boundary; data residency often covers logs, not just primary data.
+- **Evidence for auditors:** GitOps commit history, admission webhook audit logs, and AWS Config rules (`ec2:Region`, `kms:KeyOrigin`) provide a continuous compliance evidence trail for certifications like GDPR, C5, or MAS TRM.
+
+---
+
+### Q: Describe a situation where you had to design or justify an EKS platform's approach to progressive delivery — including canary releases and feature flags — and what architectural trade-offs you encountered.
+
+**Key points an interviewer wants to hear:**
+
+- **Context:** At a previous employer, a monorepo platform serving multiple product teams needed a deployment strategy that reduced blast radius for frequent releases without requiring separate clusters per environment for every team.
+- **Solution chosen:** Adopted Argo Rollouts for Kubernetes-native canary and blue/green delivery, integrated with the AWS Load Balancer Controller's weighted target group feature for traffic splitting at the ALB level — removing the need for a service mesh purely for traffic management.
+- **Feature flags complement:** Layered LaunchDarkly (server-side SDK) for business-logic flags so that a bad feature could be toggled off in seconds without a redeployment, decoupling deployment risk from release risk.
+- **Trade-offs encountered:** Argo Rollouts' analysis templates required stable Prometheus metrics; early on, metric cardinality explosions (as in other questions) made automated canary analysis unreliable, requiring manual promotion gates as a fallback — adding toil.
+- **Operational complexity:** Two rollout controllers (Argo CD + Argo Rollouts) plus ALB weight management increased the cognitive surface area for on-call engineers; invested in runbooks, status dashboards, and a "rollout health" Slack bot to compensate.
+- **Outcome:** P95 incident rate from deployments dropped ~60% over two quarters; the architectural lesson was that progressive delivery is as much a cultural and observability problem as a tooling problem — the platform is only as good as the metrics you analyse against.

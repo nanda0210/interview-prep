@@ -517,3 +517,15 @@ _Committed & pushed: yes_
 - Describe a situation where EKS cross-account or cross-cluster service mesh federation introduced unexpected latency or reliability problems, and how you resolved it.
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-10 19:07:25
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (6785 chars)
+- How do you design an EKS strategy for managing and enforcing cluster-wide egress traffic control to prevent data exfiltration while minimising operational friction for development teams?
+- A production EKS cluster's pod startup latency has increased from under 5 seconds to over 90 seconds. Nodes are available and images are cached. Walk through your systematic diagnosis.
+- How do you design an EKS strategy for managing and enforcing compliance with data residency and sovereignty requirements when workloads span multiple AWS regions?
+- Describe a situation where you had to design or justify an EKS platform's approach to progressive delivery — including canary releases and feature flags — and what architectural trade-offs you encountered.
+
+_Committed & pushed: yes_
