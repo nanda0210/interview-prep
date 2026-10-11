@@ -4029,3 +4029,80 @@ The root cause is typically VPA in `Auto` mode aggressively lowering memory limi
 - **Trade-offs encountered:** Argo Rollouts' analysis templates required stable Prometheus metrics; early on, metric cardinality explosions (as in other questions) made automated canary analysis unreliable, requiring manual promotion gates as a fallback — adding toil.
 - **Operational complexity:** Two rollout controllers (Argo CD + Argo Rollouts) plus ALB weight management increased the cognitive surface area for on-call engineers; invested in runbooks, status dashboards, and a "rollout health" Slack bot to compensate.
 - **Outcome:** P95 incident rate from deployments dropped ~60% over two quarters; the architectural lesson was that progressive delivery is as much a cultural and observability problem as a tooling problem — the platform is only as good as the metrics you analyse against.
+
+
+---
+
+## 🗓️ Added 2026-10-11 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-11 19:19 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing Karpenter node provisioning constraints — including instance-type diversity, capacity reservations, and consolidation — without causing workload instability?
+
+**Model Answer:**
+
+Karpenter's flexibility is a double-edged sword: without guardrails, consolidation and aggressive binpacking can cause excessive churn. The strategy I use:
+
+- **NodePool and EC2NodeClass design:** Define multiple NodePools scoped to workload tiers (latency-sensitive, batch, ML), each with curated `instanceFamilies` and `instanceCategories` rather than explicit instance lists, so Karpenter can diversify across generations automatically.
+- **Disruption budgets on NodePools:** Use `spec.disruption.budgets` (introduced in Karpenter 0.34+) to cap the percentage of nodes Karpenter can voluntarily consolidate concurrently, preventing fleet-wide churn during business hours.
+- **On-Demand Capacity Reservations (ODCR) and capacity blocks:** For GPU or latency-critical workloads, target Capacity Reservations via `karpenter.k8s.aws/capacity-type: on-demand` and the relevant reservation ID in EC2NodeClass, ensuring priority access without competing in open market.
+- **Consolidation policy tuning:** Use `consolidationPolicy: WhenEmptyOrUnderutilized` with a `consolidateAfter` delay (e.g., 5–10 minutes) to avoid reacting to transient load dips; apply `do-not-disrupt` annotations on pods during critical windows such as batch finalization.
+- **Drift detection governance:** Enforce AMI pinning strategies — `amiSelectorTerms` with specific aliases or SSM paths per environment — so drift-triggered replacement is predictable and tied to your release process, not Karpenter's default latest-AMI behavior.
+- **Observability:** Track `karpenter_nodes_terminated_reason`, `karpenter_provisioner_scheduling_duration_seconds`, and consolidation event logs in CloudWatch; alert on node replacement rates exceeding baseline to detect runaway consolidation early.
+
+---
+
+### Q: A multi-team EKS cluster is exhibiting "noisy neighbor" CPU throttling — some teams' workloads are consistently throttled even though node CPU is not saturated. How do you diagnose and resolve this?
+
+**Model Answer:**
+
+This is a classic CFS (Completely Fair Scheduler) quota throttling problem, not a capacity problem. Diagnosis and resolution:
+
+- **Root cause:** When `resources.limits.cpu` is set, the Linux kernel enforces CFS quota periods (default 100 ms). A container can exhaust its quota within a single period and be throttled for the remainder even if aggregate node CPU is idle — this is especially common with bursty JVM or Go workloads.
+- **Diagnosis:** Use `container_cpu_cfs_throttled_periods_total / container_cpu_cfs_periods_total` in Prometheus to identify throttled containers; correlate with `container_cpu_usage_seconds_total` to confirm under-saturation. Also check `kubectl top nodes` versus `kubectl describe node` to confirm node-level slack.
+- **Resolution options:**
+  - **Remove or raise CPU limits** for latency-sensitive workloads while keeping requests accurate for scheduling; use LimitRange to prevent unbounded limits on non-critical workloads by namespace.
+  - **Enable CPU manager static policy** on nodes for guaranteed QoS pods that are CPU-bound, giving them exclusive cores and eliminating CFS contention.
+  - **Tune CFS quota period:** On EKS with custom AMIs or Bottlerocket, reduce `cpu-cfs-quota-period` from 100 ms to 5–10 ms to make quota enforcement finer-grained and reduce burst starvation.
+- **Governance:** Use VPA in recommendation mode to right-size requests so the scheduler bins workloads appropriately; enforce via Kyverno that CPU limits are absent or at a defined ratio above requests for Tier-1 services.
+- **Preventive controls:** Implement namespace-level ResourceQuotas on `limits.cpu` to prevent limit sprawl, and dashboard throttling ratios per team in Grafana as part of the platform's FinOps and reliability SLAs.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing cross-cluster service discovery and traffic routing across multiple EKS clusters without relying on a service mesh?
+
+**Model Answer:**
+
+A service mesh is the common answer but introduces significant operational overhead. A lightweight, mesh-free approach:
+
+- **DNS-based federation with ExternalDNS:** Deploy ExternalDNS in each cluster writing to Route 53 private hosted zones shared across cluster VPCs. Services annotated for cross-cluster exposure publish weighted or geolocation records; consumers resolve via standard DNS with TTLs tuned for failover speed.
+- **AWS Cloud Map for service registry:** Register Kubernetes services as Cloud Map services using the `aws-cloud-map-mcs-controller`, which implements the Kubernetes [MCS API](https://github.com/kubernetes-sigs/mcs-api). This gives you `ServiceImport`/`ServiceExport` semantics without a mesh data plane.
+- **NLB-anchored cross-cluster endpoints:** For performance-sensitive paths, expose services via internal NLBs and register NLB IPs as `ExternalName` services or headless endpoints in consuming clusters; automate this registration via a controller watching NLB target health.
+- **Traffic routing and failover:** Use Route 53 Application Recovery Controller (ARC) routing controls for coarse-grained cluster-level failover; combine with weighted records for canary cross-cluster traffic shifts.
+- **Security:** Enforce mTLS at the NLB/ALB layer using ACM certificates and mutual TLS listeners rather than relying on in-cluster sidecars; use security groups to restrict cross-cluster traffic to known CIDR ranges.
+- **Health propagation:** Build a lightweight operator that watches Kubernetes `Endpoints` readiness and updates Route 53 health checks accordingly, so DNS failover reflects actual pod health rather than just node-level reachability.
+- **Trade-offs to articulate:** This approach trades fine-grained L7 policy and observability (no per-request tracing across clusters) for simplicity and lower blast radius; document the decision and revisit when L7 cross-cluster policy becomes a hard requirement.
+
+---
+
+### Q: Describe a situation where you had to design or respond to an EKS control plane throttling incident caused by excessive Kubernetes API server calls from a controller or operator. What was the root cause and how did you resolve it systemically?
+
+**Model Answer:**
+
+**Situation:** At a previous organization, after onboarding a third-party GitOps operator (Argo CD with ~400 Applications), we began seeing `API server 429` errors and degraded reconciliation across all controllers. CloudWatch showed `apiserver_request_total` spiking on LIST and WATCH verbs.
+
+**Root cause diagnosis:**
+- The operator's default configuration performed un-paginated LIST calls on Secrets and ConfigMaps cluster-wide on every reconcile cycle — O(n×m) call volume as Applications scaled.
+- Multiple instances of the operator were running without leader election properly configured, causing duplicated watch streams.
+- Identified via: API server audit logs filtered for `verb=list` and `resource=secrets`, correlated with operator pod logs; used `kubectl get --raw /metrics | grep apiserver_request_duration` to confirm latency impact.
+
+**Immediate mitigation:**
+- Scaled the operator down to a single replica to eliminate duplicate watches.
+- Applied `--qps` and `--burst` flags to the operator's client-go configuration to enforce rate limiting.
+- Added `resourceVersion` to LIST calls to enable watch-cache serving instead of hitting etcd directly.
+
+**Systemic resolution:**
+- Implemented API Priority and Fairness (APF) with a dedicated `PriorityLevelConfiguration` for the operator's service account, capping its concurrency share so runaway calls couldn't crowd out system controllers.
+- Required all operators onboarded to the platform to pass a controller review checklist: paginated LIST calls, leader election, exponential backoff, and client-go rate limit configuration documented.
+- Built a Prometheus alert on `apiserver_flowcontrol_rejected_requests_total` per FlowSchema to detect throttling proactively before user impact.
+- Added a load test phase in the operator onboarding pipeline that simulates scale (1000 objects) and validates call rates stay within

@@ -529,3 +529,15 @@ _Committed & pushed: yes_
 - Describe a situation where you had to design or justify an EKS platform's approach to progressive delivery — including canary releases and feature flags — and what architectural trade-offs you encountered.
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-11 19:19:53
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8410 chars)
+- How do you design an EKS strategy for managing and enforcing Karpenter node provisioning constraints — including instance-type diversity, capacity reservations, and consolidation — without causing workload instability?
+- A multi-team EKS cluster is exhibiting "noisy neighbor" CPU throttling — some teams' workloads are consistently throttled even though node CPU is not saturated. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing cross-cluster service discovery and traffic routing across multiple EKS clusters without relying on a service mesh?
+- Describe a situation where you had to design or respond to an EKS control plane throttling incident caused by excessive Kubernetes API server calls from a controller or operator. What was the root cause and how did you resolve it systemically?
+
+_Committed & pushed: yes_
