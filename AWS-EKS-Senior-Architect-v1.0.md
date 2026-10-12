@@ -4106,3 +4106,80 @@ A service mesh is the common answer but introduces significant operational overh
 - Required all operators onboarded to the platform to pass a controller review checklist: paginated LIST calls, leader election, exponential backoff, and client-go rate limit configuration documented.
 - Built a Prometheus alert on `apiserver_flowcontrol_rejected_requests_total` per FlowSchema to detect throttling proactively before user impact.
 - Added a load test phase in the operator onboarding pipeline that simulates scale (1000 objects) and validates call rates stay within
+
+
+---
+
+## 🗓️ Added 2026-10-12 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-12 22:23 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload rightsizing continuously — ensuring CPU and memory requests accurately reflect actual consumption without requiring manual intervention?
+
+**Model Answer:**
+
+Rightsizing is a continuous process, not a one-time event. The strategy I apply combines VPA in recommendation-only mode with custom automation to avoid the eviction feedback loops VPA causes in `Auto` mode.
+
+- **Data collection**: Deploy VPA with `updateMode: "Off"` cluster-wide; scrape `VerticalPodAutoscalerRecommendation` objects via a CronJob or controller that writes recommendations to a central store (e.g., DynamoDB or S3).
+- **Guardrails on recommendations**: Apply floor/ceiling bounds per workload class — never let VPA recommend below a safe minimum or above a node's largest available instance size. Bound CPU requests to within ±30% of the p95 rolling 14-day window to prevent thrash.
+- **Automated PR/change generation**: A GitOps reconciler (Argo CD + a custom controller) converts accepted recommendations into pull requests against the team's Helm values. Teams review and merge; no manual sizing archaeology needed.
+- **Goldilocks**: Use Fairwinds Goldilocks as a lightweight alternative for teams not yet on GitOps — it surfaces VPA recommendations in a UI dashboard, accelerating human review cycles.
+- **Namespace-level LimitRange coupling**: Enforce LimitRanges so any pod that sneaks in without requests gets capped at a safe default, preventing unbounded resource consumption while rightsizing catches up.
+- **Feedback loop**: Track actual vs. requested CPU/memory via CloudWatch Container Insights or Prometheus over rolling 30-day windows; alert when divergence exceeds a threshold, triggering a re-recommendation cycle.
+- **Behavioral angle**: Frame rightsizing to teams as a reliability *and* cost initiative — over-provisioned pods create false capacity confidence and hide memory leaks; under-provisioned ones cause OOMKills. Shared cost dashboards with per-team chargebacks accelerate adoption.
+
+---
+
+### Q: A production EKS cluster's Service Account token projections are expiring mid-flight for long-running batch jobs, causing authentication failures against the Kubernetes API and AWS services. How do you diagnose and permanently resolve this?
+
+**Model Answer:**
+
+This is a classic long-running workload vs. short-lived IRSA/projected token lifetime mismatch. Projected Service Account tokens have a default expiry of 1 hour (configurable at projection time), and IRSA STS tokens derived from them inherit a short TTL by default.
+
+**Diagnosis:**
+- Inspect the pod spec's `serviceAccountToken` projection volume — check the `expirationSeconds` field. Many defaults are 3600s (1 hour).
+- Review API server audit logs for `401 Unauthorized` errors tied to specific service accounts and correlate timestamps with token age.
+- For IRSA: check CloudTrail for `AssumeRoleWithWebIdentity` failures; the error message will indicate token expiry.
+- Confirm whether the SDKs in the workload are refreshing credentials. AWS SDK v2 (Go, Python boto3 ≥ 1.17) auto-refreshes IRSA credentials by re-reading the projected token file — if the workload uses an older SDK pinned to an early credential snapshot, it will not refresh.
+
+**Resolution:**
+1. **Extend token expiry**: In the pod spec projection, set `expirationSeconds` to a value matching the job's expected max runtime (e.g., 86400 for 24h jobs). EKS supports up to 86400s.
+2. **SDK upgrade**: Mandate AWS SDK versions that support IRSA credential file re-read. Pin minimum versions in your base image policy and enforce via admission webhook.
+3. **Kubernetes API clients**: Ensure `client-go` is ≥ v0.21 — it supports automatic token refresh from the projected volume mount path.
+4. **Sidecar token refresher**: For legacy workloads that cannot be updated, deploy a sidecar that periodically requests a new token via `TokenRequest` API and writes it to the shared volume mount location.
+5. **Kyverno/OPA policy**: Enforce a minimum `expirationSeconds` floor (e.g., 7200) on all pods annotated with `eks.amazonaws.com/role-arn`, so batch jobs are never deployed with dangerously short token windows.
+6. **Long-term**: For truly long-running jobs (ML training, multi-day ETL), architect a credential vending service backed by AWS Secrets Manager that issues short-lived tokens on demand rather than relying on a single projected token lifespan.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing safe, controlled rollout of custom controllers and operators — preventing a buggy operator from destabilising the cluster?
+
+**Model Answer:**
+
+Custom controllers and operators carry significant blast radius — a reconcile loop bug can hammer the API server, corrupt CRDs, or delete production resources. The strategy I enforce treats operator rollout with at least as much rigour as application rollouts.
+
+- **Operator SDK / controller-runtime best practices**: Enforce rate-limited work queues (`RateLimitingQueue`) and exponential backoff on reconcile errors. Reject operator PRs that use unbounded `requeueAfter` intervals of zero — this creates tight loops under failure conditions.
+- **Dry-run / audit mode first**: Every new operator version is first deployed with a feature flag that puts it in observation-only mode — it logs what it *would* do without mutating resources. This is reviewable before promotion.
+- **Dedicated operator namespace with restricted RBAC**: Scope RBAC to the minimum required API groups. Use admission webhooks to reject `ClusterRole` grants to operators unless explicitly approved by the platform team.
+- **Resource quota on operator namespace**: Constrain operator pod CPU/memory so a runaway reconcile loop cannot starve other system components.
+- **API priority and fairness (APF) flow schemas**: Assign operators to a named `FlowSchema` with a dedicated `PriorityLevelConfiguration` (non-exempt tier) so that operator-generated API traffic is queued and shed before it reaches critical system priorities.
+- **Canary rollout with dual-version coexistence**: Use `Deployment` with a single replica for new operator versions alongside the existing version — both watch the same CRD but the new one processes only resources carrying an opt-in annotation (`operator.example.com/canary: "true"`).
+- **Circuit breaker via Argo Rollouts**: Wrap operator `Deployments` in Argo Rollouts with analysis templates that check API server request rate and error rate from the operator's service account. Auto-rollback if thresholds breach within 10 minutes.
+- **CRD schema validation**: Enforce structural schemas with CEL validation rules on all CRDs so the operator cannot be handed malformed objects that trigger panic paths in reconcile logic.
+
+---
+
+### Q: Describe a situation where EKS node group scaling correctly added capacity, but newly provisioned nodes remained in a `NotReady` state for an extended period, preventing pods from scheduling. How did you diagnose and resolve it?
+
+**Model Answer:**
+
+I encountered this on a large regulated-environment cluster where new nodes joined but stayed `NotReady` for 8–12 minutes, causing autoscaler-driven scale-outs to be useless during traffic spikes.
+
+**Diagnosis steps:**
+- `kubectl describe node <new-node>` showed the node stuck on `KubeletNotReady: runtime network not ready: NetworkReady=false reason:NetworkPlugin is not ready for use` — pointing to the CNI, not kubelet itself.
+- Checked `aws-node` DaemonSet pod on the new node: it was in `Init:0/1` — the `aws-vpc-cni-init` init container was hanging.
+- `kubectl logs` on the init container showed it was waiting on `ipamd` to attach ENIs. Correlated with CloudWatch: the ENI attachment was being throttled by the EC2 `AttachNetworkInterface` API — we were hitting the per-region per-second limit because autoscaling fired 40 nodes simultaneously.
+- Secondary finding: the `aws-node` DaemonSet had `WARM_ENI_TARGET=2` and `MINIMUM_IP_TARGET=30`, causing ipamd to aggressively pre-warm IPs on every new node simultaneously, amplifying EC2 API calls.
+
+**Resolution:**
+1. **Staggered scale-out

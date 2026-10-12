@@ -541,3 +541,15 @@ _Committed & pushed: yes_
 - Describe a situation where you had to design or respond to an EKS control plane throttling incident caused by excessive Kubernetes API server calls from a controller or operator. What was the root cause and how did you resolve it systemically?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-12 22:23:21
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8254 chars)
+- How do you design an EKS strategy for managing and enforcing workload rightsizing continuously — ensuring CPU and memory requests accurately reflect actual consumption without requiring manual intervention?
+- A production EKS cluster's Service Account token projections are expiring mid-flight for long-running batch jobs, causing authentication failures against the Kubernetes API and AWS services. How do you diagnose and permanently resolve this?
+- How do you design an EKS strategy for managing and enforcing safe, controlled rollout of custom controllers and operators — preventing a buggy operator from destabilising the cluster?
+- Describe a situation where EKS node group scaling correctly added capacity, but newly provisioned nodes remained in a `NotReady` state for an extended period, preventing pods from scheduling. How did you diagnose and resolve it?
+
+_Committed & pushed: yes_
