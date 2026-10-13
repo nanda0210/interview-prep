@@ -553,3 +553,15 @@ _Committed & pushed: yes_
 - Describe a situation where EKS node group scaling correctly added capacity, but newly provisioned nodes remained in a `NotReady` state for an extended period, preventing pods from scheduling. How did you diagnose and resolve it?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-13 20:30:22
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7398 chars)
+- How do you design an EKS strategy for managing and enforcing network-level mutual TLS (mTLS) between services at scale, without pushing certificate management complexity onto individual application teams?
+- A production EKS cluster is running Fargate profiles for certain workloads, but engineers report that Fargate pods are intermittently failing to start, citing "no nodes available" despite the profile matching correctly. Walk through your diagnosis and resolution approach.
+- How do you design an EKS strategy for managing and enforcing cluster-level disaster recovery — including backup, restore, and RTO/RPO targets — for stateful workloads running on EKS?
+- Describe a situation where EKS cluster networking performed correctly under normal load but exhibited cascading failures only during a large-scale deployment rollout. What caused it and how did you resolve it?
+
+_Committed & pushed: yes_

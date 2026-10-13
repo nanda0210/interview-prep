@@ -4183,3 +4183,67 @@ I encountered this on a large regulated-environment cluster where new nodes join
 
 **Resolution:**
 1. **Staggered scale-out
+
+
+---
+
+## 🗓️ Added 2026-10-13 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-13 20:30 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing network-level mutual TLS (mTLS) between services at scale, without pushing certificate management complexity onto individual application teams?
+
+**Model Answer:**
+
+- **Service mesh as the enforcement layer:** Deploy Istio or AWS App Mesh (or increasingly Cilium with mTLS) as a cluster-wide sidecar injection layer; mTLS is enforced transparently at the data plane, requiring zero application code changes.
+- **PeerAuthentication and DestinationRules at scale:** Define a cluster-wide `PeerAuthentication` policy in `STRICT` mode via GitOps; namespace-level overrides are gated through admission webhooks (Kyverno or OPA) to prevent teams from silently opting out.
+- **Certificate lifecycle managed by the mesh:** The mesh control plane (e.g., Istiod using SPIFFE/SPIRE) issues short-lived workload certificates automatically, rotated every 24 hours or less — no team touches TLS material directly.
+- **Observability of mTLS posture:** Export Envoy telemetry to Prometheus; alert on any cleartext traffic (`connection_security_policy="none"`) detected in the mesh to catch misconfigured or legacy workloads.
+- **Gradual rollout:** Use namespace-labelling with `PERMISSIVE` mode initially, then promote to `STRICT` after confirming all intra-namespace traffic is mesh-enrolled; track rollout status via a Grafana dashboard per namespace.
+- **Key trade-off:** Sidecar overhead (CPU/memory per pod, latency) is the primary cost; for high-throughput, latency-sensitive services, evaluate ambient mesh mode (Istio 1.18+) which moves the proxy out of the pod entirely.
+
+---
+
+### Q: A production EKS cluster is running Fargate profiles for certain workloads, but engineers report that Fargate pods are intermittently failing to start, citing "no nodes available" despite the profile matching correctly. Walk through your diagnosis and resolution approach.
+
+**Model Answer:**
+
+Fargate pod scheduling failures have several distinct root causes that must be systematically eliminated:
+
+1. **Profile selector mismatch:** Verify the pod's `namespace` and all `labels` exactly match a Fargate profile selector — Fargate matching is exact, not partial; a single missing label silently falls through to EC2 nodes or fails scheduling entirely.
+2. **Fargate capacity exhaustion in specific AZs:** Fargate is regional but capacity is AZ-scoped; check if pods are pinned to a specific AZ via `topologySpreadConstraints` or `nodeAffinity` and that AZ is exhausted — remove AZ pinning or spread across AZs.
+3. **IAM role misconfiguration:** The Fargate pod execution role must exist and have the correct trust policy for `eks-fargate-pods.amazonaws.com`; missing permissions block the Fargate node from joining the cluster entirely.
+4. **Resource request ceiling:** Fargate maps CPU/memory requests to discrete vCPU/GB combinations; requests that don't fit a valid Fargate size tier cause scheduling failure — validate requests align to supported configurations.
+5. **VPC subnet capacity:** Fargate provisions an ENI per pod in the specified subnets; if subnets are exhausted of IPs, pods queue indefinitely — add subnets to the profile or reclaim addresses.
+6. **Control plane events:** `kubectl describe pod` and CloudWatch EKS control plane logs will surface the explicit scheduler rejection reason; always start there before assuming capacity issues.
+7. **Resolution pattern:** Fix profile/IAM/subnet issues; implement a runbook with automated CloudWatch alarms on Fargate pod pending duration >5 minutes to catch recurrence.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing cluster-level disaster recovery — including backup, restore, and RTO/RPO targets — for stateful workloads running on EKS?
+
+**Model Answer:**
+
+- **Separate the DR problem by layer:** Control plane (EKS manages this — AWS SLA), cluster state (ETCD objects: Deployments, CRDs, RBAC, ConfigMaps), and persistent data (EBS/EFS/RDS volumes) each have distinct backup strategies.
+- **Cluster state backup with Velero:** Deploy Velero with an S3 backend; schedule full cluster-state snapshots every hour and incremental every 15 minutes; store backups cross-region with S3 replication to support region-loss DR scenarios.
+- **Persistent volume snapshots:** Use Velero's CSI snapshot integration to trigger EBS CSI snapshots atomically with etcd object backups, ensuring application state and Kubernetes metadata are consistent point-in-time.
+- **RTO/RPO target design:** For RPO of 15 minutes and RTO of 1 hour, a warm standby cluster in a second region with pre-provisioned node groups, Velero restore automation scripted via Step Functions, and DNS failover via Route 53 health checks is sufficient.
+- **CRD and operator state:** Custom resources and their backing CRD schemas must be restored before workloads; Velero restore ordering via hooks handles this, but validate with regular DR drills that CRD version compatibility is maintained.
+- **Stateful application quiescing:** For databases on EKS (e.g., Redis, Kafka), use pre-backup hooks (Velero hook annotations) to flush state to disk before snapshot to prevent corrupt restores.
+- **Regular restore testing:** Automate a monthly restore into a sandboxed VPC, run application smoke tests, and report RTO achieved vs. target — untested DR plans are not DR plans.
+
+---
+
+### Q: Describe a situation where EKS cluster networking performed correctly under normal load but exhibited cascading failures only during a large-scale deployment rollout. What caused it and how did you resolve it?
+
+**Model Answer:**
+
+During a fleet-wide rolling update of 200 Deployments triggered simultaneously by a CI/CD pipeline change, we observed a cascade: new pods were stuck in `ContainerCreating`, existing pods began failing readiness checks, and within minutes several services became unavailable despite healthy nodes.
+
+**Root cause — IP address exhaustion race:** The VPC CNI pre-warms a pool of IPs per node (`WARM_IP_TARGET`), but the simultaneous pod churn from rolling updates across hundreds of Deployments caused the warm pool to drain faster than the CNI could provision new ENI secondary IPs from EC2. New pods couldn't obtain IPs, triggering `ContainerCreating` hangs. Simultaneously, pods awaiting IP assignment delayed readiness, causing traffic to route to terminating old pods past their `terminationGracePeriodSeconds`, producing 502s at the load balancer.
+
+**Immediate mitigation:** Paused the CI/CD rollout pipeline, increased `MINIMUM_IP_TARGET` and `WARM_IP_TARGET` on the `aws-node` DaemonSet to maintain a larger pre-warmed pool, and manually recycled CNI pods on the most-affected nodes to force ENI re-attachment.
+
+**Structural fix:** Implemented rollout pipelining in the CI/CD system — no more than 20 Deployments updating concurrently; enforced via a Tekton pipeline with a semaphore. Migrated high-churn namespaces to prefix delegation mode (each ENI provides 16x more IPs via /28 prefixes), eliminating the warm pool bottleneck entirely.
+
+**Process improvement:** Added a CloudWatch alarm on `awscni_assigned_ip_addresses / awscni_total_ip_addresses > 85%` per node to catch IP pressure before it becomes an outage, and integrated a pre-rollout capacity check into the deployment pipeline.
