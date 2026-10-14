@@ -4247,3 +4247,65 @@ During a fleet-wide rolling update of 200 Deployments triggered simultaneously b
 **Structural fix:** Implemented rollout pipelining in the CI/CD system — no more than 20 Deployments updating concurrently; enforced via a Tekton pipeline with a semaphore. Migrated high-churn namespaces to prefix delegation mode (each ENI provides 16x more IPs via /28 prefixes), eliminating the warm pool bottleneck entirely.
 
 **Process improvement:** Added a CloudWatch alarm on `awscni_assigned_ip_addresses / awscni_total_ip_addresses > 85%` per node to catch IP pressure before it becomes an outage, and integrated a pre-rollout capacity check into the deployment pipeline.
+
+
+---
+
+## 🗓️ Added 2026-10-14 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-14 19:10 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing zero-downtime certificate rotation for cluster-internal PKI — including the Kubernetes CA, etcd CA, and service-account signing keys?
+
+**Key points an interviewer wants to hear:**
+
+- **Scope the problem clearly**: EKS manages the control-plane CA (Kubernetes API server, etcd) — you cannot rotate those directly; you must plan around what AWS exposes vs. what you own (IRSA signing keys, admission webhook TLS, ingress TLS, mTLS leaf certs).
+- **AWS-managed control plane**: EKS rotates its internal CA automatically on major version upgrades; understand that a CA rotation effectively invalidates all existing kubeconfigs and node bootstrap credentials, requiring coordinated node group replacement.
+- **Workload-facing certs**: Deploy `cert-manager` with short-lived (~24h) certificates backed by an intermediate CA stored in ACM Private CA or Vault. Automate rotation via `CertificateRequest` controllers; never rely on manual renewal.
+- **IRSA signing key rotation**: Coordinate with AWS support for OIDC provider key rotation; pre-stage the new public key in the JWKS endpoint before the old key expires so in-flight token validation doesn't break.
+- **Admission webhook TLS**: Use `cert-manager`'s `Certificate` resource with `caBundle` injection via the `cert-manager.io/inject-ca-from` annotation so webhook configurations are automatically updated without rolling restarts of the API server.
+- **Observability**: Alert on `NotAfter` within 30/7/1-day thresholds using Prometheus `x509_cert_expiry` exporter; treat any cert expiring within 7 days as a P1 incident.
+- **Runbook and DR**: Maintain a tested runbook for emergency CA rotation including node group blue/green replacement, client certificate reissuance order, and rollback criteria.
+
+---
+
+### Q: A production EKS cluster's AWS VPC CNI is configured in prefix delegation mode, but pods on certain nodes are intermittently failing to reach endpoints outside the node's subnet. How do you diagnose and resolve this?
+
+**Key points an interviewer wants to hear:**
+
+- **Understand prefix delegation**: In prefix delegation mode, the VPC CNI assigns a `/28` prefix per ENI slot rather than individual IPs, increasing pod density — but this introduces distinct failure modes around routing and ARP.
+- **First check**: Confirm `ENABLE_PREFIX_DELEGATION=true` and `WARM_PREFIX_TARGET` are correctly set on the `aws-node` DaemonSet; misconfigured warm targets cause ENI attachment/detachment churn that can leave stale routes.
+- **Routing table inspection**: `ip route show` and `ip rule show` on the affected node — VPC CNI uses policy-based routing per ENI; a prefix assignment that spans multiple ENIs can have asymmetric return-path routing if secondary ENI routes are not installed correctly.
+- **ARP/neighbor table**: Check `ip neigh` for stale or incomplete entries. Prefix-delegated `/28` blocks mean the node must ARP-respond for 16 addresses; if the kernel `arp_ignore` or `rp_filter` sysctl is non-default (e.g., set by a DaemonSet), this breaks.
+- **MTU mismatch**: Prefix delegation doesn't change MTU, but verify pods are not using a larger MTU than the ENI allows (default 9001 for jumbo frames in VPC, 1500 otherwise); misconfigured CNI config maps can leave pods with wrong MTU.
+- **Node-level isolation**: Cordon and drain the affected node, force ENI detach/reattach by recycling the node, and confirm the issue follows the node or the workload.
+- **Resolution path**: Pin `MINIMUM_IP_TARGET` and `WARM_IP_TARGET` to avoid thrashing; upgrade `amazon-vpc-cni` to a patched version if a known bug is present; and use VPC Flow Logs filtered to the affected prefix range to confirm whether traffic is leaving the node at all.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level chaos engineering — including controlled fault injection into networking, resource pressure, and dependency failures — without compromising cluster stability?
+
+**Key points an interviewer wants to hear:**
+
+- **Separate blast radius by design**: Run chaos experiments in isolated namespaces or dedicated node groups with taints/tolerations and network policies that prevent experiment traffic from leaking to production workloads.
+- **Tooling selection**: AWS Fault Injection Simulator (FIS) integrates with EKS for node termination, CPU/memory stress, and network latency via SSM agents on nodes; complement with `chaos-mesh` or `litmus` for pod-level and network-level fault injection inside the cluster.
+- **Experiment lifecycle governance**: Treat chaos experiments as code — stored in Git, peer-reviewed, with pre-defined steady-state hypotheses (SLO/SLI baselines) and automated abort conditions triggered by CloudWatch alarms or Prometheus rules.
+- **Progressive scope**: Start with single-pod fault injection in staging, graduate to AZ-level failure simulation in production during low-traffic windows, and gate progression on demonstrated resilience at each level.
+- **Network fault injection**: Use `chaos-mesh` `NetworkChaos` to simulate partition, packet loss, and latency between specific label-selected pods — validate that circuit breakers, retries, and timeouts behave as designed.
+- **Resource pressure tests**: Inject CPU throttling and memory pressure via `StressChaos` to validate HPA/VPA responses and OOMKill recovery paths without triggering cluster-wide cascades.
+- **Observability requirement**: Chaos experiments must be correlated in your observability platform (traces, logs, metrics) with experiment start/end markers so post-analysis is unambiguous. Integrate with Grafana annotations.
+- **Behavioral signal to leadership**: Chaos engineering should produce a quarterly resilience report showing which failure modes are mitigated, which require remediation, and what the acceptable risk posture is — connecting technical practice to business continuity objectives.
+
+---
+
+### Q: Describe a situation where an EKS multi-cluster federation or fleet management approach you designed failed to meet operational expectations, and what you changed as a result.
+
+**Key points an interviewer wants to hear:**
+
+- **Set the scene honestly**: Describe a real architectural gap — for example, adopting Kubernetes Federation v2 (KubeFed) or a GitOps-based fleet model (Flux + Cluster API) that worked in theory but created operational overhead at scale, such as propagation lag, reconciliation conflicts, or insufficient per-cluster customisation support.
+- **Specific failure mode**: E.g., KubeFed's federated type propagation caused a misconfigured `FederatedDeployment` template to silently roll out a broken replica count to 12 clusters simultaneously before anyone noticed, because there was no per-cluster diff visibility or staged rollout gate.
+- **Root cause**: The federation layer abstracted away cluster-level state in a way that broke the GitOps single-source-of-truth contract — operators couldn't easily answer "what is actually running in cluster X right now?"
+- **What changed**: Moved to a hub-and-spoke GitOps model using ArgoCD ApplicationSets with cluster generators. Each cluster had its own directory in Git, diffs were visible per-cluster, and progressive rollout was enforced by wave annotations — centralised control without a federation control plane.
+- **Tradeoffs acknowledged**: The new model increased Git repository size and required disciplined directory structure conventions, but it eliminated the propagation opacity and gave SREs a clear blast radius per change.
+- **Process change**: Introduced a "fleet change review" process where any change touching >3 clusters required a staged rollout plan reviewed by two senior engineers before merge.
+- **Lesson**: Federation and fleet management tools solve a real problem but must be evaluated against operational visibility requirements, not just technical capability — the ability to answer "what changed, where, and when" is non-negotiable at scale.

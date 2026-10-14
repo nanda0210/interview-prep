@@ -565,3 +565,15 @@ _Committed & pushed: yes_
 - Describe a situation where EKS cluster networking performed correctly under normal load but exhibited cascading failures only during a large-scale deployment rollout. What caused it and how did you resolve it?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-14 19:10:14
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8098 chars)
+- How do you design an EKS strategy for managing and enforcing zero-downtime certificate rotation for cluster-internal PKI — including the Kubernetes CA, etcd CA, and service-account signing keys?
+- A production EKS cluster's AWS VPC CNI is configured in prefix delegation mode, but pods on certain nodes are intermittently failing to reach endpoints outside the node's subnet. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level chaos engineering — including controlled fault injection into networking, resource pressure, and dependency failures — without compromising cluster stability?
+- Describe a situation where an EKS multi-cluster federation or fleet management approach you designed failed to meet operational expectations, and what you changed as a result.
+
+_Committed & pushed: yes_
