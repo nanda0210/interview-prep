@@ -4309,3 +4309,64 @@ During a fleet-wide rolling update of 200 Deployments triggered simultaneously b
 - **Tradeoffs acknowledged**: The new model increased Git repository size and required disciplined directory structure conventions, but it eliminated the propagation opacity and gave SREs a clear blast radius per change.
 - **Process change**: Introduced a "fleet change review" process where any change touching >3 clusters required a staged rollout plan reviewed by two senior engineers before merge.
 - **Lesson**: Federation and fleet management tools solve a real problem but must be evaluated against operational visibility requirements, not just technical capability — the ability to answer "what changed, where, and when" is non-negotiable at scale.
+
+
+---
+
+## 🗓️ Added 2026-10-15 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-15 18:52 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level eBPF-based observability — including network flow visibility, syscall tracing, and security event detection — without introducing prohibitive overhead or kernel compatibility risk?
+
+**Model Answer:**
+
+- **Tooling selection**: Deploy Cilium or Pixie for eBPF-based network flow visibility and Tetragon or Falco (eBPF driver) for syscall-level security event detection; choose based on kernel version support (≥4.14 for basic eBPF, ≥5.x for BTF/CO-RE portability).
+- **Kernel compatibility guardrails**: Enforce AMI selection via Karpenter `NodePool` constraints or managed node group launch templates to guarantee a BTF-enabled kernel; validate compatibility in CI using `bpftool feature` checks before AMI promotion.
+- **Overhead management**: Scope tracing selectively — enable per-namespace or per-workload eBPF programs via Tetragon `TracingPolicy` CRDs rather than cluster-wide capture; establish CPU/memory budgets for eBPF programs and alert on `bpf_prog_run` latency spikes via node-level Prometheus exporters.
+- **Data pipeline**: Stream Tetragon/Falco events to Kinesis Data Firehose → S3 + OpenSearch for retention and alerting; avoid storing raw syscall traces in-cluster to prevent etcd or local disk pressure.
+- **Security policy feedback loop**: Use eBPF-derived network flow data (Hubble/Cilium) to auto-generate Kubernetes `NetworkPolicy` or Cilium `CiliumNetworkPolicy` via network policy recommender tooling, closing the gap between observed and enforced behaviour.
+- **Upgrade risk**: Pin eBPF tool versions to cluster Kubernetes versions in a compatibility matrix; test eBPF program reload behaviour during node drains to avoid dropped events during rolling upgrades.
+- **Behavioral framing**: Position eBPF observability as a security and reliability investment, quantifying value through mean-time-to-detect (MTTD) reduction for anomalous lateral movement events.
+
+---
+
+### Q: A production EKS cluster's pod-to-pod gRPC streaming calls are experiencing intermittent half-open connection hangs lasting several minutes, but TCP health checks to the same pods pass cleanly. How do you diagnose and resolve this?
+
+**Model Answer:**
+
+The core issue is that gRPC multiplexes streams over a single long-lived HTTP/2 connection; TCP-level health checks bypass HTTP/2 stream state entirely, so they appear healthy even when the connection is effectively dead.
+
+- **Distinguish TCP vs. HTTP/2 health**: Switch readiness and liveness probes to gRPC health protocol (`grpc_health_v1`) using `grpc-health-probe` or Kubernetes native `grpc` probe (≥1.24); this surfaces half-open HTTP/2 connections that TCP probes miss.
+- **Identify the stale connection source**: Use `ss -tnp` and `netstat` on affected pods combined with `wireshark`/`tcpdump` packet captures filtered on RST or GOAWAY frames; correlate with AWS NLB or ALB idle timeout settings (default 60 s for NLB, 60 s for ALB) against gRPC keepalive intervals.
+- **Keepalive misconfiguration**: Enforce gRPC client-side `keepalive_time` and `keepalive_timeout` parameters to be shorter than any intermediary idle timeout (load balancer, NAT gateway); also configure server-side `KEEPALIVE_PERMIT_WITHOUT_CALLS`.
+- **Load balancer layer**: For NLB passthrough, enable TCP keepalives at the OS level (`tcp_keepalive_time`, `tcp_keepalive_intvl`) via init container `sysctl` or node-level tuning; for ALB (which terminates HTTP/2), verify that ALB target group protocol is HTTP/2 and that the idle timeout is set higher than the longest expected stream duration.
+- **Service mesh interaction**: If Envoy/Istio is in the path, validate that `upstream_http2.max_requests` and `connection_manager` idle timeouts align; Envoy's default `max_requests_per_connection` of 0 (unlimited) can cause persistent connections that age past NAT entry expiry.
+- **Remediation**: Set explicit gRPC keepalive parameters in application code or service mesh configuration, align all timeout layers, and add HTTP/2 PING-based keepalive at the Envoy sidecar level; validate with load testing that no streams hang beyond 30 s under idle conditions.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing safe, progressive rollout of cluster-wide infrastructure changes — such as CNI upgrades, CoreDNS version bumps, or kube-proxy updates — across a large fleet of clusters with minimal blast radius?
+
+**Model Answer:**
+
+- **Fleet segmentation into rings**: Organise clusters into promotion rings (dev → canary prod → regional prod waves) using cluster metadata tags in a fleet management plane (e.g., Argo CD ApplicationSets with cluster generators, or Fleet Manager); no change reaches ring N+1 without explicit promotion gate.
+- **Change packaging**: Wrap CNI, CoreDNS, and kube-proxy upgrades as versioned, tested Helm chart releases or Terraform module versions; pin all add-on versions in IaC to prevent drift, and use EKS managed add-on API where available for AWS-owned components.
+- **Automated pre-flight validation**: Before applying to any cluster, run a pre-flight job: verify node kernel compatibility (e.g., CNI prefix delegation kernel reqs), check PodDisruptionBudget compliance, and validate existing add-on health; block promotion on any failure.
+- **Canary node group pattern**: For CNI upgrades specifically, introduce a canary node group running the new CNI version, schedule a representative subset of workloads onto it, and validate DNS resolution, network policy enforcement, and pod-to-pod latency before draining and re-provisioning remaining node groups.
+- **Observability gates**: Define SLO-based promotion gates — e.g., DNS error rate < 0.1%, pod startup latency P99 < 30 s — measured over a soak period (30–60 min minimum); automated pipeline blocks ring promotion if gates fail.
+- **Rollback automation**: Store the previous add-on version in parameter store per cluster; a single pipeline trigger re-applies the prior version via `eksctl update addon` or Helm rollback; test rollback paths in staging before any production change.
+- **Behavioral framing**: Present this as a platform reliability investment, citing that the majority of Kubernetes production incidents trace to infrastructure component upgrades; quantify risk reduction through mean-time-to-rollback metrics.
+
+---
+
+### Q: Describe a situation where you had to diagnose and resolve an EKS cluster where pod scheduling latency increased dramatically after cluster growth, and the root cause was not resource exhaustion but a Kubernetes scheduler or filter plugin performance issue.
+
+**Model Answer:**
+
+In a large-scale cluster that had grown to ~2,000 nodes and ~18,000 pods, engineers reported that new pods were sitting `Pending` for 30–90 seconds despite ample node capacity. The initial assumption was resource fragmentation, but node utilisation metrics showed headroom.
+
+- **Isolating the scheduler**: Enabled scheduler verbose logging (`--v=4`) and captured `scheduler_scheduling_duration_seconds` histogram from the scheduler's `/metrics` endpoint; the P99 scheduling latency had grown from sub-second to 60+ seconds, concentrated in the `Filter` phase.
+- **Plugin profiling**: Used `scheduler_framework_extension_point_duration_seconds` by plugin label to identify that a custom admission webhook-backed scheduler plugin was making a synchronous HTTP call to an external policy service on every scheduling attempt; at 18,000 pods, the plugin was serialising filter decisions across all nodes.
+- **Root cause**: The custom plugin lacked result caching and was not respecting the scheduler's concurrency model; it was effectively turning an O(nodes) parallel filter pass into a sequential external RPC fan-out, consuming all scheduler goroutines.
+- **Remediation**: Introduced an in-process TTL cache (30 s) for policy decisions keyed on pod label hash; moved the policy evaluation to a pre-filter step that ran once per pod rather than once per node per pod; reduced average scheduling latency to under

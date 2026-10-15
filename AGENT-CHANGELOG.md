@@ -577,3 +577,15 @@ _Committed & pushed: yes_
 - Describe a situation where an EKS multi-cluster federation or fleet management approach you designed failed to meet operational expectations, and what you changed as a result.
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-15 18:52:46
+
+**1 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8143 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level eBPF-based observability — including network flow visibility, syscall tracing, and security event detection — without introducing prohibitive overhead or kernel compatibility risk?
+- A production EKS cluster's pod-to-pod gRPC streaming calls are experiencing intermittent half-open connection hangs lasting several minutes, but TCP health checks to the same pods pass cleanly. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing safe, progressive rollout of cluster-wide infrastructure changes — such as CNI upgrades, CoreDNS version bumps, or kube-proxy updates — across a large fleet of clusters with minimal blast radius?
+- Describe a situation where you had to diagnose and resolve an EKS cluster where pod scheduling latency increased dramatically after cluster growth, and the root cause was not resource exhaustion but a Kubernetes scheduler or filter plugin performance issue.
+
+_Committed & pushed: yes_
