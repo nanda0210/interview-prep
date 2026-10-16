@@ -1,36 +1,36 @@
-# Visual cheat sheets
+# Cheat sheets — Kubernetes networking
 
-Reference diagrams kept alongside the written material for quick revision.
+Reference material kept as **Markdown, not images**: searchable with `grep`,
+readable on any device, diffable in git, and usable by the daily agent. The
+source infographics were transcribed rather than committed.
 
 | File | Topic | Source |
 |---|---|---|
-| `kubernetes-ingress-cheatsheet.jpg` | Kubernetes Ingress — 10 Q&A panels: Ingress vs Service, path- and host-based routing, TLS, `pathType`, and a troubleshooting runbook | Third-party infographic, author not identified on the image |
-| `ingress-vs-gateway-api-vs-api-gateway.gif` | Side-by-side scope comparison: Ingress (single namespace) vs Gateway API (multi-namespace) vs API Gateway (multi-cluster / external backends) | Vishakha Sadhwani — [@vsadhwani](https://www.linkedin.com/in/vishakhasadhwani/) (credit visible in the image) |
+| [`kubernetes-ingress.md`](kubernetes-ingress.md) | Ingress in 10 questions: Ingress vs Service, path- and host-based routing, TLS, `pathType`, and a troubleshooting runbook with commands | Third-party infographic, author not identified on the image |
+| [`ingress-vs-gateway-api-vs-api-gateway.md`](ingress-vs-gateway-api-vs-api-gateway.md) | Scope comparison: Ingress (single namespace) vs Gateway API (multi-namespace) vs API Gateway (multi-cluster / external backends) | Vishakha Sadhwani — [@vsadhwani](https://www.linkedin.com/in/vishakhasadhwani/) |
 
-## Attribution and use
+## Why text instead of the original images
 
-These are third-party educational graphics retained for personal interview
-preparation. Original author credits are left intact in the images themselves
-and must not be cropped out. They are **not** original work of this repository.
+- **Searchable** — `grep -r pathType .` finds it; an image doesn't.
+- **Small** — the two files are ~11 KB combined. The original GIF alone was
+  13 MB, and git stores binaries in full for every revision.
+- **Accessible** — works with screen readers, text selection, and copy-paste of
+  the YAML, none of which an image supports.
+- **Agent-readable** — the daily agent can generate Q&A from Markdown.
 
-Note that this repo is published via GitHub Pages, so anything here is publicly
-reachable. If either author objects to redistribution, remove the file and the
-corresponding entry in `index.html`.
+## Fidelity
 
-## Notes
+The transcriptions are faithful to the originals in content and structure.
+Three YAML typos in the Ingress graphic were corrected so the manifests are
+actually valid (`app2.axample.com` → `app2.example.com`, `hostt:` → `host:`,
+and the `tls.hosts` indentation). A small amount of context was added and is
+marked as such — the `kubectl create secret tls` command, the note that empty
+`kubectl get endpoints` output usually means a selector mismatch, and the
+interview-framing sections.
 
-- `ingress-vs-gateway-api-vs-api-gateway.gif` is **13 MB** (305 frames). It is
-  slow to load on mobile connections. If that becomes a problem, convert it to
-  a single still frame or an MP4/WebM — `gifsicle -O3 --lossy=80` or `ffmpeg`
-  will both cut it dramatically.
-- Git stores binaries in full for every revision. Prefer replacing these files
-  rarely, or not at all, to keep clone size reasonable.
+## Attribution
 
-## Interview relevance
-
-The Ingress → Gateway API progression is a common senior-level follow-up: once
-you explain Ingress routing, expect "what are its limitations?" The short
-answer is that Ingress overloads annotations for anything beyond host/path
-rules and is namespace-scoped, which is exactly what Gateway API's role-oriented
-resources (`GatewayClass` / `Gateway` / `HTTPRoute`) were introduced to fix.
-The second graphic is the fastest way to hold that distinction in memory.
+These summarise third-party educational material and are **not** original work
+of this repository. Credit is recorded above and in each file. This repo is
+published via GitHub Pages, so anything here is publicly reachable; if an
+author objects, delete the file and its entry in `index.html`.
