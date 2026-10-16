@@ -378,3 +378,48 @@ Outside-in: is the controller running, do the host and path match, does
 `kubectl get endpoints` return Pods, is DNS pointing at the Ingress IP, is the
 TLS secret present in the right namespace. Empty endpoints is the most common
 cause and points at a Service selector mismatch, not the Ingress.
+
+
+---
+
+## 🗓️ Added 2026-10-16 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-16 18:37 -->
+
+### Q: What is the difference between a Kubernetes Ingress resource and the Gateway API, and when would you choose one over the other?
+
+Ingress is the original Kubernetes HTTP(S) routing abstraction, backed by a controller (e.g., NGINX, Traefik) and a single `Ingress` resource kind. It handles basic host/path-based routing but relies heavily on vendor-specific annotations for advanced features like header manipulation, traffic splitting, or timeouts. The Gateway API is a newer, standardized set of CRDs (`GatewayClass`, `Gateway`, `HTTPRoute`, `TCPRoute`, etc.) designed with role separation, extensibility, and richer semantics built in. Choose Ingress for simple, stable workloads where the team is already familiar with it and advanced routing is not needed. Choose Gateway API when you need multi-tenancy (infrastructure vs. application team role split), protocol diversity (TCP, gRPC, TLS passthrough), or portable advanced traffic management without annotation lock-in.
+
+---
+
+### Q: Explain the role-oriented model of the Gateway API and how it improves multi-team operations.
+
+The Gateway API defines three distinct personas: **infrastructure provider** (manages `GatewayClass`), **cluster operator** (manages `Gateway`), and **application developer** (manages `HTTPRoute`/`GRPCRoute`). This separation means a platform team can provision and own the load-balancer lifecycle while application teams attach routes to a shared Gateway without touching its configuration, enforced through Kubernetes RBAC. `ReferenceGrant` further controls cross-namespace route-to-backend references, preventing unauthorized traffic targeting. In contrast, Ingress conflates all concerns into one resource, making least-privilege delegation difficult. This model scales well in large organizations where security boundaries between infra and dev teams are mandatory.
+
+---
+
+### Q: A production Ingress is returning 502 errors intermittently for one service but not others. Walk me through your troubleshooting process.
+
+**Start at the data plane:**
+1. Check Ingress controller pod logs (`kubectl logs`) for upstream connect errors or timeout messages to isolate whether the controller can reach the backend.
+2. Verify the `Service` selector matches running pod labels and that `Endpoints` (or `EndpointSlices`) are populated (`kubectl get endpoints <svc>`).
+3. Confirm backend pods are healthy — check readiness probes, pod events, and recent restarts.
+
+**Check configuration:**
+4. Inspect the Ingress resource for correct `serviceName`/`servicePort` and any annotation overrides (e.g., custom timeouts, proxy buffer sizes).
+5. Review whether the controller's generated upstream config (e.g., NGINX `nginx.conf` via `kubectl exec`) actually reflects the current state.
+
+**Network layer:**
+6. Test direct connectivity from the controller pod to the service ClusterIP and to a pod IP to rule out CNI or NetworkPolicy issues.
+7. Look at HPA or pod disruption — if the target pods are being replaced rapidly, short endpoint propagation delays can cause transient 502s; consider tuning `minReadySeconds` or `preStop` lifecycle hooks.
+
+---
+
+### Q: How does TLS termination work with Kubernetes Ingress, and what are the security considerations you must address?
+
+TLS termination at the Ingress controller means the controller decrypts HTTPS traffic and forwards plain HTTP (or re-encrypted HTTPS) to backend pods. You reference a Kubernetes `Secret` of type `kubernetes.io/tls` in the Ingress `tls` block; the controller mounts the cert/key and presents it to clients. **Security considerations:**
+- **Secret access control:** The controller's service account must read `Secret` resources; scope this with RBAC to specific namespaces to limit blast radius.
+- **Certificate rotation:** Use cert-manager with an `Issuer`/`ClusterIssuer` to automate renewal and trigger controller reloads without downtime.
+- **Re-encryption vs. passthrough:** For compliance workloads (PCI, HIPAA), plain-text backend traffic may be unacceptable; use TLS passthrough (via SNI) or re-encrypt to the pod and validate backend certificates.
+- **Cipher suites & TLS version:** Enforce TLS 1.2+ and strong cipher suites via controller-specific annotations or a global ConfigMap; avoid defaults that may still allow weak ciphers.
+- **Secret sprawl:** Avoid storing wildcard certs in multiple namespaces; use a single source of truth and sync with tools like External Secrets Operator.

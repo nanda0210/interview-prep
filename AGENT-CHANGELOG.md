@@ -589,3 +589,21 @@ _Committed & pushed: yes_
 - Describe a situation where you had to diagnose and resolve an EKS cluster where pod scheduling latency increased dramatically after cluster growth, and the root cause was not resource exhaustion but a Kubernetes scheduler or filter plugin performance issue.
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-16 18:37:09
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7709 chars)
+- How do you design an EKS strategy for managing and enforcing IRSA (IAM Roles for Service Accounts) at scale across hundreds of microservices, including drift detection and least-privilege enforcement?
+- A production EKS cluster's CoreDNS pods are healthy, but a subset of application pods are experiencing 5–30 second DNS resolution delays intermittently. How do you systematically diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing secure, auditable, just-in-time (JIT) privileged access to cluster nodes and the Kubernetes API for operators, SREs, and incident responders?
+- Describe a situation where EKS cluster upgrades caused unexpected application-level breakage that infrastructure tests did not catch, and how you evolved your upgrade validation strategy as a result.
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (4538 chars)
+- What is the difference between a Kubernetes Ingress resource and the Gateway API, and when would you choose one over the other?
+- Explain the role-oriented model of the Gateway API and how it improves multi-team operations.
+- A production Ingress is returning 502 errors intermittently for one service but not others. Walk me through your troubleshooting process.
+- How does TLS termination work with Kubernetes Ingress, and what are the security considerations you must address?
+
+_Committed & pushed: yes_

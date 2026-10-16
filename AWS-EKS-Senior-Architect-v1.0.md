@@ -4370,3 +4370,76 @@ In a large-scale cluster that had grown to ~2,000 nodes and ~18,000 pods, engine
 - **Plugin profiling**: Used `scheduler_framework_extension_point_duration_seconds` by plugin label to identify that a custom admission webhook-backed scheduler plugin was making a synchronous HTTP call to an external policy service on every scheduling attempt; at 18,000 pods, the plugin was serialising filter decisions across all nodes.
 - **Root cause**: The custom plugin lacked result caching and was not respecting the scheduler's concurrency model; it was effectively turning an O(nodes) parallel filter pass into a sequential external RPC fan-out, consuming all scheduler goroutines.
 - **Remediation**: Introduced an in-process TTL cache (30 s) for policy decisions keyed on pod label hash; moved the policy evaluation to a pre-filter step that ran once per pod rather than once per node per pod; reduced average scheduling latency to under
+
+
+---
+
+## 🗓️ Added 2026-10-16 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-16 18:36 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing IRSA (IAM Roles for Service Accounts) at scale across hundreds of microservices, including drift detection and least-privilege enforcement?
+
+**Model Answer:**
+
+At scale, IRSA sprawl becomes a governance problem as teams create overly permissive roles or duplicate them inconsistently. The strategy layers automation, policy, and observability:
+
+- **Terraform/CDK module standardization:** Provide a blessed internal module that generates the OIDC trust policy, IAM role, and ServiceAccount annotation together, preventing manual drift between the three components.
+- **Least-privilege generation:** Integrate IAM Access Analyzer policy generation into CI pipelines — run workloads in a staging environment, capture CloudTrail, and synthesize a minimal policy before promotion to production.
+- **Drift detection:** Schedule a nightly Lambda or Step Functions job that compares live IAM role policies against the IaC state stored in S3/Terraform state; alert via SNS when out-of-band changes are detected.
+- **Admission control:** Use Kyverno or OPA/Gatekeeper to enforce that every ServiceAccount referencing an IRSA annotation must have a corresponding approved IAM role ARN in an allow-list ConfigMap, blocking unapproved associations at deploy time.
+- **CloudTrail → GuardDuty + Athena:** Enable GuardDuty EKS Runtime Monitoring and query Athena for any IRSA-assumed role performing actions outside its declared service boundary, triggering automated revocation via a Lambda remediation function.
+- **Role-per-workload policy:** Enforce via policy-as-code that no IAM role is shared across more than one Kubernetes ServiceAccount, preventing lateral movement if a workload is compromised.
+
+---
+
+### Q: A production EKS cluster's CoreDNS pods are healthy, but a subset of application pods are experiencing 5–30 second DNS resolution delays intermittently. How do you systematically diagnose and resolve this?
+
+**Model Answer:**
+
+DNS delays of this pattern in EKS almost always trace to one of a small set of root causes — conntrack table exhaustion, UDP race conditions with iptables DNAT, or CoreDNS autoscaling lag.
+
+**Diagnosis steps:**
+1. **Confirm scope:** Use `kubectl exec` + `dig` with timing from affected pods; correlate affected nodes — if delays are node-local, the problem is on the node, not CoreDNS itself.
+2. **conntrack exhaustion:** Run `conntrack -S` on the affected node and check `/proc/sys/net/netfilter/nf_conntrack_count` vs `nf_conntrack_max`. Exhaustion causes silent UDP drops, producing 5-second timeouts.
+3. **UDP DNAT race (5-second timeout):** The classic EKS iptables DNAT race — two simultaneous DNS queries from the same pod get conntrack-tracked identically, one is dropped. Confirm by enabling `dmesg | grep conntrack` drops.
+4. **ndots misconfiguration:** Check pod `resolv.conf`; high `ndots:5` causes up to 8 sequential search-domain queries per lookup. Reduce to `ndots:2` in pod spec or CoreDNS config.
+
+**Resolutions:**
+- Enable NodeLocal DNSCache (node-level DNS caching agent), which bypasses iptables DNAT entirely for DNS traffic, eliminating the conntrack race.
+- Tune `nf_conntrack_max` via a DaemonSet-applied sysctl if NodeLocal DNS cannot be deployed immediately.
+- Configure CoreDNS `autopath` plugin to short-circuit search domain expansion.
+- Scale CoreDNS horizontally with `DNSAutoscaler` and add pod anti-affinity to spread replicas across AZs and nodes.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing secure, auditable, just-in-time (JIT) privileged access to cluster nodes and the Kubernetes API for operators, SREs, and incident responders?
+
+**Model Answer:**
+
+Permanent privileged access to EKS nodes and the API is a significant blast radius risk. A JIT model eliminates standing access while preserving incident response speed:
+
+- **Kubernetes API access — JIT RBAC via AWS IAM Identity Center:** Map IAM Identity Center permission sets to EKS `aws-auth` ConfigMap (or access entries in the newer API) with time-bounded role assumptions. Use a lightweight approval bot (Slack → Lambda → IAM Identity Center) to grant a ClusterRole binding that expires after a TTL.
+- **Node access — SSM Session Manager over EC2 Instance Connect:** Remove all SSH keypairs from nodes and block port 22 at the security group level. SREs open sessions via `aws ssm start-session`, which is fully CloudTrail-audited; no bastion host required.
+- **Privileged namespace access:** Use Kyverno to enforce that `ClusterRoleBindings` granting `cluster-admin` or wildcard verbs require an annotation referencing a JIRA/ServiceNow ticket, allowing audit correlation.
+- **Break-glass procedure:** Maintain a sealed break-glass IAM role in AWS Secrets Manager; access requires two-person authorization (SCP-enforced MFA + peer approval Lambda). All break-glass usage triggers a PagerDuty P1 and Slack alert.
+- **Audit pipeline:** Stream EKS audit logs (API server) + CloudTrail + SSM session logs into a single S3 bucket → Athena, with a Grafana dashboard for privileged-access events, reviewed in weekly security reviews.
+- **Periodic access reviews:** Use AWS IAM Access Analyzer and a weekly Lambda that lists all active `ClusterRoleBindings` and sends a digest to team leads for attestation, with auto-revocation after 14 days without re-attestation.
+
+---
+
+### Q: Describe a situation where EKS cluster upgrades caused unexpected application-level breakage that infrastructure tests did not catch, and how you evolved your upgrade validation strategy as a result.
+
+**Model Answer:**
+
+**Situation:** During an upgrade from EKS 1.23 to 1.24, the `dockershim` removal caused all workloads relying on Docker socket bind-mounts (`/var/run/docker.sock`) for log shipping sidecars to silently fail — the sidecar started but produced no output. Infrastructure-level smoke tests (node readiness, kube-system pod health, ingress reachability) all passed, and the issue only surfaced when an on-call engineer noticed log gaps in Splunk 40 minutes after cutover.
+
+**Root cause:** The team's pre-upgrade checklist validated Kubernetes API compatibility and add-on versions but had no layer that validated application-level assumptions about the container runtime interface.
+
+**Evolved upgrade validation strategy:**
+
+- **Pre-upgrade static analysis:** Added a CI gate using `pluto` and a custom OPA policy that scans all workload manifests for deprecated APIs *and* known runtime-sensitive patterns (socket mounts, privileged containers, host PID) before the upgrade is approved.
+- **Synthetic end-to-end tests per team:** Onboarded each platform tenant to provide a "golden path" test suite (HTTP smoke tests, log emission checks, metric emission checks) executed against a canary node group running the new Kubernetes version before the full rollout.
+- **Shadow upgrade environment:** Stood up a dedicated "upgrade staging" cluster that mirrors production workloads weekly, where upgrade candidates are applied first; observed for 48 hours using automated log-volume and error-rate anomaly detection.
+- **Progressive node group rollout with automated halt:** Used Karpenter NodePool labels to route 5% of pods to new-version nodes; a Datadog monitor watching per-node error rates triggers an automatic cordon of new nodes if the error rate exceeds a threshold.
+- **Post-upgrade runbook baked into ADR:** Documented the incident as an Architecture Decision Record, embedding the log-emission validation step as a required checklist item in the upgrade runbook, enforced via a PR template check.
