@@ -607,3 +607,21 @@ _Committed & pushed: yes_
 - How does TLS termination work with Kubernetes Ingress, and what are the security considerations you must address?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-17 17:45:54
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8338 chars)
+- How do you design an EKS strategy for managing and enforcing cluster-level Pod Security Standards (PSS) migration from PodSecurityPolicy (PSP) — including audit, enforcement sequencing, and rollback safety?
+- A production EKS cluster's Karpenter NodePool is correctly provisioning nodes, but newly launched nodes are being immediately cordoned and drained by Karpenter within seconds before any pods schedule onto them. What is your diagnostic and remediation approach?
+- How do you design an EKS strategy for managing and enforcing safe multi-cluster GitOps — including preventing config drift, managing fleet-wide rollout ordering, and handling partial sync failures across hundreds of clusters?
+- Describe a situation where you had to diagnose and resolve an EKS upgrade failure mid-control-plane — where the API server version had been updated but managed node groups were left on the prior Kubernetes version, causing workload instability.
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (4173 chars)
+- How does the Gateway API's role-oriented model (GatewayClass, Gateway, HTTPRoute) improve multi-tenant cluster management compared to the flat Ingress model?
+- Describe a production incident where Ingress annotations diverged between two controllers (e.g., nginx and Traefik) running in the same cluster. How would you prevent and detect this?
+- What strategies would you use to achieve canary or traffic-weighted routing with Kubernetes Ingress, and what are the limitations of each approach?
+- A team reports intermittent 502 errors during rolling deployments behind an Ingress. Walk through your systematic diagnosis and the architectural changes that would prevent it.
+
+_Committed & pushed: yes_

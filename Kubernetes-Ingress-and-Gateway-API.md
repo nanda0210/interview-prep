@@ -423,3 +423,32 @@ TLS termination at the Ingress controller means the controller decrypts HTTPS tr
 - **Re-encryption vs. passthrough:** For compliance workloads (PCI, HIPAA), plain-text backend traffic may be unacceptable; use TLS passthrough (via SNI) or re-encrypt to the pod and validate backend certificates.
 - **Cipher suites & TLS version:** Enforce TLS 1.2+ and strong cipher suites via controller-specific annotations or a global ConfigMap; avoid defaults that may still allow weak ciphers.
 - **Secret sprawl:** Avoid storing wildcard certs in multiple namespaces; use a single source of truth and sync with tools like External Secrets Operator.
+
+
+---
+
+## 🗓️ Added 2026-10-17 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-17 17:45 -->
+
+### Q: How does the Gateway API's role-oriented model (GatewayClass, Gateway, HTTPRoute) improve multi-tenant cluster management compared to the flat Ingress model?
+
+The Gateway API separates concerns across three distinct personas: infrastructure providers manage **GatewayClass**, cluster operators manage **Gateway**, and application developers manage **HTTPRoute** (or other route types). This role separation means namespace-scoped teams can own their routing rules without requiring cluster-admin privileges, which is impossible with Ingress where a single resource conflates infrastructure and application concerns. Cross-namespace route attachment, controlled via `allowedRoutes` and `ReferenceGrant`, gives operators fine-grained control over which namespaces can bind to a shared Gateway. In practice this eliminates the dangerous anti-pattern of granting developers broad RBAC on Ingress resources just so they can manage their own paths.
+
+---
+
+### Q: Describe a production incident where Ingress annotations diverged between two controllers (e.g., nginx and Traefik) running in the same cluster. How would you prevent and detect this?
+
+Annotation-based configuration is controller-specific and silently ignored by any controller that doesn't recognise it, so running two controllers means a single Ingress object may be interpreted differently or partially, leading to split-brain routing. Prevention starts with enforcing `ingressClassName` on every resource and using admission webhooks or OPA/Kyverno policies that reject Ingress objects lacking it or using unknown classes. Detection relies on controller-emitted events and status sub-resources — scrape `kubectl get ingress -o jsonpath='{.status}'` in CI or alert on Ingress objects whose `loadBalancer.ingress` field is empty for more than N minutes. The long-term fix is migrating to Gateway API, where the typed spec (not free-form annotations) is validated by the API server itself.
+
+---
+
+### Q: What strategies would you use to achieve canary or traffic-weighted routing with Kubernetes Ingress, and what are the limitations of each approach?
+
+Most nginx-based Ingress controllers support canary via annotations (`nginx.ingress.kubernetes.io/canary-weight`), but this is controller-specific, not portable, and limited to simple percentage splits without header/cookie matching in some versions. Service Mesh integration (Istio `VirtualService`) overlaid on top of Ingress gives richer traffic shaping but adds operational complexity and a second control plane. The Gateway API's **HTTPRoute** `backendRefs` with `weight` fields provides a portable, spec-level canary primitive that works across conformant implementations without annotations. The key limitation of weight-based approaches is that weights apply at the request level, not session level, so sticky sessions require additional affinity configuration to avoid users bouncing between versions mid-session.
+
+---
+
+### Q: A team reports intermittent 502 errors during rolling deployments behind an Ingress. Walk through your systematic diagnosis and the architectural changes that would prevent it.
+
+502s during rollouts typically indicate the Ingress controller is forwarding traffic to pods that have already received `SIGTERM` but whose endpoints haven't been pruned from `kube-proxy`/iptables yet — a race between the endpoint reconciliation loop and pod shutdown. Diagnosis steps: correlate 502 timestamps with deployment events (`kubectl rollout history`), inspect controller access logs for upstream connection errors, and check endpoint churn with `kubectl get endpoints -w`. The fix involves two coordinated changes: add a `preStop` lifecycle hook with a short sleep (e.g., 5s) so the pod stays routable until endpoint removal propagates, and configure `minReadySeconds` plus a `readinessProbe` to ensure new pods are serving before old ones are terminated. At the controller level, enabling `keepalive` upstream connections and setting `proxy_next_upstream` correctly prevents a single failed upstream from surfacing as a user-visible 502.

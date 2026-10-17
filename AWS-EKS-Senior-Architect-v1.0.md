@@ -4443,3 +4443,67 @@ Permanent privileged access to EKS nodes and the API is a significant blast radi
 - **Shadow upgrade environment:** Stood up a dedicated "upgrade staging" cluster that mirrors production workloads weekly, where upgrade candidates are applied first; observed for 48 hours using automated log-volume and error-rate anomaly detection.
 - **Progressive node group rollout with automated halt:** Used Karpenter NodePool labels to route 5% of pods to new-version nodes; a Datadog monitor watching per-node error rates triggers an automatic cordon of new nodes if the error rate exceeds a threshold.
 - **Post-upgrade runbook baked into ADR:** Documented the incident as an Architecture Decision Record, embedding the log-emission validation step as a required checklist item in the upgrade runbook, enforced via a PR template check.
+
+
+---
+
+## 🗓️ Added 2026-10-17 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-17 17:45 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing cluster-level Pod Security Standards (PSS) migration from PodSecurityPolicy (PSP) — including audit, enforcement sequencing, and rollback safety?
+
+**Model Answer:**
+
+PSP was removed in Kubernetes 1.25, so migration must be deliberate and phased. The strategy:
+
+- **Audit first:** Enable PSS in `audit` mode cluster-wide using the `pod-security.kubernetes.io/audit` namespace label before any enforcement, then pipe API server audit logs to CloudWatch or S3 and parse for policy violations per namespace.
+- **Profile mapping:** Map existing PSPs to equivalent PSS profiles (`privileged`, `baseline`, `restricted`) per namespace; most application namespaces should target `baseline` or `restricted`, with `privileged` reserved only for system namespaces (e.g., `kube-system`, CNI, monitoring agents).
+- **Namespace-by-namespace rollout:** Move namespaces through `warn` → `audit` → `enforce` sequentially, starting with low-risk non-production namespaces; gate each phase on zero new audit violations over a rolling window (e.g., 72 hours).
+- **Kyverno/OPA bridge period:** For gaps PSS cannot cover (e.g., fine-grained volume type restrictions), implement supplemental Kyverno policies running in `audit` mode in parallel, promoting to `enforce` only after PSS enforcement is stable.
+- **Rollback safety:** PSS enforcement is label-driven, so rollback is as simple as removing or downgrading the namespace label — no admission webhook CRD deletion required, making it operationally safe.
+- **Operator and controller awareness:** Validate that all controllers (Helm operators, Argo CD sync jobs, Karpenter) have their own service namespaces labelled `privileged` where required to prevent reconciliation breakage during cutover.
+
+---
+
+### Q: A production EKS cluster's Karpenter NodePool is correctly provisioning nodes, but newly launched nodes are being immediately cordoned and drained by Karpenter within seconds before any pods schedule onto them. What is your diagnostic and remediation approach?
+
+**Model Answer:**
+
+This symptom — provision → cordon → drain loop — almost always points to one of a small set of root causes:
+
+- **Immediate health check failure:** Check Karpenter controller logs (`k logs -n karpenter deploy/karpenter`) for `termination` events; look for `node not ready timeout` — if the node fails to reach `Ready` within Karpenter's `terminationGracePeriod`, it is proactively terminated. The real failure is in node bootstrap, not Karpenter logic.
+- **User-data / bootstrap failure:** Inspect EC2 instance console output or SSM Session Manager on the launching instance; common causes include misconfigured `--kubelet-extra-args`, incorrect cluster endpoint in the launch template, or IMDSv2 hop-limit set to 1 blocking the VPC CNI from fetching instance metadata.
+- **NodePool disruption budget misconfiguration:** A `disruption` budget set too aggressively (e.g., `maxUnavailable: 0%`) combined with a consolidation loop can immediately trigger drain of newly empty nodes if Karpenter misidentifies them as consolidation candidates before pods land.
+- **Spot interruption false trigger:** If using Spot with the Node Termination Handler also installed, verify there is no duplicate interruption-notice processing — NTH and Karpenter's native interruption handling should not both be active simultaneously.
+- **Remediation:** Set `--node-not-ready-taint-timeout` and `terminationGracePeriod` to values that allow full bootstrap time (typically 5–10 min for AL2, longer for Bottlerocket with pull-heavy images), and temporarily set disruption to `WhenEmpty` with a `consolidateAfter: 30s` floor. Once bootstrap succeeds consistently, restore tighter settings.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing safe multi-cluster GitOps — including preventing config drift, managing fleet-wide rollout ordering, and handling partial sync failures across hundreds of clusters?
+
+**Model Answer:**
+
+At scale, naive multi-cluster GitOps devolves into undetected drift and blast-radius incidents. The architecture:
+
+- **Hub-spoke Argo CD topology:** A centralised Argo CD control plane (or a small set of regional hubs) manages `ApplicationSet` resources that template per-cluster `Application` objects; clusters are registered as Argo CD destinations using IRSA-scoped kubeconfig secrets, never static credentials.
+- **Progressive delivery rings:** Cluster fleet is divided into rings (canary → regional-staging → production-wave-1 → production-wave-n) defined by cluster labels. `ApplicationSet` generators use label selectors per ring; promotion between rings is gated by health checks and automated smoke tests, enforced via Argo CD `syncPolicy.automated.prune: false` on outer rings until explicit promotion is triggered.
+- **Drift detection without auto-remediation on production:** Production clusters run Argo CD in `SyncPolicy: manual` mode with `selfHeal: false`; drift is surfaced as alerts (PagerDuty/Slack) rather than silently auto-remediated, preventing runaway sync storms from a bad commit.
+- **Partial sync failure handling:** Argo CD `sync waves` and `sync phases` ensure dependency ordering within a cluster; across clusters, a promotion pipeline (Argo Workflows or GitHub Actions) polls `Application` health status via the Argo CD API before advancing the ring, treating any `Degraded` or `OutOfSync` cluster as a rollout gate.
+- **Config drift audit:** A separate read-only `ApplicationSet` in `diff-only` mode runs nightly and posts drift reports to a centralised S3 bucket and a Slack digest, providing compliance evidence without touching cluster state.
+- **Secret management:** Cluster secrets are never stored in Git; External Secrets Operator syncs from AWS Secrets Manager per cluster, with Argo CD treating ESO `ExternalSecret` objects as the source of truth and monitoring their `Ready` condition as a health check.
+
+---
+
+### Q: Describe a situation where you had to diagnose and resolve an EKS upgrade failure mid-control-plane — where the API server version had been updated but managed node groups were left on the prior Kubernetes version, causing workload instability.
+
+**Model Answer:**
+
+This is a realistic failure mode when an automated upgrade pipeline succeeds on the control plane step but fails silently on the data plane step.
+
+- **Symptoms observed:** After a control plane upgrade from 1.27 → 1.28, several workloads began seeing admission webhook timeouts and `kubectl` commands intermittently returned version skew warnings; some DaemonSet pods entered `CrashLoopBackOff` because their init containers relied on a `downwardAPI` field behaviour that changed between versions.
+- **Root cause:** Managed node groups were still on 1.27 kubelet; Kubernetes supports N-2 version skew between kubelet and API server, but certain admission and scheduling features active on the 1.28 API server were generating node-side errors when kubelets reported capabilities the API server no longer handled the same way. Additionally, the AWS VPC CNI version pinned in the node group launch template was incompatible with the 1.28 control plane's updated CNI spec negotiation.
+- **Immediate mitigation:** Cordoned all 1.27 nodes to prevent new pod scheduling; new pods were queued until node group upgrade could be safely initiated.
+- **Remediation sequencing:** Upgraded the VPC CNI add-on first (via `eksctl addon upgrade`), then initiated a rolling node group upgrade using the EKS managed node group update API with `--force` suppressed to respect PDBs; validated each node batch's kubelet version before proceeding.
+- **Post-incident controls added:** The upgrade pipeline was extended with a pre-flight check that blocks control plane upgrade unless a matching node group upgrade can be scheduled within the same maintenance window, and a post-upgrade canary check validates version skew across all nodes using `kubectl get nodes -o json | jq` before marking the upgrade complete.
+- **Architectural lesson:** Treat EKS upgrades as a two-phase atomic operation — control plane and data plane must be sequenced within the same automated workflow with hard gates, never as independent pipeline stages.
