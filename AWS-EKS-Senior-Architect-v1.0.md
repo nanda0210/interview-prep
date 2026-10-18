@@ -4507,3 +4507,77 @@ This is a realistic failure mode when an automated upgrade pipeline succeeds on 
 - **Remediation sequencing:** Upgraded the VPC CNI add-on first (via `eksctl addon upgrade`), then initiated a rolling node group upgrade using the EKS managed node group update API with `--force` suppressed to respect PDBs; validated each node batch's kubelet version before proceeding.
 - **Post-incident controls added:** The upgrade pipeline was extended with a pre-flight check that blocks control plane upgrade unless a matching node group upgrade can be scheduled within the same maintenance window, and a post-upgrade canary check validates version skew across all nodes using `kubectl get nodes -o json | jq` before marking the upgrade complete.
 - **Architectural lesson:** Treat EKS upgrades as a two-phase atomic operation — control plane and data plane must be sequenced within the same automated workflow with hard gates, never as independent pipeline stages.
+
+
+---
+
+## 🗓️ Added 2026-10-18 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-18 17:48 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing safe, automated EKS version upgrades across a large fleet of clusters with minimal toil and blast radius?
+
+**Model Answer:**
+
+The core challenge is balancing automation speed with safety gates across potentially hundreds of clusters. My strategy:
+
+- **Tiered promotion pipeline**: Clusters are grouped into rings — sandbox → dev → staging → canary-prod → prod. Upgrades are promoted automatically only when health gates pass at each ring (error rate, latency p99, node readiness SLOs).
+- **Control plane first, then data plane**: EKS control plane upgrade is applied via Terraform/CDK or the EKS API. Data plane upgrades (managed node groups or Karpenter) follow separately, with rolling node replacement respecting PDBs.
+- **Pre-upgrade validation**: Run `kubectl convert` + `pluto` or `kubent` to catch deprecated API usage. Validate all add-on versions (VPC CNI, CoreDNS, kube-proxy, EBS CSI) against the target Kubernetes version compatibility matrix.
+- **Automated canary health checks**: Post-upgrade, run synthetic workload tests and check Prometheus golden signals for 30–60 minutes before proceeding to the next ring.
+- **Rollback posture**: EKS control plane upgrades are one-way, so rollback means traffic failover to a blue cluster. Data plane rollback uses launch template version pinning to re-provision old AMIs.
+- **Add-on version management**: Use EKS Managed Add-ons with version pinning in IaC; automate add-on version bumps as a separate PR after the Kubernetes version upgrade completes.
+- **Toil reduction**: Centralised upgrade orchestration via Step Functions or Argo Workflows, with Slack notifications and manual approval gates only at the prod-ring boundary.
+
+---
+
+### Q: A production EKS cluster is running fine, but after enabling AWS VPC CNI network policy enforcement (via the `aws-network-policy-agent`), roughly 15% of pod-to-pod traffic is being silently dropped. How do you diagnose and resolve this?
+
+**Model Answer:**
+
+Silent drops with the network policy agent almost always indicate policy misconfiguration or conntrack table issues rather than outright rejection. Diagnosis path:
+
+1. **Confirm drop source**: Check `aws-network-policy-agent` pod logs for `DENY` events. Also inspect eBPF-based drop counters via `bpftool prog show` or CloudWatch Container Insights for `network_policy_dropped_packets` metric.
+2. **Policy gap analysis**: Run `kubectl get networkpolicy -A` and map ingress/egress rules against the 15% failing flows. Common miss: default-deny namespaces where new services weren't added to allow-lists, or missing egress rules for DNS (UDP/TCP 53 to CoreDNS).
+3. **Check `aws-node` DaemonSet version**: Network policy enforcement requires VPC CNI ≥ 1.14. If the version was upgraded but the `ENABLE_NETWORK_POLICY` env var isn't set on `aws-node`, the agent runs but policies aren't enforced consistently.
+4. **Conntrack exhaustion**: High-throughput clusters can exhaust the kernel's `nf_conntrack_max`. Check `nf_conntrack_count` vs `nf_conntrack_max` via node-level metrics; if saturated, tune via DaemonSet-level sysctl or use node-level tuning via a privileged init container.
+5. **Pod label mismatch**: Verify that `podSelector` labels in NetworkPolicy objects exactly match the running pod labels — a common error after label refactors.
+6. **Resolution**: Fix missing policies, add DNS egress rules, upgrade CNI if needed, and tune conntrack. Use a policy simulation tool (e.g., `network-policy-api` conformance tests) before re-enabling in prod.
+7. **Preventive**: Integrate policy linting (e.g., `np-guard`) into CI so policy changes are validated against a known pod topology before merge.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing stateful workload high availability — including databases, queues, and caches — running inside Kubernetes across multi-AZ topologies?
+
+**Model Answer:**
+
+Running stateful workloads in EKS is viable but requires deliberate HA design at every layer:
+
+- **Pod topology spread**: Use `topologySpreadConstraints` with `topologyKey: topology.kubernetes.io/zone` and `whenUnsatisfiable: DoNotSchedule` to enforce AZ distribution of StatefulSet replicas. Combine with `podAntiAffinity` for same-node avoidance.
+- **Persistent volume strategy**: Use EBS with EBS CSI and `WaitForFirstConsumer` volume binding mode so PVs are provisioned in the same AZ as the scheduled pod. For cross-AZ workloads, use EFS (NFS) or object storage offload instead of block storage.
+- **StatefulSet update safety**: Set `maxUnavailable: 1` and use `OnDelete` update strategy for databases where ordered, manual failover is safer than automated rolling restart.
+- **Headless services + DNS**: Use headless Services (`clusterIP: None`) so pods get stable DNS names (`pod-0.svc.namespace.svc.cluster.local`), enabling clients to target specific replicas for leader/follower routing.
+- **Operator-managed HA**: Prefer operators (e.g., CrunchyData PGO for Postgres, Strimzi for Kafka, Redis Operator) that encode HA logic — leader election, replica promotion, backup — rather than hand-rolling StatefulSets.
+- **Backup and restore**: Integrate Velero with CSI volume snapshots and S3 for scheduled backups. Test restore runbooks quarterly.
+- **PodDisruptionBudgets**: Enforce `minAvailable: quorum-size` so node drains during upgrades don't break consensus (e.g., `minAvailable: 2` for a 3-node etcd-backed store).
+- **Observability**: Export replication lag, WAL size, leader election events to Prometheus; alert on split-brain risk metrics, not just pod health.
+
+---
+
+### Q: Describe a situation where you had to design or respond to a cascading IAM permission failure that took down multiple EKS workloads simultaneously, and what architectural changes you made to prevent recurrence.
+
+**Model Answer:**
+
+**Situation**: A central IAM role used by multiple service accounts via IRSA was inadvertently modified during a Terraform refactor — a `Condition` key in the trust policy was changed, breaking the OIDC sub-claim match. This silently invalidated token assumption for 40+ service accounts across 6 namespaces simultaneously, causing workloads that depended on S3, SQS, and DynamoDB access to fail with `AccessDenied` errors within seconds of token refresh cycles.
+
+**Immediate response**:
+- Identified the root cause via CloudTrail — `AssumeRoleWithWebIdentity` calls were returning `AccessDenied` with `InvalidIdentityToken`.
+- Rolled back the Terraform change restoring the trust policy `Condition` block, which restored access within one token refresh cycle (~15 minutes for cached credentials).
+- Force-restarted affected pods to flush stale credential cache from the SDK.
+
+**Architectural changes made**:
+- **IRSA role per service account, not shared roles**: Enforced via OPA/Gatekeeper policy that denied ServiceAccount annotations pointing to roles trusted by more than one namespace/SA combination. This eliminated the blast radius of a single role change.
+- **Trust policy change detection**: Added a CloudTrail EventBridge rule that fires an alert whenever `UpdateAssumeRolePolicy` is called on roles tagged `eks-irsa=true`.
+- **IRSA role drift detection**: Scheduled Lambda that compares live IAM trust policies against Terraform state in S3, alerting on divergence.
+- **Canary credential validation**: Deployed per-cluster lightweight cronjobs that continuously perform a minimal `sts:GetCallerIdentity` call using each critical service account token, feeding results to Prometheus. This would have detected the break within 1 minute rather than waiting for user-facing errors.
+- **Least-privilege audit gate in CI**: Added `parliament` IAM linting and trust policy scope validation in the PR pipeline for all IAM Terraform modules.

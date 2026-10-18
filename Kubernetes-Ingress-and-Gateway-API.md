@@ -452,3 +452,51 @@ Most nginx-based Ingress controllers support canary via annotations (`nginx.ingr
 ### Q: A team reports intermittent 502 errors during rolling deployments behind an Ingress. Walk through your systematic diagnosis and the architectural changes that would prevent it.
 
 502s during rollouts typically indicate the Ingress controller is forwarding traffic to pods that have already received `SIGTERM` but whose endpoints haven't been pruned from `kube-proxy`/iptables yet — a race between the endpoint reconciliation loop and pod shutdown. Diagnosis steps: correlate 502 timestamps with deployment events (`kubectl rollout history`), inspect controller access logs for upstream connection errors, and check endpoint churn with `kubectl get endpoints -w`. The fix involves two coordinated changes: add a `preStop` lifecycle hook with a short sleep (e.g., 5s) so the pod stays routable until endpoint removal propagates, and configure `minReadySeconds` plus a `readinessProbe` to ensure new pods are serving before old ones are terminated. At the controller level, enabling `keepalive` upstream connections and setting `proxy_next_upstream` correctly prevents a single failed upstream from surfacing as a user-visible 502.
+
+
+---
+
+## 🗓️ Added 2026-10-18 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-18 17:48 -->
+
+### Q: How would you implement cross-namespace routing with the Gateway API, and what security controls prevent abuse?
+
+The Gateway API introduces **ReferenceGrant** as the explicit mechanism allowing a resource in one namespace to reference a resource in another. Without a ReferenceGrant in the target namespace, cross-namespace references are silently rejected, making isolation the secure default. In practice, a platform team owns the Gateway in an `infra` namespace, and application teams create HTTPRoutes in their own namespaces that attach to it via `parentRefs`; the platform team grants attachment only to approved namespaces via ReferenceGrant. This contrasts sharply with Ingress, where cross-namespace backend references were either unsupported or controlled only by ad-hoc annotations. Key security controls to highlight:
+- **ReferenceGrant** scoping: grants are namespace-scoped and can be limited to specific resource kinds and names.
+- **Gateway `allowedRoutes`** field restricts which namespaces/labels can attach routes, giving a second layer of defense.
+- RBAC still applies independently; a team can't create a ReferenceGrant they don't have write access to.
+- Auditing ReferenceGrants and Gateway `allowedRoutes` policies should be part of your compliance runbook.
+
+---
+
+### Q: Walk me through how you would debug a situation where an HTTPRoute is accepted by the controller but traffic is still returning 404.
+
+The Gateway API surfaces condition types on the route's `status` field—start with `kubectl get httproute <name> -o yaml` and inspect `.status.parents[].conditions`. A route can be `Accepted: True` (the controller parsed it) yet `ResolvedRefs: False` (a backend Service or port doesn't exist), which produces 404s. Common root causes include:
+- **Service name or port mismatch** – the HTTPRoute references a port number that differs from what the Service exposes.
+- **Missing ReferenceGrant** – backend is in another namespace and the grant was not created.
+- **Hostname mismatch** – the Gateway listener's `hostname` glob doesn't cover the HTTPRoute's declared hostname.
+- **Weight summing to zero** – a misconfigured traffic split where all backends have weight 0.
+After fixing references, confirm the controller has re-reconciled by checking the condition's `observedGeneration` matches the route's `generation`. Correlate with controller logs and, if using a mesh integration, with sidecar proxy config dumps (e.g., `istioctl proxy-config routes`).
+
+---
+
+### Q: What are the trade-offs between handling SSL passthrough at the Ingress/Gateway layer versus terminating TLS inside the application pod?
+
+**SSL passthrough** forwards encrypted traffic directly to the pod; the Ingress/Gateway operates at L4 and cannot inspect HTTP headers, apply routing rules based on paths, or reuse certificates centrally. It is appropriate when the application requires mutual TLS end-to-end (e.g., database clients that validate server identity) or when regulatory requirements prohibit decryption at the edge. **TLS termination at the gateway** enables L7 features—path-based routing, header manipulation, rate limiting, WAF integration—and centralizes certificate lifecycle management (e.g., cert-manager issuing Let's Encrypt certs). The trade-offs:
+- Passthrough loses observability; you can't log HTTP request details at the proxy layer.
+- Gateway termination introduces a trust boundary: traffic inside the cluster is plaintext unless you add a service mesh for mTLS.
+- Certificate rotation is simpler at the gateway; per-pod termination requires distributing and rotating secrets to every workload.
+- Performance: termination at the gateway offloads crypto from application CPUs but concentrates load on the proxy fleet.
+In most multi-tenant SaaS platforms, gateway termination plus in-cluster mTLS via a service mesh is the preferred balance.
+
+---
+
+### Q: How do you approach rate limiting and request authentication at the Ingress/Gateway layer, and what changes when you move from Ingress annotations to the Gateway API's extensibility model?
+
+With NGINX Ingress, rate limiting is implemented via controller-specific annotations (`nginx.ingress.kubernetes.io/limit-rps`), which are opaque strings with no schema validation and vary across controller versions. Authentication (JWT, OAuth2) similarly relies on annotations or auxiliary sidecar patterns. The Gateway API addresses this through **policy attachment** using vendor extension resources such as `RateLimitPolicy` or `AuthPolicy` CRDs that attach to a Gateway or HTTPRoute via `targetRef`. Key improvements:
+- **Portability boundary is explicit**: core Gateway API spec is portable; policies are implementation-specific but follow a common attachment pattern documented in GEP-713.
+- **Hierarchical precedence**: a Gateway-level policy sets defaults/overrides; an HTTPRoute-level policy can narrow but not exceed Gateway limits, enforcing tenant guardrails.
+- **Status feedback**: policy resources surface their own conditions, so you can tell whether a policy was accepted, conflicted, or overridden.
+- **Validation**: because policies are typed CRDs, schema validation happens at admission time rather than at runtime annotation parsing.
+Operationally, migration means replacing annotation-based configs with new CRD manifests and updating CI validation pipelines to lint against the new schemas—plan for parallel environments during the cutover.

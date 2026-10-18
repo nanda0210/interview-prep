@@ -625,3 +625,21 @@ _Committed & pushed: yes_
 - A team reports intermittent 502 errors during rolling deployments behind an Ingress. Walk through your systematic diagnosis and the architectural changes that would prevent it.
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-18 17:48:35
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7911 chars)
+- How do you design an EKS strategy for managing and enforcing safe, automated EKS version upgrades across a large fleet of clusters with minimal toil and blast radius?
+- A production EKS cluster is running fine, but after enabling AWS VPC CNI network policy enforcement (via the `aws-network-policy-agent`), roughly 15% of pod-to-pod traffic is being silently dropped. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing stateful workload high availability — including databases, queues, and caches — running inside Kubernetes across multi-AZ topologies?
+- Describe a situation where you had to design or respond to a cascading IAM permission failure that took down multiple EKS workloads simultaneously, and what architectural changes you made to prevent recurrence.
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (5532 chars)
+- How would you implement cross-namespace routing with the Gateway API, and what security controls prevent abuse?
+- Walk me through how you would debug a situation where an HTTPRoute is accepted by the controller but traffic is still returning 404.
+- What are the trade-offs between handling SSL passthrough at the Ingress/Gateway layer versus terminating TLS inside the application pod?
+- How do you approach rate limiting and request authentication at the Ingress/Gateway layer, and what changes when you move from Ingress annotations to the Gateway API's extensibility model?
+
+_Committed & pushed: yes_
