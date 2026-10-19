@@ -643,3 +643,21 @@ _Committed & pushed: yes_
 - How do you approach rate limiting and request authentication at the Ingress/Gateway layer, and what changes when you move from Ingress annotations to the Gateway API's extensibility model?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-19 20:21:21
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7749 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level network egress observability and anomaly detection — including detecting unexpected external call patterns, DNS tunneling, and data exfiltration attempts at scale?
+- A production EKS cluster's Cluster Autoscaler is consistently making suboptimal scale-down decisions, terminating nodes that still have pods that cannot be rescheduled, causing repeated CrashLoopBackOff and PVC reattachment failures. How do you diagnose and permanently resolve this?
+- How do you design an EKS strategy for managing and enforcing multi-tenancy security isolation when multiple internal teams share a single cluster — covering network, RBAC, admission, and compute isolation without requiring per-team clusters?
+- Describe a situation where a seemingly correct EKS Ingress configuration using the AWS Load Balancer Controller worked in staging but caused asymmetric routing and session affinity failures in production. How did you diagnose and fix it?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (5165 chars)
+- How would you debug a situation where an HTTPRoute is correctly configured but traffic is not reaching the backend pods?
+- What are the performance and operational trade-offs of running a single shared Ingress controller versus one controller per namespace or team?
+- How do you handle certificate lifecycle management for Ingress or Gateway resources at scale, and what can go wrong?
+- Walk me through how you would migrate a production workload from Ingress resources to the Gateway API with zero downtime.
+
+_Committed & pushed: yes_

@@ -4581,3 +4581,84 @@ Running stateful workloads in EKS is viable but requires deliberate HA design at
 - **IRSA role drift detection**: Scheduled Lambda that compares live IAM trust policies against Terraform state in S3, alerting on divergence.
 - **Canary credential validation**: Deployed per-cluster lightweight cronjobs that continuously perform a minimal `sts:GetCallerIdentity` call using each critical service account token, feeding results to Prometheus. This would have detected the break within 1 minute rather than waiting for user-facing errors.
 - **Least-privilege audit gate in CI**: Added `parliament` IAM linting and trust policy scope validation in the PR pipeline for all IAM Terraform modules.
+
+
+---
+
+## 🗓️ Added 2026-10-19 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-19 20:20 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level network egress observability and anomaly detection — including detecting unexpected external call patterns, DNS tunneling, and data exfiltration attempts at scale?
+
+**Model Answer:**
+
+- **Layer the detection stack**: Enable VPC Flow Logs per-ENI (not just per-VPC) and feed them into Amazon Athena or OpenSearch for pod-level correlation using the ENI-to-pod mapping exported by VPC CNI; add AWS Network Firewall or Cilium Hubble for L7 visibility including DNS query inspection.
+- **DNS anomaly detection**: Deploy a DNS-aware solution (Route 53 Resolver Query Logging + GuardDuty DNS findings, or Cilium DNS policy with audit mode) to catch high-entropy domains, excessive NXDOMAIN rates, and large TXT/NULL record responses characteristic of DNS tunneling.
+- **Behavioral baselining**: Use GuardDuty EKS Runtime Monitoring (eBPF-based) to establish per-workload syscall and network baselines; alert on deviations such as a pod suddenly opening raw sockets or making calls to novel external CIDR ranges.
+- **Policy enforcement pipeline**: Translate approved egress patterns into Cilium or AWS Network Firewall deny-by-default rules managed via GitOps; new external destinations require a PR with a security review before approval.
+- **Alerting and response**: Stream findings to Security Hub → EventBridge → Lambda to auto-isolate a suspicious pod by applying a restrictive NetworkPolicy label selector, preserving forensic state while stopping lateral movement.
+- **Scale consideration**: At hundreds of nodes, Flow Log volume is enormous; use Kinesis Data Firehose with dynamic partitioning by pod label and time-bucket to make queries tractable without storing everything hot.
+
+---
+
+### Q: A production EKS cluster's Cluster Autoscaler is consistently making suboptimal scale-down decisions, terminating nodes that still have pods that cannot be rescheduled, causing repeated CrashLoopBackOff and PVC reattachment failures. How do you diagnose and permanently resolve this?
+
+**Model Answer:**
+
+The root causes are almost always one or more of: missing `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotations on singleton pods, PodDisruptionBudgets with `maxUnavailable: 0` on single-replica deployments blocking eviction silently, or StatefulSet pods whose PVCs are zone-locked but the Autoscaler's `--balance-similar-node-groups` logic ignores topology constraints.
+
+**Diagnosis steps:**
+1. Check Autoscaler logs for `scale down` decisions and confirm which pods it believes are safe to evict; cross-reference with actual pod annotations and PDBs.
+2. Verify PVC `volumeBindingMode: WaitForFirstConsumer` and whether the replacement node is launched in the same AZ as the claimed PV — if not, the pod will stay `Pending` indefinitely.
+3. Run `kubectl get events --field-selector reason=FailedScheduling` to confirm topology mismatches post-eviction.
+
+**Permanent fixes:**
+- Annotate all DaemonSet-managed and singleton stateful pods correctly; enforce this via Kyverno mutation webhook at admission time.
+- Set realistic PDBs (at least `minAvailable: 1` for critical single replicas) — but pair with multi-replica deployments so the PDB doesn't permanently block scale-down.
+- Migrate to **Karpenter**, which natively understands PVC topology constraints, respects `do-not-disrupt` annotations, and performs consolidation with voluntary disruption awareness rather than the Autoscaler's node-group heuristics.
+- Enable `--skip-nodes-with-local-storage=true` and `--skip-nodes-with-system-pods=true` conservatively until pod placement is audited.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing multi-tenancy security isolation when multiple internal teams share a single cluster — covering network, RBAC, admission, and compute isolation without requiring per-team clusters?
+
+**Model Answer:**
+
+**Namespace-as-tenant boundary with hard guardrails:**
+- Assign each team a dedicated namespace set; enforce naming conventions and ownership labels via Kyverno `generate` rules that auto-create NetworkPolicies, ResourceQuotas, LimitRanges, and default ServiceAccounts on namespace creation.
+
+**RBAC:**
+- Grant teams `edit` or custom roles scoped strictly to their namespaces; prohibit `ClusterRole` bindings for tenant users. Use `aws-auth` / EKS Access Entries mapped to IAM Identity Center permission sets so role assignments are auditable and revoked automatically on off-boarding.
+
+**Network isolation:**
+- Default-deny all ingress and egress at the namespace level; allow only explicitly declared cross-namespace traffic via Cilium `CiliumNetworkPolicy` or Calico GlobalNetworkPolicy reviewed by the platform team.
+- Use separate security groups per node group if teams have radically different trust levels (EKS Security Groups for Pods per namespace).
+
+**Admission and policy:**
+- Enforce Pod Security Standards at `restricted` for most tenants via per-namespace labels; exceptions require a signed OPA/Kyverno policy exemption with an expiry label.
+- Block cross-namespace secret access, host path mounts, and privileged containers via Gatekeeper constraints enforced cluster-wide.
+
+**Compute isolation:**
+- Use Karpenter NodePools with node taints and team-specific tolerations to ensure noisy workloads land on dedicated node classes; combine with `requiredDuringSchedulingIgnoredDuringExecution` node affinity for sensitive teams.
+- Label nodes with team ownership for cost allocation via AWS resource tags propagated through Karpenter `EC2NodeClass`.
+
+**Governance:** Run periodic `kubectl-who-can` audits and OPA audit mode scans; expose per-team dashboards in Grafana scoped to their namespace metrics via label-based Prometheus RBAC.
+
+---
+
+### Q: Describe a situation where a seemingly correct EKS Ingress configuration using the AWS Load Balancer Controller worked in staging but caused asymmetric routing and session affinity failures in production. How did you diagnose and fix it?
+
+**Model Answer:**
+
+A common real-world scenario: staging used a single-AZ ALB target group with `target-type: ip`, while production spanned three AZs with `cross-zone load balancing` disabled on the ALB (the default for ALBs created by older LBC versions). Client sessions that established on one AZ's ALB node were forwarded to pods in that AZ, but a subset of requests were routed to pods in a different AZ because the ALB's zone affinity setting was inconsistent with the application's sticky-session cookie scope.
+
+**Diagnosis:**
+- Captured ALB access logs and correlated `client_ip` + `target_ip` across requests within the same session; confirmed that ~30% of requests for a given session hit a different pod than the one holding the session state.
+- Checked `aws elbv2 describe-load-balancer-attributes` and confirmed `load_balancing.cross_zone.enabled = false`.
+- Reviewed the Ingress annotation set and found `alb.ingress.kubernetes.io/target-group-attributes` did not include `stickiness.enabled=true,stickiness.type=lb_cookie`.
+
+**Fix:**
+- Added stickiness annotations to the Ingress object and enabled cross-zone load balancing via `alb.ingress.kubernetes.io/load-balancer-attributes: load_balancing.cross_zone.enabled=true` — understanding the trade-off of inter-AZ data transfer cost.
+- For stateless services, removed session affinity entirely and moved session state to ElastiCache, which is the correct long-term fix.
+- Added a staging-to-production parity checklist enforced via a CI diff step that compares Ingress annotation sets and ALB attributes between environments before promotion, preventing recurrence.

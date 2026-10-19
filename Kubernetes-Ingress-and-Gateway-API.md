@@ -500,3 +500,36 @@ With NGINX Ingress, rate limiting is implemented via controller-specific annotat
 - **Status feedback**: policy resources surface their own conditions, so you can tell whether a policy was accepted, conflicted, or overridden.
 - **Validation**: because policies are typed CRDs, schema validation happens at admission time rather than at runtime annotation parsing.
 Operationally, migration means replacing annotation-based configs with new CRD manifests and updating CI validation pipelines to lint against the new schemas—plan for parallel environments during the cutover.
+
+
+---
+
+## 🗓️ Added 2026-10-19 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-19 20:21 -->
+
+### Q: How would you debug a situation where an HTTPRoute is correctly configured but traffic is not reaching the backend pods?
+
+**Model Answer:**
+Start by verifying the full resource chain: confirm the GatewayClass is accepted by the controller, the Gateway has a `Ready` condition, and the HTTPRoute's `parentRef` matches the correct Gateway name and namespace. Check HTTPRoute status conditions—controllers surface `ResolvedRefs` and `Accepted` conditions that indicate misconfigured backend references or namespace permission issues. Validate that a ReferenceGrant exists if the HTTPRoute and Service are in different namespaces, as missing grants silently block traffic. Inspect the data-plane proxy logs (e.g., Envoy access logs in Istio or Contour) to see whether requests arrive at the proxy but fail upstream, pointing to a pod-readiness or port mismatch. Use `kubectl port-forward` directly to the backend Service and pods to isolate whether the issue is in the gateway layer or the application itself. Finally, verify NetworkPolicies are not blocking traffic from the gateway's pod CIDR to the backend pods, a frequently overlooked cause.
+
+---
+
+### Q: What are the performance and operational trade-offs of running a single shared Ingress controller versus one controller per namespace or team?
+
+**Model Answer:**
+A single shared controller minimizes resource overhead and simplifies certificate management and observability, but creates a "noisy neighbor" problem—one team's heavy traffic or misconfigured annotation can degrade routing for all. It also concentrates blast radius: a controller crash or bad config reload affects the entire cluster. Per-team controllers (using `IngressClass` or separate GatewayClasses) provide fault isolation, independent upgrade cadences, and cleaner RBAC boundaries, at the cost of multiplied resource consumption and more complex certificate/DNS management. The Gateway API's role model is specifically designed to ease this trade-off: platform teams own GatewayClass and Gateway objects, while application teams manage their own HTTPRoutes without needing cluster-wide privileges. In practice, a middle ground—one controller per environment tier (e.g., public-internet vs. internal)—often balances isolation with operational simplicity. Capacity planning must account for connection table size and TLS handshake overhead when consolidating many domains onto one controller.
+
+---
+
+### Q: How do you handle certificate lifecycle management for Ingress or Gateway resources at scale, and what can go wrong?
+
+**Model Answer:**
+cert-manager is the de-facto standard: it watches Ingress `tls` blocks or `Certificate` CRDs and automates ACME (Let's Encrypt) or internal CA issuance and renewal. For Gateway API, cert-manager's `Gateway` support allows attaching certificates directly to `Gateway` listeners via `certificateRefs`, decoupling cert provisioning from HTTPRoute authors. Common failure modes include: ACME HTTP-01 challenge failures when the Ingress controller rewrites paths before the solver pod can respond; rate-limit exhaustion on Let's Encrypt's 50-certs-per-domain-per-week limit during mass rollouts; and certificate Secret propagation lag causing brief TLS errors after renewal. At scale, wildcard certificates with DNS-01 challenges reduce the number of certificates needed but require DNS provider credentials with broad write access, a security concern that should be scoped tightly via IAM. Monitoring certificate expiry with Prometheus metrics from cert-manager and alerting at 30 and 7 days before expiry is essential. Store Secrets in an external vault (e.g., HashiCorp Vault, AWS Secrets Manager) and sync with the External Secrets Operator to avoid storing sensitive key material solely in etcd.
+
+---
+
+### Q: Walk me through how you would migrate a production workload from Ingress resources to the Gateway API with zero downtime.
+
+**Model Answer:**
+Begin with an inventory of all Ingress objects, their annotations, and controller-specific behavior—many annotations have no direct Gateway API equivalent and require translation to policy attachments or vendor CRDs. Run the Gateway API controller in parallel alongside the existing Ingress controller; both can coexist because they watch different resource kinds. Create equivalent GatewayClass, Gateway, and HTTPRoute resources in a staging environment and validate functional parity, paying special attention to rewrite rules, header manipulation, and auth integrations. For cutover, use weighted DNS or an upstream load balancer to shift a small percentage of traffic (e.g., 5%) to the new Gateway endpoint, monitor error rates and latency, then gradually increase. Keep the old Ingress resources live until the new path is fully validated—do not delete them prematurely. Implement automated rollback by scripting DNS weight reversion if error-rate thresholds are breached. Document annotation-to-policy mapping for your team because institutional knowledge of Ingress annotations is often undocumented and critical for post-migration support.
