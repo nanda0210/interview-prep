@@ -4662,3 +4662,76 @@ A common real-world scenario: staging used a single-AZ ALB target group with `ta
 - Added stickiness annotations to the Ingress object and enabled cross-zone load balancing via `alb.ingress.kubernetes.io/load-balancer-attributes: load_balancing.cross_zone.enabled=true` — understanding the trade-off of inter-AZ data transfer cost.
 - For stateless services, removed session affinity entirely and moved session state to ElastiCache, which is the correct long-term fix.
 - Added a staging-to-production parity checklist enforced via a CI diff step that compares Ingress annotation sets and ALB attributes between environments before promotion, preventing recurrence.
+
+
+---
+
+## 🗓️ Added 2026-10-20 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-20 18:54 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing fine-grained network segmentation between namespaces using a combination of Kubernetes NetworkPolicy and AWS-native controls, and what are the operational trade-offs at scale?
+
+**Model Answer:**
+
+The layered approach combines three enforcement planes: Kubernetes NetworkPolicy (enforced by VPC CNI network policy agent or a CNI like Cilium), AWS Security Groups for Pods (SGP) for AWS-layer enforcement, and VPC-level NACLs for coarse subnet isolation.
+
+- **Default-deny posture**: Apply a default-deny-all NetworkPolicy in every namespace at creation time via a mutating webhook or GitOps bootstrap, then explicitly allow only required flows.
+- **Security Groups for Pods**: Use SGP to attach pod-level security groups for workloads that need AWS-native stateful filtering (e.g., RDS, ElastiCache), noting the ENI trunk mode requirement limits instance type choices and adds IP addressing overhead.
+- **Cilium over VPC CNI policy agent**: At large scale (>500 nodes), Cilium's eBPF dataplane handles NetworkPolicy with lower CPU overhead and richer L7 policy; trade-off is operational complexity of running a custom CNI alongside AWS VPC CNI in chained mode.
+- **Policy-as-code**: Store all NetworkPolicy manifests in a git repo; use Kyverno ClusterPolicy to block any namespace from being created without a corresponding default-deny policy; run policy linting (e.g., `np-guard`) in CI to detect inadvertent over-permissive rules before merge.
+- **Observability gap**: NetworkPolicy drops are silent by default; enable VPC Flow Logs at ENI level and correlate with pod metadata via Lambda enrichment or Cilium Hubble to surface denied flows.
+- **Key trade-off**: AWS Security Groups for Pods give AWS-managed stateful filtering but consume branch ENI capacity per node; at high pod density, prefer VPC CNI prefix delegation with pure Kubernetes NetworkPolicy enforcement to avoid ENI exhaustion.
+
+---
+
+### Q: A production EKS cluster's AWS ALB Ingress is intermittently returning 502 errors to clients during normal operating hours, but target group health checks are passing and pods appear healthy. How do you systematically diagnose and resolve this?
+
+**Model Answer:**
+
+502s from ALB with healthy targets almost always mean the ALB successfully reached the pod but received an invalid or incomplete HTTP response — not that the pod is down. Systematic diagnosis:
+
+1. **Separate ALB 502 subtypes**: Check ALB access logs for `error_reason` field — `Target.ResponseErrorStatusCode`, `Target.ConnectionErrorFromTarget`, and `Target.Timeout` each indicate distinct root causes.
+2. **Connection reset race**: The most common cause in EKS is pods terminating before ALB drains connections — the pod's HTTP server closes the keep-alive connection mid-request when the container receives SIGTERM. Fix by adding a `preStop` hook (`sleep 5`) to delay SIGTERM and setting `deregistration_delay` on the target group to allow connection draining.
+3. **Keep-alive mismatch**: If the pod's server-side keep-alive timeout is shorter than the ALB's idle timeout (default 60s), the server closes a connection the ALB still considers live. Set pod's keep-alive timeout to slightly above ALB idle timeout.
+4. **Response header size**: ALB has a maximum response header size (~64 KB); oversized Set-Cookie or JWT headers cause ALB to emit a 502 silently. Confirm by checking header sizes in ALB access logs.
+5. **Target group protocol mismatch**: If Ingress annotation specifies HTTP but pod serves HTTP/2 only, ALB sends HTTP/1.1 and gets an invalid response. Align `alb.ingress.kubernetes.io/backend-protocol` with pod's server protocol.
+6. **Validate with VPC Flow Logs + pod-level tcpdump**: Capture RST packets at the pod ENI during a 502 window to confirm whether the TCP connection was reset by the pod or the ALB.
+7. **Resolution confirmation**: After applying preStop hook and aligning keep-alive timeouts, monitor `HTTPCode_Target_5XX_Count` and `TargetConnectionErrorCount` CloudWatch metrics; both should drop to zero.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level cost attribution and chargeback across dozens of teams sharing a cluster, including compute, networking, and data transfer costs?
+
+**Model Answer:**
+
+Cost attribution in a shared EKS cluster requires tagging, metering, and allocation across three cost domains: compute, networking, and storage.
+
+- **Compute attribution**: Enforce mandatory `team` and `cost-center` labels on all pods via a Kyverno policy; use Kubecost (or OpenCost) to aggregate CPU and memory actual usage (not requests) per label dimension and export to a data warehouse (e.g., S3 + Athena) daily.
+- **Node-level tag propagation**: Configure Karpenter NodePool with EC2 tags derived from the dominant workload's team label using `spec.template.spec.kubelet.clusterDNS` tagging and EC2 tag propagation; this allows AWS Cost Explorer to slice compute cost at the node level before Kubecost does pod-level allocation.
+- **Networking cost (hardest part)**: VPC Flow Logs enriched with pod metadata (via a Lambda + ENI-to-pod mapping) can approximate cross-AZ data transfer per team; tag egress NAT Gateway traffic by source pod CIDR block to attribute data transfer charges. Alternatively, enforce AZ-affinity scheduling per team to minimise cross-AZ charges as a design-time control.
+- **EBS/EFS storage**: Tag PersistentVolumes with team labels at provisioning time via a mutating webhook; reconcile PV tags to underlying EBS volumes using a controller that calls `ec2:CreateTags` on PV creation events.
+- **Chargeback reporting pipeline**: Export Kubecost Allocation API output nightly to S3; join with AWS Cost and Usage Report (CUR) to reconcile Kubecost estimates against actual AWS billing; surface discrepancies (>5%) as alerts for the FinOps team.
+- **Governance**: Publish per-team monthly reports; gate new namespace creation on team confirmation of a cost-center tag in their namespace annotation, enforced by an OPA/Gatekeeper constraint.
+
+---
+
+### Q: Describe a situation where you had to diagnose and resolve an EKS cluster where Kubernetes Events were flooding the API server, causing control plane degradation across all tenants, and explain the architectural safeguards you put in place afterward.
+
+**Model Answer:**
+
+**Situation**: A large batch processing team deployed a misconfigured Job controller that entered a crash-loop restart cycle across 2,000 pods simultaneously. Each pod restart generated Warning events; the event burst saturated the API server's event write path, increasing P99 API latency from 80 ms to >4 seconds cluster-wide, triggering cascading failures in unrelated controllers (HPA, Karpenter, Flux).
+
+**Diagnosis**:
+- CloudWatch Container Insights showed `apiserver_request_duration_seconds` P99 spike correlated with a sharp rise in `apiserver_storage_objects{resource="events"}`.
+- `kubectl get events --all-namespaces --sort-by='.lastTimestamp'` revealed thousands of events per second from a single namespace; `kubectl top` on API server pods showed memory pressure.
+- Confirmed root cause: the Job's `backoffLimit` was set to unlimited (a Kubernetes default misunderstanding) and the image pull was failing, generating a `BackOff` event on every retry.
+
+**Immediate remediation**:
+- Applied a ResourceQuota of `count/events: 500` to the offending namespace, immediately throttling new event writes.
+- Deleted the misconfigured Job; API server latency recovered within 90 seconds.
+
+**Architectural safeguards post-incident**:
+1. **API Priority and Fairness (APF)**: Created a dedicated `FlowSchema` for event writes with a low `nominalConcurrencyShares` value so event floods are rate-limited without impacting higher-priority flows (Lease updates, node heartbeats).
+2. **Namespace-level event quotas**: Added `count/events: 1000` to every namespace's default ResourceQuota template enforced at namespace creation via Kyverno.
+3. **Event TTL tuning**: Set `--

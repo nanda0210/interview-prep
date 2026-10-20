@@ -661,3 +661,21 @@ _Committed & pushed: yes_
 - Walk me through how you would migrate a production workload from Ingress resources to the Gateway API with zero downtime.
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-20 18:54:44
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8140 chars)
+- How do you design an EKS strategy for managing and enforcing fine-grained network segmentation between namespaces using a combination of Kubernetes NetworkPolicy and AWS-native controls, and what are the operational trade-offs at scale?
+- A production EKS cluster's AWS ALB Ingress is intermittently returning 502 errors to clients during normal operating hours, but target group health checks are passing and pods appear healthy. How do you systematically diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level cost attribution and chargeback across dozens of teams sharing a cluster, including compute, networking, and data transfer costs?
+- Describe a situation where you had to diagnose and resolve an EKS cluster where Kubernetes Events were flooding the API server, causing control plane degradation across all tenants, and explain the architectural safeguards you put in place afterward.
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (5809 chars)
+- How would you design a blue/green deployment strategy using Gateway API HTTPRoute traffic splitting, and what rollback mechanism would you implement?
+- Explain how GatewayClass infrastructure parameters work, and how you would use them to enforce organizational standards across multiple Gateway instances.
+- What happens to in-flight requests during an Ingress controller rolling update, and how do you minimize request loss?
+- How would you implement and test a WAF policy at the Gateway layer, and what are the operational pitfalls of doing so?
+
+_Committed & pushed: yes_

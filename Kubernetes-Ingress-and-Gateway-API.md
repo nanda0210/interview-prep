@@ -533,3 +533,62 @@ cert-manager is the de-facto standard: it watches Ingress `tls` blocks or `Certi
 
 **Model Answer:**
 Begin with an inventory of all Ingress objects, their annotations, and controller-specific behavior—many annotations have no direct Gateway API equivalent and require translation to policy attachments or vendor CRDs. Run the Gateway API controller in parallel alongside the existing Ingress controller; both can coexist because they watch different resource kinds. Create equivalent GatewayClass, Gateway, and HTTPRoute resources in a staging environment and validate functional parity, paying special attention to rewrite rules, header manipulation, and auth integrations. For cutover, use weighted DNS or an upstream load balancer to shift a small percentage of traffic (e.g., 5%) to the new Gateway endpoint, monitor error rates and latency, then gradually increase. Keep the old Ingress resources live until the new path is fully validated—do not delete them prematurely. Implement automated rollback by scripting DNS weight reversion if error-rate thresholds are breached. Document annotation-to-policy mapping for your team because institutional knowledge of Ingress annotations is often undocumented and critical for post-migration support.
+
+
+---
+
+## 🗓️ Added 2026-10-20 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-20 18:54 -->
+
+### Q: How would you design a blue/green deployment strategy using Gateway API HTTPRoute traffic splitting, and what rollback mechanism would you implement?
+
+Blue/green with Gateway API uses `HTTPRoute` `backendRefs` weights—initially 100% to the blue `Service`, then shifting weight to green incrementally or atomically. Unlike canary, blue/green typically cuts over fully at once, so you'd set green's weight to 100 and blue's to 0 in a single `kubectl apply`, which is atomic from the API server's perspective. Rollback is equally fast: revert the weight fields or apply the previous `HTTPRoute` manifest from version control. Key considerations:
+
+- **Readiness gates**: Ensure green pods pass readiness probes before shifting weight; combine with a pre-flight smoke test against a header-matched shadow route.
+- **Session affinity**: Stateful sessions mid-flight may break on cutover; use cookie-based affinity or drain blue gracefully with a 0-weight (not deletion) so existing connections complete.
+- **GitOps integration**: Store `HTTPRoute` manifests in Git; a failed deployment triggers a PR revert or ArgoCD sync to the last known-good revision.
+- **Observability gate**: Wire a Prometheus/Datadog query into your CD pipeline—if error rate on green exceeds threshold within N minutes, the pipeline auto-reverts the weight, keeping MTTR low.
+
+---
+
+### Q: Explain how GatewayClass infrastructure parameters work, and how you would use them to enforce organizational standards across multiple Gateway instances.
+
+`GatewayClass` accepts a `parametersRef` field pointing to a provider-specific custom resource (e.g., `GatewayClassConfig` for Envoy Gateway or `AWSGatewayClassConfig` for ACK). This lets platform teams encode defaults—load balancer tier, logging level, connection limits, or VPC/subnet placement—in a single object that every `Gateway` referencing that class inherits. To enforce organizational standards:
+
+- Define separate `GatewayClasses` per tier (e.g., `internal`, `external-public`, `partner-dmz`), each pointing to a parameters object with pre-approved settings.
+- Use RBAC to restrict who can create or modify `GatewayClass` resources to the platform team; application teams only select the appropriate class name.
+- Validate compliance with an OPA/Gatekeeper or Kyverno policy that rejects `Gateway` resources referencing unapproved class names or attempting to override restricted fields.
+- Apply mutating webhooks to stamp organizational labels and ownership annotations onto every `Gateway` at admission time, enabling cost attribution and audit.
+- Periodically reconcile parameters objects through GitOps; drift triggers alerts rather than silent overrides.
+
+---
+
+### Q: What happens to in-flight requests during an Ingress controller rolling update, and how do you minimize request loss?
+
+During a rolling update the old controller pod begins terminating while the new one starts. The gap creates two risk windows: (1) the terminating pod stops accepting new connections before draining existing ones, and (2) `kube-proxy`/iptables rules may still route traffic to a terminating pod. Mitigation strategies:
+
+- **`preStop` hook + sleep**: Add a `preStop` hook that sleeps 5–15 s before the process begins its shutdown sequence, giving `kube-proxy` time to remove the endpoint from the service.
+- **`terminationGracePeriodSeconds`**: Set this high enough to outlast the longest expected request (e.g., long-poll or file upload); the controller's own drain timeout should be slightly shorter.
+- **PodDisruptionBudget**: Set `minAvailable` to at least 1 so the rollout never takes all replicas down simultaneously.
+- **`maxUnavailable: 0`** in the Deployment ensures a new pod is healthy before an old one is terminated, keeping capacity constant.
+- **Connection draining at the LB layer**: Cloud load balancers (AWS NLB/ALB, GCP LB) support connection draining; configure deregistration delay to overlap with the `preStop` sleep.
+- After the rollout, validate with metrics: watch for 502/504 spikes and `upstream_response_time` anomalies in the controller's access logs.
+
+---
+
+### Q: How would you implement and test a WAF policy at the Gateway layer, and what are the operational pitfalls of doing so?
+
+A WAF at the Gateway layer is typically implemented via an extension point: an `ExtensionRef` in an `HTTPRoute` filter (Gateway API) or a custom annotation/sidecar (Ingress). Providers like Envoy Gateway support `SecurityPolicy` CRDs that attach OWASP Core Rule Set (CRS) logic; others delegate to an external WAF (AWS WAF, Cloudflare, ModSecurity sidecar).
+
+**Implementation steps:**
+1. Deploy the WAF as a `SecurityPolicy` (or equivalent) referencing the `Gateway` or specific `HTTPRoute`.
+2. Start in **detection mode**: log rule matches without blocking, then analyze false-positive rate against real traffic for at least one traffic cycle.
+3. Promote to **prevention mode** rule-by-rule, not wholesale, to limit blast radius.
+4. Write integration tests (OWASP ZAP, Nikto, or custom scripts) in your CI pipeline that assert known attack payloads (SQLi, XSS, path traversal) are blocked and return 403.
+
+**Operational pitfalls:**
+- **False positives on legitimate traffic** (e.g., JSON bodies triggering SQL injection rules); require a tuning process and a rule-exclusion workflow.
+- **Latency overhead**: Regex-heavy rule evaluation adds CPU and latency; benchmark at production request rates before enabling.
+- **Rule-set drift**: CRS updates can introduce new false positives; treat CRS version bumps as deployable changes with a validation gate.
+- **Bypass via chunked encoding or HTTP/2 normalization quirks**: Verify the WAF engine normalizes requests before inspection.
