@@ -4735,3 +4735,63 @@ Cost attribution in a shared EKS cluster requires tagging, metering, and allocat
 1. **API Priority and Fairness (APF)**: Created a dedicated `FlowSchema` for event writes with a low `nominalConcurrencyShares` value so event floods are rate-limited without impacting higher-priority flows (Lease updates, node heartbeats).
 2. **Namespace-level event quotas**: Added `count/events: 1000` to every namespace's default ResourceQuota template enforced at namespace creation via Kyverno.
 3. **Event TTL tuning**: Set `--
+
+
+---
+
+## 🗓️ Added 2026-10-21 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-21 19:06 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level IPv6 migration — including dual-stack transition, service compatibility, and CNI configuration — across a large existing cluster fleet?
+
+**Key points an interviewer wants to hear:**
+
+- EKS IPv6 mode is set at cluster creation time and cannot be toggled post-hoc, so fleet migration requires standing up new IPv6-enabled clusters and migrating workloads rather than in-place reconfiguration; treat it as a blue/green cluster replacement at fleet scale.
+- In IPv6 clusters, the VPC CNI assigns each pod a unique IPv6 address from the VPC CIDR, eliminating secondary IP exhaustion pressure — but requires the VPC and all associated subnets to have IPv6 CIDRs assigned and the relevant route tables updated.
+- Audit all workloads and third-party controllers for hardcoded `0.0.0.0` binds, IPv4-literal addresses in config, and libraries that default to IPv4 — common culprits include Prometheus scrape configs, kube-proxy rules, and CNI plugins with IPv4 assumptions.
+- Services exposed externally via ALB/NLB require dual-stack target group configuration; the AWS Load Balancer Controller supports `ipv6` and `dualstack` address types via annotations (`aws-load-balancer-ip-address-type: dualstack`).
+- Use Istio or Cilium for mTLS and NetworkPolicy enforcement, verifying both handle IPv6 flow tables correctly — Cilium's eBPF datapath has mature dual-stack support, while older iptables-based kube-proxy modes require explicit IPv6 chains.
+- Validate DNS resolution by ensuring CoreDNS returns AAAA records correctly; configure `dnsPolicy` and `ndots` carefully to avoid IPv4-first fallback latency on dual-stack resolvers.
+- Gate fleet migration through a Terraform module that enforces `ip_family = ipv6` and runs integration tests (connectivity, DNS, egress to AWS services over IPv6 endpoints) before promoting a cluster to production.
+
+---
+
+### Q: A production EKS cluster's AWS Node Termination Handler (NTH) is correctly intercepting Spot interruption notices, but applications are still seeing dropped in-flight requests during Spot reclamation events. Walk through your systematic diagnosis and remediation approach.
+
+**Key points an interviewer wants to hear:**
+
+- First confirm NTH is operating in **Queue mode** (SQS-based) rather than IMDS mode — queue mode provides up to two minutes of notice via EventBridge → SQS, while IMDS mode only fires on the individual node and has no queuing guarantee across nodes.
+- Verify NTH is actually cordoning and draining the node within the interruption window: check NTH pod logs for `cordon`/`drain` events and cross-reference Kubernetes node events; a common issue is the NTH pod itself being on the affected node with insufficient priority class, causing it to be evicted before completing the drain.
+- Inspect whether pods have `preStop` hooks with adequate sleep durations (typically 5–15 seconds) to allow load balancer target deregistration to propagate before the process receives SIGTERM — ALB target deregistration delay defaults to 300 seconds but should be tuned to ~30 seconds for fast Spot response.
+- Check that `terminationGracePeriodSeconds` on the pod spec is long enough to encompass both the `preStop` hook duration and in-flight request completion; a common misconfiguration is a 30-second grace period with a 20-second `preStop` hook, leaving only 10 seconds for actual shutdown.
+- Validate that PodDisruptionBudgets are configured correctly so that NTH drain does not evict the last available replica — if the PDB blocks eviction and NTH's drain timeout expires, NTH may force-delete pods, causing hard drops.
+- For gRPC or long-lived connections, ensure the upstream load balancer (ALB/NLB) is correctly propagating connection draining; NLB deregistration delay should be set explicitly and matched to typical connection lifetimes.
+- Implement Karpenter's `terminationGracePeriod` on NodePool as a backstop, and consider mixed instance type pools to reduce simultaneous Spot reclamation blast radius across an availability zone.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing multi-cluster fleet observability — including unified metrics, logs, distributed traces, and alerting — without creating centralised observability bottlenecks or unbounded cost?
+
+**Key points an interviewer wants to hear:**
+
+- Adopt a **federated observability model**: each cluster runs local collection agents (Prometheus with remote write, Fluent Bit, OpenTelemetry Collector) that pre-aggregate or sample before forwarding to a central backend — avoiding the "ship everything" anti-pattern that causes egress cost spikes and ingest bottlenecks.
+- Use **Prometheus remote write with metric relabelling** to drop high-cardinality, low-value series at the source; enforce recording rules per cluster to pre-compute SLI/SLO metrics before remote write, so the central TSDB receives only aggregated signals rather than raw scrape data.
+- For logs, deploy Fluent Bit as a DaemonSet with structured log parsing and **sampling rules** (e.g., drop DEBUG-level logs for non-error paths in production) before forwarding to Amazon OpenSearch or an S3-backed solution like Athena; use lifecycle policies aggressively on S3 to control retention cost.
+- Centralise **distributed tracing** via an OpenTelemetry Collector gateway deployed per cluster that batches and tail-samples spans (keeping 100% of error traces, 1–5% of success traces) before exporting to AWS X-Ray or a Jaeger/Tempo backend.
+- Implement **per-cluster alerting** for latency, error rates, and saturation SLOs locally using Alertmanager with inhibition rules, reserving the central alerting layer for cross-cluster correlated incidents (e.g., AZ-wide degradation affecting multiple clusters).
+- Enforce observability agent resource limits and PriorityClasses so collector DaemonSets do not compete with workload pods under node pressure; monitor the collectors themselves with a separate lightweight scrape target.
+- Use AWS Managed Prometheus (AMP) workspaces per environment tier (dev/staging/prod) with cross-workspace federation queries for fleet-wide dashboards in Grafana, avoiding a single workspace that becomes a throughput or cost hotspot.
+
+---
+
+### Q: Describe a situation where a Kubernetes admission webhook deployed in an EKS cluster caused a cascading control plane availability incident, and explain how you diagnosed, mitigated, and prevented recurrence.
+
+**Key points an interviewer wants to hear:**
+
+- In a real or representative scenario: a newly deployed validating admission webhook had `failurePolicy: Fail` and a `namespaceSelector` that unintentionally matched `kube-system`; when the webhook backend became unavailable due to a misconfigured PDB blocking a rolling update, all control-plane-initiated pod mutations (including CoreDNS updates) were rejected, cascading into DNS unavailability across the cluster.
+- **Diagnosis steps**: check `kubectl get validatingwebhookconfigurations` and `mutatingwebhookconfigurations` for overly broad `namespaceSelector` or `objectSelector` rules; examine API server audit logs for `admission webhook … rejected` entries; correlate webhook backend pod status with the onset of failures.
+- **Immediate mitigation**: patch the webhook configuration to `failurePolicy: Ignore` using `kubectl patch` (which itself must succeed — if the API server is fully wedged, use a breakglass kubeconfig with cluster-admin bound to a non-webhook-intercepted user, or temporarily delete the webhook configuration).
+- Root cause was the combination of `failurePolicy: Fail` + broad selector + no high-availability deployment for the webhook backend (single replica, no PDB, no topology spread).
+- **Remediation**: redeploy the webhook backend as a minimum 3-replica deployment with a PDB (`minAvailable: 2`), topology spread across AZs, and a dedicated PriorityClass; add an explicit `namespaceSelector` excluding `kube-system` and `kube-public`.
+- **Prevention**: enforce via OPA/Gatekeeper policy that any webhook configuration with `failurePolicy: Fail` must have a `namespaceSelector` excluding system namespaces; add webhook backend health

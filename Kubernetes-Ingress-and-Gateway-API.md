@@ -592,3 +592,63 @@ A WAF at the Gateway layer is typically implemented via an extension point: an `
 - **Latency overhead**: Regex-heavy rule evaluation adds CPU and latency; benchmark at production request rates before enabling.
 - **Rule-set drift**: CRS updates can introduce new false positives; treat CRS version bumps as deployable changes with a validation gate.
 - **Bypass via chunked encoding or HTTP/2 normalization quirks**: Verify the WAF engine normalizes requests before inspection.
+
+
+---
+
+## 🗓️ Added 2026-10-21 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-21 19:07 -->
+
+### Q: How would you configure and operationalize header-based routing with Gateway API HTTPRoute, and what pitfalls should you watch for in production?
+
+Header-based routing is expressed in HTTPRoute via `matches[].headers` fields, supporting exact, prefix, and regex match types. A common pattern is routing canary traffic by injecting an `X-Canary: true` header at the client or via a middleware, then matching that header to a separate backend. **Key pitfalls:**
+
+- **Regex support is controller-dependent** — the Gateway API spec marks regex as an optional feature (`RegularExpression` conformance level), so verify your implementation actually supports it before relying on it.
+- **Header order and case sensitivity** — HTTP/2 lowercases headers, but HTTP/1.1 does not; ensure your match values are lowercase and that the upstream service doesn't strip or rename headers.
+- **Security exposure** — if external clients can spoof the routing header, they can target internal or canary backends directly; always strip untrusted header values at the Gateway before re-evaluating them, or use signed tokens instead.
+- **Observability gap** — header matches are invisible in standard access logs; instrument your controller's metrics or add a response header echoing the matched route for traceability.
+- Test routing logic with synthetic traffic using tools like `curl -H` in staging, and use `httproute` status conditions (`ResolvedRefs`, `Accepted`) to confirm the controller has reconciled the intended configuration.
+
+---
+
+### Q: What is GatewayClass and how does its lifecycle affect cluster-wide routing availability?
+
+`GatewayClass` is a cluster-scoped resource that names and configures an Ingress/Gateway controller implementation, analogous to `StorageClass` for volumes. Each `Gateway` references exactly one `GatewayClass`; if the class is deleted or its controller is uninstalled, all `Gateway` objects referencing it will lose reconciliation and existing data-plane configuration may become stale or entirely removed, depending on the implementation. **Operational implications:**
+
+- **Controller uninstall order matters** — always drain and migrate `Gateway`/`HTTPRoute` resources before removing a `GatewayClass` to avoid traffic blackholes.
+- **`controllerName` field is immutable** — changing the backing controller requires creating a new `GatewayClass` and migrating resources, not editing the existing one.
+- **Status propagation** — the `Accepted` condition on `GatewayClass` tells you whether the responsible controller is running; use this in readiness checks and alerting.
+- **Multi-implementation clusters** — you can run multiple `GatewayClass` objects side-by-side (e.g., internal Envoy Gateway and external NGINX), but teams must coordinate naming conventions to prevent accidental cross-attachment.
+
+Always treat `GatewayClass` as an infrastructure-level resource managed by platform engineers, with RBAC restricting who can create or modify it.
+
+---
+
+### Q: How would you handle a scenario where Ingress or HTTPRoute changes are deployed continuously by CI/CD and cause transient 502 errors in production?
+
+Transient 502s during rapid route updates typically stem from the controller's reconciliation loop applying partial state — e.g., updating the upstream list before the route rule is consistent — or from backend pods not yet being ready when the route is activated. **Mitigation strategy:**
+
+- **Synchronize route rollout with deployment readiness** — use `kubectl rollout status` or wait on `Deployment` readiness gates before applying new `HTTPRoute` manifests in the pipeline.
+- **Use `ReferenceGrant` and service pre-creation** — ensure the target `Service` and its `Endpoints` exist and are healthy before the route references them; an HTTPRoute pointing at a service with zero ready endpoints will 502 immediately.
+- **Progressive apply with health checks** — apply route changes in stages (e.g., shift 10% weight first, validate error rate, then shift 100%) rather than atomic cutover.
+- **Controller reconciliation batching** — some controllers (e.g., Envoy-based) batch xDS updates; understand your controller's push interval and tune it to reduce partial-state windows.
+- **Canary the route change itself** — treat the `HTTPRoute` manifest as an artifact with a version, deploy a shadow copy alongside the existing one, and use weight-based splitting to validate before full promotion.
+
+Instrument your CI/CD pipeline with a post-deploy smoke test that asserts HTTP 200 on critical paths within a configurable timeout before marking a deployment successful.
+
+---
+
+### Q: A team reports that their Ingress resource works correctly in one namespace but identical configuration fails silently in another. Walk me through your diagnostic approach.
+
+"Silent failure" in a second namespace usually means the Ingress is accepted by the API server but ignored or misconfigured at the controller level. **Diagnostic steps:**
+
+1. **Check Ingress status** — `kubectl get ingress -n <ns> -o yaml`; a missing or empty `status.loadBalancer.ingress` field indicates the controller has not reconciled the resource, often due to a missing or mismatched `ingressClassName`.
+2. **Verify IngressClass and controller scope** — confirm the `IngressClass` referenced exists cluster-wide, and check whether the controller is configured with `--watch-namespace` or `--ingress-class` flags that exclude the failing namespace.
+3. **Inspect controller logs** — filter for the failing namespace and Ingress name; common messages include "ignoring ingress without class annotation," namespace access errors, or RBAC denial.
+4. **RBAC audit** — the controller's `ServiceAccount` must have `get/list/watch` on `Ingress` and `Secret` resources in every namespace it serves; a missing `RoleBinding` in the new namespace silently blocks reconciliation.
+5. **Secret and TLS availability** — if TLS is configured, confirm the referenced `Secret` exists in the same namespace as the Ingress; controllers do not cross namespaces for secrets unless explicitly allowed.
+6. **Annotation parity** — diff annotations between working and failing namespaces; some controllers require namespace-level annotations or `ConfigMap` entries to enable features like auth or rewrites.
+7. **NetworkPolicy** — confirm no `NetworkPolicy` in the new namespace blocks traffic from the Ingress controller's pod namespace to the backend pods.
+
+Resolve by correcting the `ingressClassName`, adding required RBAC, and ensuring all referenced secrets are present, then verify with an end-to-end `curl` through the Ingress hostname.

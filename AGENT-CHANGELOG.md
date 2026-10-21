@@ -679,3 +679,21 @@ _Committed & pushed: yes_
 - How would you implement and test a WAF policy at the Gateway layer, and what are the operational pitfalls of doing so?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-21 19:07:20
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8305 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level IPv6 migration — including dual-stack transition, service compatibility, and CNI configuration — across a large existing cluster fleet?
+- A production EKS cluster's AWS Node Termination Handler (NTH) is correctly intercepting Spot interruption notices, but applications are still seeing dropped in-flight requests during Spot reclamation events. Walk through your systematic diagnosis and remediation approach.
+- How do you design an EKS strategy for managing and enforcing multi-cluster fleet observability — including unified metrics, logs, distributed traces, and alerting — without creating centralised observability bottlenecks or unbounded cost?
+- Describe a situation where a Kubernetes admission webhook deployed in an EKS cluster caused a cascading control plane availability incident, and explain how you diagnosed, mitigated, and prevented recurrence.
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6709 chars)
+- How would you configure and operationalize header-based routing with Gateway API HTTPRoute, and what pitfalls should you watch for in production?
+- What is GatewayClass and how does its lifecycle affect cluster-wide routing availability?
+- How would you handle a scenario where Ingress or HTTPRoute changes are deployed continuously by CI/CD and cause transient 502 errors in production?
+- A team reports that their Ingress resource works correctly in one namespace but identical configuration fails silently in another. Walk me through your diagnostic approach.
+
+_Committed & pushed: yes_
