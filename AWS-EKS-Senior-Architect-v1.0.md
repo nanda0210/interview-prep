@@ -4795,3 +4795,73 @@ Cost attribution in a shared EKS cluster requires tagging, metering, and allocat
 - Root cause was the combination of `failurePolicy: Fail` + broad selector + no high-availability deployment for the webhook backend (single replica, no PDB, no topology spread).
 - **Remediation**: redeploy the webhook backend as a minimum 3-replica deployment with a PDB (`minAvailable: 2`), topology spread across AZs, and a dedicated PriorityClass; add an explicit `namespaceSelector` excluding `kube-system` and `kube-public`.
 - **Prevention**: enforce via OPA/Gatekeeper policy that any webhook configuration with `failurePolicy: Fail` must have a `namespaceSelector` excluding system namespaces; add webhook backend health
+
+
+---
+
+## 🗓️ Added 2026-10-22 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-22 19:03 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level SBOM (Software Bill of Materials) generation, storage, and policy enforcement across a large cluster fleet?
+
+**Model Answer:**
+
+- **Generation at build time:** Integrate SBOM generation (Syft, Trivy, or AWS Inspector SBOM export) into CI pipelines, producing CycloneDX or SPDX artifacts for every container image pushed to ECR.
+- **Attestation via Sigstore/Cosign:** Attach SBOMs as OCI attestations to image digests in ECR, so the artifact travels with the image and is tamper-evident.
+- **Admission enforcement:** Deploy a policy controller (Kyverno or OPA/Gatekeeper) that verifies an SBOM attestation exists and was signed by a trusted key before allowing a pod to schedule; images without a valid attestation are rejected.
+- **Continuous vulnerability correlation:** Feed stored SBOMs into AWS Inspector or a third-party scanner (Grype) on a schedule to detect newly disclosed CVEs against already-deployed workloads without requiring a redeploy.
+- **Centralised storage and auditability:** Store SBOMs in S3 with versioning and object lock; tag them with cluster name, namespace, and workload identity to satisfy compliance queries (SOC 2, FedRAMP).
+- **Governance dashboards:** Aggregate SBOM coverage percentage and open CVE counts per team via a Security Hub custom integration, enabling FinOps-style chargeback of remediation cost to owning teams.
+- **Key trade-off:** Enforcing hard-block admission on missing SBOMs requires a mature CI culture; a phased rollout starting with audit mode prevents disruption while driving adoption.
+
+---
+
+### Q: A production EKS cluster's aws-load-balancer-controller is healthy, but newly created Ingress objects are silently not receiving an ALB — no address is assigned and no error appears in the Ingress status. How do you systematically diagnose and resolve this?
+
+**Model Answer:**
+
+The absence of both an address *and* an error is the critical signal — the controller is either not reconciling the object or is failing before emitting a status update.
+
+1. **Controller logs first:** `kubectl logs -n kube-system deploy/aws-load-balancer-controller` — look for `Reconcile` entries for the specific Ingress name; their absence means the watch or informer is not seeing the object.
+2. **IngressClass mismatch:** Confirm `spec.ingressClassName: alb` is set on the Ingress and that an `IngressClass` object named `alb` with `controller: ingress.k8s.aws/alb` exists; without this match the controller ignores the object entirely.
+3. **Webhook and RBAC:** Check whether a mutating/validating webhook is rejecting or mutating the Ingress before the controller sees it; also verify the controller's ServiceAccount has the necessary IRSA permissions (`elasticloadbalancing:*`, `ec2:Describe*`, `wafv2:*`, etc.).
+4. **Subnet tagging:** Confirm subnets intended for the ALB carry the tag `kubernetes.io/role/elb: 1` (public) or `kubernetes.io/role/internal-elb: 1` (private); without these the controller cannot select subnets and silently skips provisioning.
+5. **Annotation conflicts:** Check for deprecated annotations from the old `kubernetes-sigs/aws-alb-ingress-controller` that conflict with the new controller's expected annotation prefix (`alb.ingress.kubernetes.io/`).
+6. **Resource limits on the controller pod:** A memory-constrained controller can skip reconcile loops without crashing; verify HPA or resource headroom.
+7. **Resolution:** After correcting the IngressClass or subnet tags, trigger re-reconciliation by adding a benign annotation to the Ingress; the controller will pick it up and emit provisioning events within seconds.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing secure, scalable container image supply chain integrity — covering signing, verification, and provenance — across dozens of teams and hundreds of repositories?
+
+**Model Answer:**
+
+- **Keyless signing with Sigstore/Cosign:** Use Cosign in keyless mode backed by AWS OIDC (or GitHub Actions OIDC) so that each CI job signs images with short-lived certificates tied to the job's identity, eliminating long-lived key management.
+- **ECR as the single registry:** Enforce that all images must be stored in organisation-managed ECR repositories by policy; block `imagePullPolicy: Always` from external registries via OPA/Gatekeeper or Kyverno `ClusterPolicy`.
+- **Admission-time verification:** Deploy Kyverno's `verifyImages` rule or Connaisseur as a mutating+validating webhook; it verifies the Cosign signature and optionally checks provenance attestations (SLSA build level) before the pod is admitted, and it rewrites the image tag to a digest to prevent tag mutation attacks.
+- **Provenance via SLSA:** Configure CI (GitHub Actions with `slsa-github-generator` or AWS CodeBuild) to produce SLSA Build Level 2+ provenance, attached as an OCI attestation alongside the image.
+- **Policy tiers:** Define tiered enforcement: critical namespaces (`payments`, `auth`) require SLSA L2 + signature; standard namespaces require signature only; development namespaces are audit-only — enforced via namespace labels and Kyverno `match` selectors.
+- **Golden image programme:** Maintain a curated set of hardened base images, signed and published from a central pipeline; teams inherit signing automatically by building FROM the approved base.
+- **Observability:** Emit admission webhook decision events to CloudWatch and aggregate into a Security Hub custom action for compliance evidence and anomaly alerting on unsigned image admission attempts.
+
+---
+
+### Q: Describe a situation where a Karpenter-managed EKS cluster performed correctly at steady state but exhibited severe node churn during a rolling deployment, and explain how you diagnosed and resolved it.
+
+**Model Answer:**
+
+**Situation:** During a rolling deployment of a large stateless service (500+ replicas), Karpenter was simultaneously launching and terminating dozens of nodes within minutes. The deployment progress stalled at ~60% and nodes were cycling in a `NotReady`→`Ready`→`terminating` loop, causing repeated pod scheduling failures.
+
+**Diagnosis:**
+- Karpenter's `NodePool` had `spec.disruption.consolidationPolicy: WhenUnderutilized` with a very short `consolidateAfter: 30s`; while the deployment was rolling, partially filled nodes (holding only a few old-version pods) were immediately flagged as consolidation candidates and terminated before new pods could fully replace them.
+- The deployment's `maxUnavailable: 25%` and `maxSurge: 25%` created a wave of partially-utilized nodes that Karpenter's consolidation loop treated as waste.
+- Karpenter events showed `Consolidation: node is underutilized` firing on nodes that had only recently become underutilized due to the rolling replacement, not genuine idle waste.
+
+**Resolution:**
+1. Set `spec.disruption.consolidateAfter: 10m` to give the rolling deployment time to fill nodes before they were consolidation candidates.
+2. Added a `do-not-disrupt` annotation (`karpenter.sh/do-not-disrupt: "true"`) applied by a pre-deployment Job to nodes that held live traffic pods; a post-deployment Job removed the annotation.
+3. Tuned `minReadySeconds` and `readinessGate` on the Deployment so Karpenter's bin-packing considered pods truly ready before evaluating utilization.
+4. Introduced a `NodePool` budget (`spec.disruption.budgets`) limiting voluntary disruptions to 10% of nodes per hour, preventing mass consolidation during peak change windows.
+
+**Outcome:** Node churn dropped to near zero during rolling deployments, and deployment completion time normalized from 45 minutes back to the expected 8 minutes.

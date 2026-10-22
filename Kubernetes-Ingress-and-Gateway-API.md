@@ -652,3 +652,66 @@ Instrument your CI/CD pipeline with a post-deploy smoke test that asserts HTTP 2
 7. **NetworkPolicy** — confirm no `NetworkPolicy` in the new namespace blocks traffic from the Ingress controller's pod namespace to the backend pods.
 
 Resolve by correcting the `ingressClassName`, adding required RBAC, and ensuring all referenced secrets are present, then verify with an end-to-end `curl` through the Ingress hostname.
+
+
+---
+
+## 🗓️ Added 2026-10-22 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-22 19:03 -->
+
+### Q: How would you design an observability stack specifically for Ingress/Gateway-layer traffic, and what signals matter most?
+
+**Answer:**
+- **Golden signals to capture at the gateway**: request rate, error rate (4xx vs 5xx split), latency percentiles (p50/p95/p99), and active connection count. Distinguish upstream errors (backend) from gateway errors (routing, TLS, auth).
+- **Access logs**: emit structured JSON logs with fields like `route`, `backend`, `status`, `latency_ms`, `upstream_pod`, and `tls_version` so logs are queryable and correlatable with traces.
+- **Metrics**: most controllers expose Prometheus metrics natively (e.g., `nginx_ingress_controller_requests_total`, Envoy's `cluster.upstream_rq_*`). Create per-route/per-backend dashboards so you can isolate which HTTPRoute or Ingress rule is degraded.
+- **Distributed tracing**: propagate `traceparent`/`x-request-id` headers at the gateway layer and sample traces into a backend (Jaeger, Tempo). This links a gateway 502 to a specific backend span.
+- **Alerting thresholds**: alert on error-rate spikes above baseline *per route*, not only globally—a noisy tenant must not hide a critical service degrading.
+- **Pitfall**: many teams only monitor the controller pod's health, missing per-upstream latency degradation that only appears in backend-level metrics.
+
+---
+
+### Q: How do you manage conflicting Ingress or HTTPRoute rules when multiple teams deploy resources targeting the same hostname or path, and how does the Gateway API handle conflict resolution?
+
+**Answer:**
+The Gateway API defines a deterministic **conflict resolution** model: if two HTTPRoutes match the same hostname and path with equal specificity, the older resource wins (by `creationTimestamp`); ties are broken lexicographically by namespace/name. Nginx Ingress and similar controllers have historically merged rules silently or applied last-write-wins, which is unpredictable at scale.
+
+Key practices:
+- **Use ReferenceGrants and namespace isolation** so routes from different teams attach only to Gateways they are permitted to use, reducing the blast radius of conflicts.
+- **Specificity rules**: more specific path matches (`/api/v2/orders` beats `/api`) and more specific header matches take precedence; understanding this prevents unexpected routing.
+- **Admission webhooks / policy controllers** (e.g., OPA Gatekeeper) can enforce hostname uniqueness at admission time rather than discovering conflicts at runtime.
+- **Status conditions** on HTTPRoute (`ResolvedRefs`, `Accepted`) will reflect conflict or rejection—monitoring these conditions via alerts or a controller-runtime reconciler is essential for fast detection.
+- **Behavioral pitfall**: a conflicting Ingress rule being silently dropped means traffic silently 404s; teams rarely check controller logs for "skipped" annotations.
+
+---
+
+### Q: What are the architectural implications of using an external load balancer (e.g., AWS NLB/ALB) in front of an in-cluster Ingress controller versus relying solely on the cloud provider's Ingress controller (e.g., AWS Load Balancer Controller)?
+
+**Answer:**
+**In-cluster controller behind a cloud LB (NLB → nginx/Envoy):**
+- Full control over routing logic, middleware (auth, rate-limiting, header manipulation), and upgrade cadence.
+- NLB operates at L4, so TLS termination and HTTP routing happen inside the cluster—giving you richer, controller-native features.
+- Additional network hop increases latency slightly; the in-cluster controller becomes a potential bottleneck and must be scaled horizontally.
+- Easier portability—the same controller config works on any cloud or on-prem.
+
+**Cloud-native controller (ALB Ingress / AWS LBC):**
+- TLS termination and routing offloaded to a managed service—reduces operational burden and leverages AWS WAF, ACM, and Shield natively.
+- ALB is provisioned *per Ingress* by default, which causes cost explosion and IP exhaustion in multi-service clusters without IngressGroup annotations to merge rules.
+- Feature set is gated by what AWS exposes via annotations; advanced routing (e.g., gRPC, traffic mirroring) may be unavailable or require workarounds.
+- Tighter AWS lock-in; migrating to another cloud or on-prem requires rewriting Ingress annotations entirely.
+
+**Decision criteria**: choose cloud-native when managed TLS, WAF integration, and reduced ops overhead outweigh portability and advanced feature needs; choose in-cluster when you need fine-grained control, multi-cloud portability, or features the cloud LB doesn't support.
+
+---
+
+### Q: Walk me through how you would safely migrate a production workload from Kubernetes Ingress to Gateway API HTTPRoute with zero downtime.
+
+**Answer:**
+1. **Audit existing Ingress**: export all rules, annotations, and TLS secrets; map each annotation to its Gateway API equivalent (e.g., `nginx.ingress.kubernetes.io/rewrite-target` → HTTPRoute `URLRewrite` filter). Identify any annotations with no direct equivalent—these need custom policies or `ExtensionRef`.
+2. **Deploy a parallel Gateway**: install the Gateway API CRDs and configure a new `Gateway` resource (potentially using the same controller if it supports both APIs, e.g., ingress-nginx ≥ 1.9 or Cilium). Point it to a *separate* cloud LB or a second listener so it handles no live traffic yet.
+3. **Create HTTPRoutes mirroring Ingress rules**: configure identical hostnames and paths on the new HTTPRoutes. Use traffic mirroring (`RequestMirror` filter) from the old Ingress to shadow-copy requests to the new backend—validate behavior without affecting production responses.
+4. **Shift traffic incrementally**: update DNS (weighted routing, or TTL-lowered A records) to send a small percentage of traffic to the new Gateway LB. Monitor error rate, latency, and backend logs in parallel.
+5. **Validate and cut over**: once metrics match, shift 100% of DNS traffic to the new Gateway. Keep the old Ingress resource live (but receiving no traffic) for a rollback window—revert DNS if issues arise within the rollback period.
+6. **Cleanup**: delete old Ingress resources and decommission the old controller or listener. Remove deprecated annotation-based logic and document the new HTTPRoute-based configuration in your GitOps repo.
+7. **Pitfalls**: session-affinity annotations, custom error pages, and CORS headers are common gaps; test these explicitly during the shadow phase.

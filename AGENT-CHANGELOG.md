@@ -697,3 +697,21 @@ _Committed & pushed: yes_
 - A team reports that their Ingress resource works correctly in one namespace but identical configuration fails silently in another. Walk me through your diagnostic approach.
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-22 19:03:54
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7771 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level SBOM (Software Bill of Materials) generation, storage, and policy enforcement across a large cluster fleet?
+- A production EKS cluster's aws-load-balancer-controller is healthy, but newly created Ingress objects are silently not receiving an ALB — no address is assigned and no error appears in the Ingress status. How do you systematically diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing secure, scalable container image supply chain integrity — covering signing, verification, and provenance — across dozens of teams and hundreds of repositories?
+- Describe a situation where a Karpenter-managed EKS cluster performed correctly at steady state but exhibited severe node churn during a rolling deployment, and explain how you diagnosed and resolved it.
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6487 chars)
+- How would you design an observability stack specifically for Ingress/Gateway-layer traffic, and what signals matter most?
+- How do you manage conflicting Ingress or HTTPRoute rules when multiple teams deploy resources targeting the same hostname or path, and how does the Gateway API handle conflict resolution?
+- What are the architectural implications of using an external load balancer (e.g., AWS NLB/ALB) in front of an in-cluster Ingress controller versus relying solely on the cloud provider's Ingress controller (e.g., AWS Load Balancer Controller)?
+- Walk me through how you would safely migrate a production workload from Kubernetes Ingress to Gateway API HTTPRoute with zero downtime.
+
+_Committed & pushed: yes_
