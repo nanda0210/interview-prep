@@ -715,3 +715,21 @@ _Committed & pushed: yes_
 - Walk me through how you would safely migrate a production workload from Kubernetes Ingress to Gateway API HTTPRoute with zero downtime.
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-23 18:53:58
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7694 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level graceful shutdown and SIGTERM handling to guarantee zero in-flight request loss during rolling deployments?
+- A production EKS cluster's Karpenter-provisioned nodes are consistently failing to register with the API server within the 10-minute node registration timeout, causing repeated node churn. How do you systematically diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level FIPS 140-2/3 compliance — including node OS, container runtime, SDK, and network transport layers?
+- Describe a situation where EKS pod scheduling appeared correct — pods were `Running` and passing health checks — but end-to-end application latency was severely degraded due to a topology and data-locality mismatch. How did you identify and fix it?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (7257 chars)
+- How do you configure and enforce HTTPS redirection and HSTS at the Ingress/Gateway layer, and what subtle failure modes exist?
+- How does the Gateway API's `ReferenceGrant` resource work, and what attack surface does it close compared to classic Ingress?
+- How would you design a multi-region active-active architecture where Kubernetes Gateway API resources are synchronized across clusters, and what consistency problems arise?
+- A security audit flags that your Ingress controller pods are running with cluster-admin privileges. How do you remediate this, and what is the minimum permission set the controller actually needs?
+
+_Committed & pushed: yes_

@@ -4865,3 +4865,85 @@ The absence of both an address *and* an error is the critical signal — the con
 4. Introduced a `NodePool` budget (`spec.disruption.budgets`) limiting voluntary disruptions to 10% of nodes per hour, preventing mass consolidation during peak change windows.
 
 **Outcome:** Node churn dropped to near zero during rolling deployments, and deployment completion time normalized from 45 minutes back to the expected 8 minutes.
+
+
+---
+
+## 🗓️ Added 2026-10-23 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-23 18:53 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level graceful shutdown and SIGTERM handling to guarantee zero in-flight request loss during rolling deployments?
+
+**Model Answer:**
+
+Graceful shutdown failures are one of the most common sources of dropped requests during rolling deployments, and the fix spans both Kubernetes configuration and application behavior.
+
+**Key design points:**
+
+- **terminationGracePeriodSeconds** must be tuned per workload — set it longer than the longest expected in-flight request or connection drain time; the default 30s is often insufficient for slow drainers.
+- **preStop hooks** (typically `sleep 5–15s`) compensate for the race condition between Kubernetes removing the Pod from Endpoints and the load balancer (ALB/NLB) propagating the endpoint removal — without this, traffic continues arriving after SIGTERM.
+- Applications must explicitly handle SIGTERM: drain in-flight requests, stop accepting new connections, then exit cleanly. Libraries like Go's `http.Server.Shutdown()` or Node's `server.close()` are the right primitives.
+- For ALB target groups, configure **deregistration delay** (default 300s, tune down to 30–60s for fast-cycling services) and verify the target group health check reflects draining state.
+- Use **readinessGates** (e.g., `aws.amazon.com/target-health`) so pods are removed from ALB target groups before the rolling update proceeds further, preventing new deployments from racing ahead of deregistration.
+- Enforce these patterns via OPA/Gatekeeper policies: require `preStop` hooks, minimum `terminationGracePeriodSeconds`, and reject Deployments that set `lifecycle: {}` with no hooks.
+- Validate end-to-end by injecting rolling deploys under synthetic load and measuring 5xx rates and connection reset counts using ALB access logs and application-level metrics.
+
+---
+
+### Q: A production EKS cluster's Karpenter-provisioned nodes are consistently failing to register with the API server within the 10-minute node registration timeout, causing repeated node churn. How do you systematically diagnose and resolve this?
+
+**Model Answer:**
+
+Node registration failures create a churn loop — Karpenter provisions, times out, terminates, and retries — which can exhaust EC2 quotas and leave workloads unscheduled.
+
+**Diagnosis steps:**
+
+1. **EC2 System Log / Console Output**: Retrieve via `aws ec2 get-console-output` — reveals early bootstrap failures (disk full, cloud-init errors, user-data parse failures).
+2. **SSM or direct node access**: If nodes are partially up, check `/var/log/cloud-init-output.log` and `/var/log/messages` for bootstrap script errors.
+3. **Karpenter controller logs**: Look for `NodeClaim` events showing repeated `Terminating` due to registration timeout — correlate timestamps with EC2 launch events.
+4. **IAM & instance profile**: Confirm the `KarpenterNodeRole` has `AmazonEKSWorkerNodePolicy`, `AmazonEC2ContainerRegistryReadOnly`, `AmazonEKS_CNI_Policy` — missing permissions are a common cause.
+5. **Bootstrap config / user-data**: Validate the EKS optimized AMI bootstrap arguments — especially `--apiserver-endpoint` and `--b64-cluster-ca` — incorrect values cause `kubelet` to fail TLS handshake with the API server.
+6. **Security Groups / NACLs**: Confirm nodes can reach the EKS API server endpoint on port 443 and that the cluster security group allows node-to-control-plane communication.
+7. **VPC CNI initialization**: If the CNI fails to initialize (e.g., IMDS unreachable, prefix delegation misconfiguration), kubelet will register but pods never schedule, which can look like registration failure.
+
+**Resolution**: Fix the root cause (most commonly: user-data misconfiguration, missing IAM permissions, or SG rules), then use Karpenter's `EC2NodeClass` to pin a known-good AMI ID during incident recovery, and set alerts on `karpenter_nodes_terminating` metric spikes.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level FIPS 140-2/3 compliance — including node OS, container runtime, SDK, and network transport layers?
+
+**Model Answer:**
+
+FIPS compliance in EKS is a layered concern — no single control achieves it; every layer from the OS kernel to the application TLS library must be addressed.
+
+**Strategy by layer:**
+
+- **Node OS**: Use **Amazon Linux 2023 FIPS mode** or **Bottlerocket with FIPS enabled** — these boot with a FIPS-validated kernel module (`kernel-fips`) and restrict the kernel crypto subsystem to approved algorithms. Enforce via Karpenter `EC2NodeClass` AMI selection or managed node group custom AMIs.
+- **Container runtime**: `containerd` itself doesn't do crypto-heavy operations, but validate that the Go runtime it's compiled against uses BoringCrypto (AWS's FIPS-validated Go crypto module).
+- **Application SDKs**: Require use of **AWS SDK for Go v2 with FIPS endpoints** or equivalent language-specific FIPS builds. Enforce via SBOM scanning (Syft + Grype) to detect non-FIPS crypto libraries at image build time.
+- **Network transport**: Enable **FIPS-compliant TLS 1.2+ cipher suites** at ALB (policy `ELBSecurityPolicy-TLS13-1-2-FIPS-2023-04`), service mesh (Istio/Envoy FIPS builds), and inter-service mTLS. Disable TLS 1.0/1.1 globally.
+- **EKS API server endpoint**: Use **FIPS endpoints** (`eks.us-east-1.amazonaws.com` → `eks-fips.us-east-1.amazonaws.com`) for all control plane communication.
+- **Secrets and KMS**: Enforce use of FIPS-validated KMS keys (all AWS KMS operations are FIPS 140-2 validated) for envelope encryption of etcd secrets.
+- **Audit and drift detection**: Use AWS Config rules + OPA policies to detect non-FIPS AMIs, non-FIPS ALB security policies, or containers with known non-compliant crypto libs; alert via Security Hub.
+
+---
+
+### Q: Describe a situation where EKS pod scheduling appeared correct — pods were `Running` and passing health checks — but end-to-end application latency was severely degraded due to a topology and data-locality mismatch. How did you identify and fix it?
+
+**Model Answer:**
+
+This scenario typically surfaces when pods are spread across AZs in ways that maximize availability at the cost of network latency — particularly painful for latency-sensitive or data-intensive workloads.
+
+**Situation**: A high-throughput analytics service running on EKS showed p99 latency 3x baseline after a node group scaling event. Pods were `Running`, health checks passed, and HPA showed normal replica counts.
+
+**Diagnosis**:
+- Correlated latency spikes with the timing of the scaling event using CloudWatch Container Insights + X-Ray trace waterfall — identified that the slow component was inter-pod RPC calls.
+- Used `kubectl get pods -o wide` to map pod-to-node-to-AZ placement — found that after scaling, producer and consumer pods landed in different AZs (`us-east-1a` vs `us-east-1c`), adding ~2ms per call which compounded across 50+ RPC hops per request.
+- Additionally, the service's backing ElastiCache cluster was in `us-east-1a`, so pods in `us-east-1c` were paying cross-AZ transfer latency on every cache read.
+
+**Fix**:
+- Applied `topologySpreadConstraints` with `topologyKey: topology.kubernetes.io/zone` alongside `podAffinity` rules to co-locate producer/consumer pods in the same AZ.
+- Added **Topology Aware Routing** annotations (`service.kubernetes.io/topology-mode: auto`) so kube-proxy preferentially routes to same-AZ endpoints.
+- For the cache access pattern, deployed a per-AZ read replica and used client-side AZ-aware endpoint selection.
+- Established a **latency regression gate** in CI that runs a synthetic

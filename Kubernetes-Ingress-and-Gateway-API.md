@@ -715,3 +715,81 @@ Key practices:
 5. **Validate and cut over**: once metrics match, shift 100% of DNS traffic to the new Gateway. Keep the old Ingress resource live (but receiving no traffic) for a rollback window—revert DNS if issues arise within the rollback period.
 6. **Cleanup**: delete old Ingress resources and decommission the old controller or listener. Remove deprecated annotation-based logic and document the new HTTPRoute-based configuration in your GitOps repo.
 7. **Pitfalls**: session-affinity annotations, custom error pages, and CORS headers are common gaps; test these explicitly during the shadow phase.
+
+
+---
+
+## 🗓️ Added 2026-10-23 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-23 18:53 -->
+
+### Q: How do you configure and enforce HTTPS redirection and HSTS at the Ingress/Gateway layer, and what subtle failure modes exist?
+
+**Model Answer:**
+
+For Ingress, HTTPS redirection is typically handled via controller-specific annotations (e.g., `nginx.ingress.kubernetes.io/ssl-redirect: "true"`), while HSTS is set through the `nginx.ingress.kubernetes.io/configuration-snippet` or global ConfigMap values. With Gateway API, you model this explicitly: a `Gateway` listener on port 80 uses an `HTTPRoute` with a `RequestRedirect` filter (scheme: https, statusCode: 301), and the HSTS response header is injected via a `ResponseHeaderModifier` filter on the HTTPS `HTTPRoute`.
+
+**Key failure modes to call out:**
+- **Redirect loops** when the backend itself also redirects to HTTPS and the controller doesn't strip the `X-Forwarded-Proto` header correctly.
+- **HSTS lock-in** — setting `includeSubDomains` or `preload` incorrectly can make an entire domain inaccessible if the certificate lapses; never set preload without full domain readiness.
+- **Mixed-content** issues when internal services are referenced by HTTP URLs even though the edge is HTTPS.
+- **Annotation drift** between environments (staging allows HTTP, production doesn't) causing CI pipelines to pass but production to behave differently.
+- With Gateway API, the redirect and the TLS listener must be on separate `Gateway` listeners; a common mistake is attaching the redirect `HTTPRoute` to the HTTPS listener, making it unreachable over HTTP.
+
+HSTS `max-age` should start small (e.g., 300s) in staging and be promoted to 31536000 only after full validation.
+
+---
+
+### Q: How does the Gateway API's `ReferenceGrant` resource work, and what attack surface does it close compared to classic Ingress?
+
+**Model Answer:**
+
+`ReferenceGrant` is a namespace-scoped resource in the target namespace that explicitly permits a resource in another namespace (e.g., an `HTTPRoute` in namespace `team-a`) to reference something it owns (e.g., a `Service` or `Secret` in namespace `platform`). Without a matching `ReferenceGrant`, the controller must reject the cross-namespace reference, treating it as if the target doesn't exist.
+
+**Security improvement over classic Ingress:**
+- Classic Ingress has no native cross-namespace reference control; a misconfigured or malicious `Ingress` in one namespace can potentially route to a `Service` in another namespace if the controller doesn't enforce namespace isolation (most don't by default).
+- `ReferenceGrant` shifts trust: the *owner* of the target resource explicitly consents to being referenced, following a capability/grant model rather than relying purely on RBAC on the `Ingress` object itself.
+- It enables least-privilege: a platform team exposes a shared TLS `Secret` to specific tenant namespaces without mounting it or copying it everywhere.
+
+**Operational considerations:**
+- Forgetting to create `ReferenceGrant` is a common cause of `HTTPRoute` showing `ResolvedRefs: False` with a `RefNotPermitted` condition — always check route status conditions first when debugging.
+- `ReferenceGrant` itself should be managed by the platform/ops team via GitOps, not by tenants, to preserve its security value.
+- Deleting a `ReferenceGrant` is a breaking change; gate it behind a review process.
+
+---
+
+### Q: How would you design a multi-region active-active architecture where Kubernetes Gateway API resources are synchronized across clusters, and what consistency problems arise?
+
+**Model Answer:**
+
+A typical approach layers three concerns: **DNS-level routing** (e.g., latency-based or geolocation routing via Route 53 / Azure Traffic Manager pointing to per-region `Gateway` external IPs), **config synchronization** (GitOps tooling like Flux or Argo CD deploying identical `GatewayClass`, `Gateway`, and `HTTPRoute` manifests to each region), and **data-plane isolation** (each region's controller is independent; there is no shared control plane).
+
+**Consistency problems to address:**
+- **Config skew**: If a cluster is temporarily unreachable during a GitOps sync, one region may run a stale `HTTPRoute` version. Solve with health-gating: don't promote DNS weight to a cluster until its route reconciliation is confirmed via status conditions.
+- **Secret/certificate sync**: TLS secrets must be replicated across regions (e.g., using External Secrets Operator with a global secrets backend or cert-manager with a shared CA). A certificate expiring in one region but not another causes partial outages that are hard to detect without per-region synthetic monitoring.
+- **`ReferenceGrant` and policy objects** must also be synced; it's easy to sync `HTTPRoute` but forget `ReferencePolicy` or `BackendTLSPolicy`, breaking routes silently in one region.
+- **Canary/traffic-split state**: If a weighted `HTTPRoute` is mid-rollout in one region and the sync wave hasn't reached another, users get inconsistent behavior depending on which region serves them. Use feature flags or synchronize rollout promotion across regions before updating weights.
+- Prefer immutable, version-tagged manifests over mutable `latest`-style references, and always validate `HTTPRoute` status conditions post-sync before shifting DNS weight.
+
+---
+
+### Q: A security audit flags that your Ingress controller pods are running with cluster-admin privileges. How do you remediate this, and what is the minimum permission set the controller actually needs?
+
+**Model Answer:**
+
+This is a real and common finding, particularly with older Helm chart defaults. The remediation involves replacing the `ClusterRoleBinding` to `cluster-admin` with a purpose-built `ClusterRole` granting only what the controller's reconciliation loop actually requires.
+
+**Minimum RBAC surface for a typical Ingress controller (e.g., ingress-nginx):**
+- `get/list/watch` on `Ingress`, `IngressClass`, `Services`, `Endpoints`/`EndpointSlices`, `Secrets` (scoped to namespaces it manages), `ConfigMaps` (for leader election).
+- `update/patch` on `Ingress` status subresource (to write the assigned IP/hostname back).
+- `create/get/update` on `ConfigMaps` and `Leases` in the controller's own namespace (leader election).
+- **No** `cluster-admin`, no `pods/exec`, no `secrets` cluster-wide.
+
+**For Gateway API controllers**, additionally: `get/list/watch/patch` on `GatewayClass`, `Gateway`, `HTTPRoute`, `ReferenceGrant`, and their `status` subresources.
+
+**Remediation steps:**
+1. Audit current permissions with `kubectl auth can-i --list --as=system:serviceaccount:<ns>:<sa>`.
+2. Apply a least-privilege `ClusterRole`; use the upstream chart's dedicated RBAC templates rather than rolling your own.
+3. Restrict `Secrets` access to specific namespaces using `Role`/`RoleBinding` instead of cluster-wide, if the controller supports namespace-scoped secret watching.
+4. Enable `ValidatingAdmissionWebhook` for the controller so misconfigured resources are rejected before reaching the controller loop, reducing the blast radius if the controller SA is compromised.
+5. Run `kube-score` or OPA/Gatekeeper policies to prevent future privilege escalation via chart upgrades reverting to `cluster-admin`.
