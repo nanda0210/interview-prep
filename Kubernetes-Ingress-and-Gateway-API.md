@@ -793,3 +793,62 @@ This is a real and common finding, particularly with older Helm chart defaults. 
 3. Restrict `Secrets` access to specific namespaces using `Role`/`RoleBinding` instead of cluster-wide, if the controller supports namespace-scoped secret watching.
 4. Enable `ValidatingAdmissionWebhook` for the controller so misconfigured resources are rejected before reaching the controller loop, reducing the blast radius if the controller SA is compromised.
 5. Run `kube-score` or OPA/Gatekeeper policies to prevent future privilege escalation via chart upgrades reverting to `cluster-admin`.
+
+
+---
+
+## 🗓️ Added 2026-10-24 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-24 17:50 -->
+
+### Q: How do you implement gRPC routing with the Gateway API, and what makes it different from standard HTTP routing?
+
+The Gateway API introduced a dedicated `GRPCRoute` resource (v1alpha2/v1) that understands gRPC framing natively, whereas classic Ingress had no gRPC concept and required controller-specific annotations plus manual TLS+HTTP/2 configuration. A `GRPCRoute` matches on `service` and `method` fields (the gRPC path components) rather than URL path prefixes, making routing intentions explicit and less error-prone. Key differences to articulate:
+
+- **Protocol**: gRPC runs exclusively over HTTP/2; the Gateway and backend `Service` must both advertise `appProtocol: kubernetes.io/h2c` (cleartext) or use TLS with ALPN `h2`.
+- **Matching semantics**: `GRPCRoute` supports `Exact` and `RegularExpression` matches on service/method pairs; a misconfigured `HTTPRoute` targeting a gRPC backend will silently fail because HTTP/1.1 proxying breaks the framing.
+- **Timeouts**: gRPC uses long-lived streaming RPCs; set `timeouts.request` high enough (or per-route) to avoid premature connection termination.
+- **Health checks**: Backends should expose the gRPC Health Checking Protocol; configure the Gateway's backend health check accordingly, not an HTTP `/healthz` path.
+
+Operationally, validate with `grpcurl` and capture traces that show `content-type: application/grpc` headers propagating end-to-end. If you see `HTTP 426 Upgrade Required`, the proxy is downgrading to HTTP/1.1.
+
+---
+
+### Q: What is the role of `parentReference` in Gateway API resources, and how do you use it to scope an HTTPRoute to a specific listener or port?
+
+Every `HTTPRoute`, `GRPCRoute`, or `TLSRoute` attaches to a `Gateway` via the `spec.parentRefs` field, which replaces the implicit hostname-matching used by classic Ingress. You can target a specific `Gateway` by name/namespace, and further narrow to a single listener by setting `sectionName` (matching the listener's `name` field) and/or `port`. This is critical in multi-listener Gateways—e.g., one listener on 443 for external traffic and one on 8443 for internal—so routes don't accidentally attach to the wrong listener. An interviewer wants to hear:
+
+- Without `sectionName`, the route attaches to **all listeners on that Gateway** that match the hostname, which can expose internal routes externally.
+- The Gateway controller reflects attachment status in `route.status.parents[].conditions`; check `Accepted` and `ResolvedRefs` conditions to debug attachment failures.
+- `parentRefs` supports cross-namespace attachment *only* when the Gateway's listener carries an `allowedRoutes.namespaces` policy permitting the route's namespace—this is the first line of multi-tenant isolation.
+- Combining `sectionName` with `ReferenceGrant` gives fine-grained, auditable control over which teams can attach routes to which listeners.
+
+---
+
+### Q: How do you handle WebSocket or long-lived HTTP connections through a Kubernetes Ingress or Gateway, and what configuration mistakes cause connection drops?
+
+WebSockets and SSE (Server-Sent Events) upgrade a standard HTTP connection to a persistent, bidirectional stream, so several default controller behaviors break them:
+
+- **Proxy read/send timeouts**: Most controllers default to 60 s; long-lived connections will be killed. Set `proxy-read-timeout` / `proxy-send-timeout` (nginx) or equivalent annotations to match your application's heartbeat interval, or use `0` for no timeout paired with application-level keepalives.
+- **HTTP/1.1 requirement**: WebSocket upgrades (`Upgrade: websocket`) require HTTP/1.1 between the proxy and backend; if the backend is incorrectly configured for HTTP/2 only, the upgrade handshake fails with a `400`.
+- **Load balancer idle timeout**: The AWS NLB/ALB or GCP LB sitting in front has its own idle timeout (default 60 s on ALB). Set it to match or exceed your application timeout, or implement application-level ping frames to keep the connection alive.
+- **Gateway API**: Use `HTTPRoute` with `timeouts.backendRequest` set appropriately; some implementations also require `connection: Upgrade` and `upgrade` headers to be forwarded explicitly in `RequestHeaderModifier` filters.
+- **Session affinity**: WebSocket state is connection-local; if the proxy load-balances mid-stream (after a pod restart), the client must reconnect. Use `sessionAffinity: ClientIP` on the Service or cookie-based affinity at the Ingress layer.
+
+Test by inspecting `101 Switching Protocols` in traces and monitoring WebSocket frame-level metrics if your controller exposes them.
+
+---
+
+### Q: A new engineering team wants to expose a service through your shared cluster Gateway but their HTTPRoute is stuck in "Not Accepted" status. Walk me through your diagnostic process.
+
+This is a common operational scenario that tests systematic troubleshooting. The diagnostic sequence:
+
+1. **Inspect route status**: `kubectl get httproute <name> -n <ns> -o yaml` → examine `status.parents[].conditions`. The `Accepted` condition reason (e.g., `NoMatchingParent`, `NotAllowedByListeners`, `HostnameConflict`) pinpoints the category of failure.
+2. **Check parentRef accuracy**: Verify `parentRefs[].name`, `namespace`, and `sectionName` exactly match the target Gateway's metadata and listener name—typos are common.
+3. **Verify allowedRoutes policy**: Inspect the Gateway's listener `allowedRoutes.namespaces`; if set to `Same` or a label selector, the team's namespace must satisfy it. Coordinate with the platform team to add a `ReferenceGrant` or update the selector.
+4. **Hostname conflicts**: If another HTTPRoute already claims the same hostname+path with equal or higher specificity, the new route may be rejected. Check `HostnameConflict` or `RouteConflict` reason and resolve by adjusting path specificity.
+5. **Backend reference resolution**: Even if the route is accepted, `ResolvedRefs` can be `False` if the backend `Service` doesn't exist, is in a different namespace without a `ReferenceGrant`, or the port name/number doesn't match. Fix the service reference or add the grant.
+6. **Controller logs**: Tail the Gateway controller pods (`kubectl logs -n <gateway-ns> <controller-pod>`) for reconciliation errors that don't surface in status fields.
+7. **GatewayClass provisioner readiness**: If the `GatewayClass` itself has `Accepted: False`, no routes under it will work—escalate to cluster admins.
+
+Document findings and feed them into runbooks; "Not Accepted" with a clear reason field is one of the Gateway API's biggest UX improvements over opaque Ingress annotation failures.

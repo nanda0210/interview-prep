@@ -4947,3 +4947,94 @@ This scenario typically surfaces when pods are spread across AZs in ways that ma
 - Added **Topology Aware Routing** annotations (`service.kubernetes.io/topology-mode: auto`) so kube-proxy preferentially routes to same-AZ endpoints.
 - For the cache access pattern, deployed a per-AZ read replica and used client-side AZ-aware endpoint selection.
 - Established a **latency regression gate** in CI that runs a synthetic
+
+
+---
+
+## 🗓️ Added 2026-10-24 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-24 17:49 -->
+
+### Q: A production EKS cluster's Karpenter-managed nodes are running correctly, but you observe that spot interruption notices are not triggering graceful workload draining before node termination — pods are being killed abruptly. How do you diagnose and resolve this?
+
+**Model Answer:**
+
+Spot interruption notices arrive as EC2 instance metadata events (via the Instance Metadata Service) and as EventBridge events, giving a 2-minute warning window. Graceful draining requires a component to act on this signal — typically the **AWS Node Termination Handler (NTH)** or Karpenter's native interruption handling.
+
+**Diagnosis steps:**
+- Confirm whether Karpenter's interruption queue is configured (`--interruption-queue` flag pointing to an SQS queue subscribed to EC2 Spot interruption EventBridge events); if missing, Karpenter will not drain proactively.
+- Check if NTH is deployed alongside Karpenter — running both can cause race conditions and double-drain attempts.
+- Inspect Karpenter controller logs for `interruption` events and verify the SQS queue is receiving messages (`aws sqs get-queue-attributes`).
+- Confirm the EC2 instance IAM role allows `sqs:ReceiveMessage`, `sqs:DeleteMessage`, and `sqs:GetQueueAttributes` on the interruption queue.
+- Validate that PodDisruptionBudgets are not blocking the drain, causing it to timeout within the 2-minute window.
+
+**Resolution:**
+- Enable Karpenter's built-in interruption handling via the SQS queue — this is the preferred approach over NTH for Karpenter-managed nodes.
+- Set `terminationGracePeriodSeconds` on all pods to ≤90 seconds to fit within the 2-minute window, and ensure `preStop` hooks are bounded.
+- Remove NTH if Karpenter interruption handling is active to avoid conflicts.
+- Add CloudWatch alarms on the SQS queue `ApproximateAgeOfOldestMessage` metric to detect processing delays.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level resource quota governance across dozens of teams and namespaces — including preventing quota exhaustion cascades, enforcing fair-share allocation, and automating quota lifecycle management?
+
+**Model Answer:**
+
+**Quota architecture:**
+- Apply `ResourceQuota` objects per namespace enforcing limits on CPU, memory, pods, services, PVCs, and object counts; use a tiered model (small/medium/large) with team classification stored as namespace annotations.
+- Pair with `LimitRange` objects to set per-container defaults and maxima, preventing unbounded containers from consuming quota silently.
+- Use a quota management operator (e.g., custom controller or **Hierarchical Namespace Controller / HNC**) to propagate and inherit quota policies from parent namespaces in multi-team hierarchies.
+
+**Preventing cascade exhaustion:**
+- Implement admission webhooks that reject quota requests exceeding a soft threshold (e.g., 80% of namespace quota) unless an override annotation is present and approved.
+- Separate critical system namespaces (`kube-system`, monitoring, ingress) from team namespaces with dedicated node groups or topology constraints to prevent noisy neighbors starving infrastructure components.
+- Alert on namespace quota utilization >75% via Prometheus `kube_resourcequota` metrics with PagerDuty routing to team owners.
+
+**Fair-share and lifecycle automation:**
+- Integrate quota provisioning into the team onboarding IaC pipeline (Terraform + Helm) — teams request quota via pull request, reviewed and applied via GitOps.
+- Implement quarterly quota right-sizing reviews using `kube_resourcequota` utilization history; automatically open PRs to reduce quota for namespaces consistently below 30% utilization.
+- Use `ClusterResourceQuota` (OpenShift-style) concept or label-selector-based quota aggregation to enforce fleet-wide ceiling across all team namespaces combined.
+
+**Trade-offs:** Strict quotas slow teams down; balance with a self-service quota increase process with lightweight approval to avoid becoming a bottleneck.
+
+---
+
+### Q: Describe a situation where EKS workloads were experiencing intermittent `OOMKilled` events despite pods reporting memory usage well below their configured limits in application metrics. How did you diagnose and resolve the discrepancy?
+
+**Model Answer:**
+
+This is a classic symptom of a mismatch between what the **application reports** as heap/RSS usage and what the **kernel's cgroup accounting** measures as container memory consumption.
+
+**Root cause investigation:**
+- Compared `container_memory_working_set_bytes` (cgroup-reported, used by the kubelet for OOM decisions) against application-internal metrics — the working set was significantly higher, including page cache, shared memory, and JVM off-heap allocations.
+- Identified the JVM workload was using Metaspace and direct byte buffers not reflected in heap metrics, and Linux page cache for log-heavy workloads inflated RSS without triggering GC.
+- Ran `kubectl exec` into the pod and inspected `/sys/fs/cgroup/memory/memory.usage_in_bytes` vs `/proc/meminfo` to confirm cgroup accounting included page cache.
+
+**Resolution:**
+- Increased memory limits to account for off-heap overhead (JVM: added `-XX:MaxDirectMemorySize`, `-XX:MaxMetaspaceSize` explicit caps, and set limits ~30% above heap max).
+- For page-cache-heavy workloads (log shippers, Elasticsearch), added `memory.swappiness=0` at node level and switched to `memory.memsw.limit_in_bytes` awareness.
+- Implemented `container_memory_working_set_bytes`-based alerts (not application-level metrics) as the authoritative OOM risk indicator in Grafana.
+- Added VPA in recommendation-only mode to observe and right-size limits based on actual cgroup working set over 30 days.
+
+**Key lesson:** Always use cgroup-sourced metrics (`working_set_bytes`) as the source of truth for Kubernetes memory limits — application-reported metrics are unreliable for limit tuning.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level OpenTelemetry (OTel) instrumentation adoption across a large polyglot microservices fleet — including trace context propagation, collector topology, and preventing observability data loss under load?
+
+**Model Answer:**
+
+**Instrumentation strategy:**
+- Mandate OTel SDK instrumentation via auto-instrumentation where available (Java agent, Python `opentelemetry-instrument`, Node.js auto-instrumentation) deployed as init containers or via the **OTel Operator's `Instrumentation` CR** — reduces per-team burden without requiring code changes for common frameworks.
+- For polyglot services where auto-instrumentation is insufficient, provide per-language starter libraries with enforced `W3C TraceContext` and `Baggage` propagation headers as the standard; reject PRs that use Zipkin B3 or proprietary headers via lint rules.
+- Enforce instrumentation coverage via admission webhook that checks for the `instrumentation.opentelemetry.io/inject-*` annotation or an explicit opt-out annotation requiring justification.
+
+**Collector topology:**
+- Deploy OTel Collectors as **DaemonSet** (node-level agent) for low-latency local export, with a **Deployment-mode gateway tier** for batching, sampling, and routing to backends (Jaeger, Grafana Tempo, X-Ray).
+- Separate collector pipelines: high-volume services use tail-based sampling at the gateway (retain 100% of error/slow traces, sample 1-5% of fast/successful); low-volume critical services use head-based 100% sampling.
+- Use OTLP gRPC between agents and gateway for efficiency; configure `retry_on_failure`, `sending_queue` (persistent queue to disk), and `batch` processor to absorb bursts.
+
+**Preventing data loss:**
+- Size the sending queue and persistent storage on gateway collectors to buffer at least 5 minutes of peak throughput; alert on `otelcol_exporter_queue_size` approaching capacity.
+- Implement backpressure from the gateway to agents via gRPC flow control — agents drop lowest-priority spans (sampled, non-error) first using a priority queue extension.
+- Deploy gateway collectors with HPA on CPU/memory and PodDisruptionBudgets ensuring at least 2 replicas survive node disruption;

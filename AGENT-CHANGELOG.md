@@ -733,3 +733,21 @@ _Committed & pushed: yes_
 - A security audit flags that your Ingress controller pods are running with cluster-admin privileges. How do you remediate this, and what is the minimum permission set the controller actually needs?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-24 17:50:09
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8222 chars)
+- A production EKS cluster's Karpenter-managed nodes are running correctly, but you observe that spot interruption notices are not triggering graceful workload draining before node termination — pods are being killed abruptly. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level resource quota governance across dozens of teams and namespaces — including preventing quota exhaustion cascades, enforcing fair-share allocation, and automating quota lifecycle management?
+- Describe a situation where EKS workloads were experiencing intermittent `OOMKilled` events despite pods reporting memory usage well below their configured limits in application metrics. How did you diagnose and resolve the discrepancy?
+- How do you design an EKS strategy for managing and enforcing workload-level OpenTelemetry (OTel) instrumentation adoption across a large polyglot microservices fleet — including trace context propagation, collector topology, and preventing observability data loss under load?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6692 chars)
+- How do you implement gRPC routing with the Gateway API, and what makes it different from standard HTTP routing?
+- What is the role of `parentReference` in Gateway API resources, and how do you use it to scope an HTTPRoute to a specific listener or port?
+- How do you handle WebSocket or long-lived HTTP connections through a Kubernetes Ingress or Gateway, and what configuration mistakes cause connection drops?
+- A new engineering team wants to expose a service through your shared cluster Gateway but their HTTPRoute is stuck in "Not Accepted" status. Walk me through your diagnostic process.
+
+_Committed & pushed: yes_
