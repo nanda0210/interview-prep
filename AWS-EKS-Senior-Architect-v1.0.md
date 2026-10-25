@@ -5038,3 +5038,66 @@ This is a classic symptom of a mismatch between what the **application reports**
 - Size the sending queue and persistent storage on gateway collectors to buffer at least 5 minutes of peak throughput; alert on `otelcol_exporter_queue_size` approaching capacity.
 - Implement backpressure from the gateway to agents via gRPC flow control — agents drop lowest-priority spans (sampled, non-error) first using a priority queue extension.
 - Deploy gateway collectors with HPA on CPU/memory and PodDisruptionBudgets ensuring at least 2 replicas survive node disruption;
+
+
+---
+
+## 🗓️ Added 2026-10-25 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-25 18:06 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level secrets management at scale — including dynamic secret injection, rotation, and audit — without storing secrets in etcd?
+
+**Model Answer:**
+
+The core principle is to keep secrets out of Kubernetes etcd entirely by treating AWS Secrets Manager and Parameter Store as the authoritative source of truth, and using the Secrets Store CSI Driver with the AWS provider to mount secrets as ephemeral volumes at pod startup. Key design decisions include:
+
+- **Dynamic injection:** Deploy the `secrets-store-csi-driver` with `aws-secrets-manager` provider cluster-wide via Helm; workloads reference a `SecretProviderClass` CRD that maps secret ARNs to mount paths. IRSA scopes each pod's IAM role to only the secrets it legitimately needs.
+- **Automatic rotation sync:** Enable `rotation reconciler` in the CSI driver (default 2-minute poll interval); pods receive updated secret content without restart. For secrets that require process-level reload (e.g., TLS certs), add a sidecar that watches the mounted path via inotify and sends SIGHUP.
+- **Synced Kubernetes Secrets (escape hatch):** For legacy workloads that require env-var injection, enable `syncSecret` in `SecretProviderClass` to create a short-lived Kubernetes Secret mirrored from Secrets Manager. Pair with a `SealedSecret` or ESO (External Secrets Operator) controller and set `deletionPolicy: Delete` so the Kubernetes Secret is removed when the workload is gone.
+- **Audit trail:** Enable CloudTrail data events on Secrets Manager; correlate with Kubernetes audit logs (who created the `SecretProviderClass`, when pods mounted the secret) in a SIEM. Use OPA/Gatekeeper to enforce that no `Secret` objects of type `Opaque` are created directly in sensitive namespaces.
+- **Rotation safety:** Use Secrets Manager versioning (`AWSPENDING` → `AWSCURRENT`); canary deployments validate the new credential before full rotation completes. Alert on `GetSecretValue` permission denied spikes as a leading indicator of rotation failure.
+
+---
+
+### Q: A production EKS cluster's AWS VPC CNI is running in custom networking mode, but pods on newly launched nodes are failing to start with `NetworkPlugin cni failed to set up pod network: add cmd: failed to assign an IP address to container`. What is your systematic diagnosis and remediation approach?
+
+**Model Answer:**
+
+This error in custom networking mode almost always points to ENI or IP exhaustion on the secondary subnet/security group path rather than the primary ENI. Diagnosis steps:
+
+1. **Confirm custom networking config:** Verify `AWS_VPC_K8S_CNI_CUSTOM_NETWORK_CFG=true` on `aws-node` DaemonSet and that `ENIConfig` CRDs exist for each AZ with correct `subnet` and `securityGroups`. A common root cause is a new node launching in an AZ for which no `ENIConfig` exists (e.g., a new AZ was added to the node group without a matching CRD).
+2. **Check ENIConfig label binding:** Each node must carry the label `k8s.amazonaws.com/eniConfig=<az>` (or the auto-assignment annotation `AWS_VPC_K8S_CNI_ENICONFIG_LABEL_DEF` set to `topology.kubernetes.io/zone`). Missing labels mean `aws-node` falls back to no secondary ENI config, and IP allocation fails.
+3. **Subnet IP exhaustion:** Run `aws ec2 describe-subnets` and check `AvailableIpAddressCount` for the secondary subnets referenced in `ENIConfig`. In prefix delegation mode, each ENI attachment consumes a /28 prefix (16 IPs); a /24 subnet saturates at ~16 nodes.
+4. **IAM permissions:** The node role must have `ec2:CreateNetworkInterface`, `ec2:AssignPrivateIpAddresses`, and `ec2:AssignIpv6Addresses`. Missing permissions surface as throttled/denied calls in CloudTrail; `aws-node` logs show `UnauthorizedOperation`.
+5. **Remediation:** Create missing `ENIConfig` CRDs, expand or add secondary subnets, correct node labels via a Karpenter `EC2NodeClass` label or node group launch template tag, and recycle affected nodes. Set `WARM_IP_TARGET` and `MINIMUM_IP_TARGET` conservatively to avoid burst exhaustion.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing cluster-wide PodDisruptionBudget (PDB) hygiene — ensuring PDBs are present, correctly sized, and never block cluster operations like node drain or upgrades?
+
+**Model Answer:**
+
+PDBs are a double-edged sword: absent PDBs cause availability incidents during drains; over-restrictive PDBs block node upgrades indefinitely. A mature strategy treats PDB correctness as a policy-enforced, continuously audited property:
+
+- **Presence enforcement:** Deploy an OPA/Gatekeeper or Kyverno policy that requires any `Deployment` or `StatefulSet` with `replicas >= 2` in production namespaces to have a matching PDB. Block or warn at admission time; use `warn` mode initially to measure blast radius before switching to `deny`.
+- **Sizing guardrails:** Enforce that `maxUnavailable` is never `0` when `minAvailable` equals `spec.replicas` (a budget that can never be satisfied). A policy checks `pdb.spec.minAvailable < deployment.spec.replicas` or `pdb.spec.maxUnavailable >= 1`. Single-replica workloads should be explicitly annotated as exempted or converted to multi-replica.
+- **Drain safety valve:** Configure Karpenter's `disruption.budgets` in the `NodePool` to cap the number of nodes drained concurrently (e.g., `maxUnavailable: 10%`). For managed node groups, set a `maxUnavailable` in the update config. This prevents a misconfigured PDB from serializing the entire upgrade to a crawl.
+- **Stale PDB detection:** PDBs whose label selectors match zero pods are silently blocking (the disruption controller will refuse eviction because it cannot confirm safety). A Prometheus rule alerts when `kube_poddisruptionbudget_status_expected_pods == 0` and `kube_poddisruptionbudget_status_disruptions_allowed == 0` simultaneously.
+- **Upgrade runbook:** Before any node group upgrade, run a pre-flight check (`kubectl get pdb -A` + a script validating `disruptionsAllowed >= 1` for all PDBs) and temporarily patch any zero-allowance PDB that cannot be drained, with a post-upgrade hook to restore it.
+
+---
+
+### Q: Describe a situation where EKS workloads migrated from self-managed node groups to Karpenter began experiencing unpredictable scheduling latency spikes — pods taking 3–8 minutes to become `Running` — that did not occur with the old node groups. How did you diagnose and resolve it?
+
+**Model Answer:**
+
+This scenario is a classic cold-start vs. warm-pool mismatch. The situation arose after migrating a latency-sensitive autoscaling workload from over-provisioned managed node groups (which kept warm capacity) to Karpenter with no consolidation or over-provisioning tuning.
+
+**Diagnosis:**
+- Correlated pod `Pending` timestamps with Karpenter controller logs; confirmed the delay was split ~90 seconds EC2 launch + ~60 seconds node registration + ~90 seconds image pull, totaling ~4 minutes before the first container started. The remaining gap to 8 minutes was image pull time for a 4 GB ML model image.
+- `kubectl describe node <new-node>` showed `ContainerCreating` stalled; `crictl pull` logs on the node confirmed the image was not cached (Karpenter launched a fresh instance with no pre-warmed image layer cache).
+- Karpenter events showed `NodeClaim` creation to `NodeRegistered` taking 110 seconds — within normal range for the instance type — but the workload team expected sub-60-second scheduling from their managed node group experience (those nodes were always running and pre-pulled the image on launch via user data).
+
+**Resolution:**
+1. **Over-

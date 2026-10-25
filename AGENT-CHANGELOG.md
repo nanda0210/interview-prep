@@ -751,3 +751,21 @@ _Committed & pushed: yes_
 - A new engineering team wants to expose a service through your shared cluster Gateway but their HTTPRoute is stuck in "Not Accepted" status. Walk me through your diagnostic process.
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-25 18:06:47
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7689 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level secrets management at scale — including dynamic secret injection, rotation, and audit — without storing secrets in etcd?
+- A production EKS cluster's AWS VPC CNI is running in custom networking mode, but pods on newly launched nodes are failing to start with `NetworkPlugin cni failed to set up pod network: add cmd: failed to assign an IP address to container`. What is your systematic diagnosis and remediation approach?
+- How do you design an EKS strategy for managing and enforcing cluster-wide PodDisruptionBudget (PDB) hygiene — ensuring PDBs are present, correctly sized, and never block cluster operations like node drain or upgrades?
+- Describe a situation where EKS workloads migrated from self-managed node groups to Karpenter began experiencing unpredictable scheduling latency spikes — pods taking 3–8 minutes to become `Running` — that did not occur with the old node groups. How did you diagnose and resolve it?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6897 chars)
+- How do you implement timeout and retry policies in Gateway API, and what are the risks of misconfiguring them?
+- A team reports that large file uploads through your Ingress intermittently fail with 413 or time out mid-stream. How do you systematically diagnose and resolve this?
+- How do you enforce consistent routing policy across dozens of HTTPRoutes without duplicating configuration in every resource?
+- Walk me through a scenario where you must migrate production traffic from a classic Ingress controller to Gateway API with zero downtime. What is your sequencing?
+
+_Committed & pushed: yes_

@@ -852,3 +852,71 @@ This is a common operational scenario that tests systematic troubleshooting. The
 7. **GatewayClass provisioner readiness**: If the `GatewayClass` itself has `Accepted: False`, no routes under it will work—escalate to cluster admins.
 
 Document findings and feed them into runbooks; "Not Accepted" with a clear reason field is one of the Gateway API's biggest UX improvements over opaque Ingress annotation failures.
+
+
+---
+
+## 🗓️ Added 2026-10-25 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-25 18:06 -->
+
+### Q: How do you implement timeout and retry policies in Gateway API, and what are the risks of misconfiguring them?
+
+**Model Answer:**
+
+Gateway API exposes timeouts natively via the `HTTPRoute` spec (GA in v1.1) through `timeouts.request` and `timeouts.backendRequest` fields, where `backendRequest` applies per-attempt and must be ≤ `request`. Retry policies are implementation-specific today (e.g., via policy attachment CRDs like `BackendLBPolicy` or vendor annotations), though a standardised `RetryFilter` is progressing upstream.
+
+Key risks and considerations:
+
+- **Retry amplification:** Aggressive retry counts without exponential back-off can multiply load on an already-degraded backend by an order of magnitude; always pair retries with jitter and a circuit breaker.
+- **Timeout ladder misconfiguration:** If `backendRequest` > `request`, the per-attempt timeout is never the binding constraint, making the field misleading and masking slow backends.
+- **Idempotency assumptions:** Retrying `POST` or non-idempotent mutations can cause duplicate side effects; limit automatic retries to `GET`, `HEAD`, or explicitly idempotent operations.
+- **Interaction with client-side timeouts:** If the upstream client (browser, mobile SDK) has a shorter timeout than the gateway, the gateway may succeed on retry but the client has already given up—consuming backend resources for no user benefit.
+- **Validation gap:** Implementations vary in whether they reject invalid timeout combinations at admission time; add OPA/CEL validation policies to enforce your organisation's safe ranges.
+
+---
+
+### Q: A team reports that large file uploads through your Ingress intermittently fail with 413 or time out mid-stream. How do you systematically diagnose and resolve this?
+
+**Model Answer:**
+
+This is a layered problem touching proxy config, cloud LB limits, and OS socket buffers. Systematic approach:
+
+1. **Confirm the 413 source** — check whether the response comes from the Ingress controller (e.g., nginx's `client_max_body_size` default of 1 MB) or the application itself; the `Server` response header and controller access logs disambiguate.
+2. **Ingress controller config** — for nginx-ingress, set the `nginx.ingress.kubernetes.io/proxy-body-size` annotation to the required limit (or `"0"` for unlimited); for Gateway API use an implementation-specific `HTTPRouteFilter` or `PolicyAttachment`.
+3. **Cloud LB layer** — ALBs have a fixed 60-second idle timeout; NLBs support up to 350 seconds. Uploads that stall mid-transfer due to client bandwidth will hit this; increase the LB idle timeout and propagate it to the controller's `proxy-read-timeout`.
+4. **Proxy buffering** — nginx's `proxy_request_buffering` buffers the entire body before forwarding; disabling it (`proxy-request-buffering: "off"`) allows streaming but means the backend receives the connection immediately, increasing backend concurrency.
+5. **Pod resource limits** — ensure controller pods have enough ephemeral storage and memory if buffering is enabled; OOMKills mid-transfer produce the same symptom as timeouts.
+6. **End-to-end test** — use `curl --limit-rate` to simulate slow clients and reproduce the timeout, confirming the fix before production rollout.
+
+---
+
+### Q: How do you enforce consistent routing policy across dozens of HTTPRoutes without duplicating configuration in every resource?
+
+**Model Answer:**
+
+Gateway API addresses this through **policy attachment** — specifically the `PolicyAttachment` pattern where implementation-defined CRDs (e.g., `TimeoutPolicy`, `RetryPolicy`, `BackendTLSPolicy`) attach to a target resource and can target a `Gateway`, `HTTPRoute`, or `Service` in a hierarchy.
+
+Key design points:
+
+- **Hierarchical inheritance:** Policies attached to a `Gateway` act as defaults for all child `HTTPRoute`s; more-specific policies attached to the route or backend override them. This lets platform teams set cluster-wide baselines without touching tenant manifests.
+- **`BackendTLSPolicy`** is a standard (graduated to GA in v1.3) example: attach once to a `Service` to enforce mTLS from the gateway to the backend, rather than annotating every route.
+- **Kustomize / Helm abstractions:** For controllers that don't yet implement policy attachment, use a shared Helm library chart that renders common annotation sets; a mutation webhook can also inject standard annotations cluster-wide.
+- **OPA/Gatekeeper constraints:** Enforce that every `HTTPRoute` in a production namespace must have a corresponding `TimeoutPolicy`; this prevents teams from accidentally relying on unlimited defaults.
+- **Observability check:** After applying a hierarchical policy, verify effective configuration via the controller's `/config-dump` endpoint or status conditions — not just the CRD spec — because inheritance resolution is implementation-specific and bugs exist.
+
+---
+
+### Q: Walk me through a scenario where you must migrate production traffic from a classic Ingress controller to Gateway API with zero downtime. What is your sequencing?
+
+**Model Answer:**
+
+This is a cut-over migration requiring parallel infrastructure, traffic shifting, and careful rollback gates:
+
+1. **Inventory and compatibility audit** — catalogue all Ingress resources, annotations used, and TLS secrets; map each annotation to its Gateway API equivalent (native field, `PolicyAttachment`, or vendor CRD). Flag any features with no equivalent as migration blockers.
+2. **Deploy Gateway API CRDs and a new GatewayClass** — install the target controller (e.g., Envoy Gateway, Cilium) alongside the existing nginx-ingress; both controllers run in parallel without interfering if they watch different resource types.
+3. **Mirror routes** — create equivalent `Gateway` + `HTTPRoute` resources for a non-critical service. Use DNS-based or weighted LB traffic splitting to send a small percentage of real traffic to the new gateway; validate via metrics and error rates.
+4. **Parallel run for all services** — progressively author `HTTPRoute` equivalents for all ingresses, validated by integration tests in staging. Keep old `Ingress` resources live; only the DNS/LB weight decides which path traffic uses.
+5. **Incremental DNS cut-over** — shift DNS weights (10 % → 50 % → 100 %) service-by-service with monitoring burn-in periods. For external-dns users, annotate the new `Gateway` to take over DNS records once at 100 %.
+6. **Rollback gate** — keep old Ingress resources and controller deployed but weighted at 0 % for at least one full traffic cycle (e.g., 24 h including peak); this allows instant rollback by re-weighting without a redeploy.
+7. **Cleanup** — delete old `Ingress` resources, drain the old controller deployment, and remove the old `IngressClass`; update CI/CD pipelines to target `HTTPRoute` going forward.
