@@ -769,3 +769,21 @@ _Committed & pushed: yes_
 - Walk me through a scenario where you must migrate production traffic from a classic Ingress controller to Gateway API with zero downtime. What is your sequencing?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-26 20:18:36
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8041 chars)
+- A production EKS cluster's aws-node (VPC CNI) DaemonSet is healthy, but you are observing a gradual exhaustion of available secondary IP addresses on nodes despite pods not fully consuming the node's ENI capacity. How do you investigate and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level horizontal scaling safety — ensuring HPA and KEDA scalers do not cause thundering-herd restarts, cascade failures, or cost explosions during traffic spikes?
+- Describe a situation where an EKS cluster's control plane appeared healthy but kubectl commands intermittently hung for 30–90 seconds before responding. Walk through your investigation and resolution.
+- How do you design an EKS strategy for managing and enforcing workload-level init container and sidecar lifecycle safety — ensuring dependency ordering, crash loop prevention, and graceful coordinated shutdown?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6319 chars)
+- How do you implement request mirroring (traffic shadowing) with Gateway API, and what are the operational risks?
+- How do you integrate external DNS automation with Ingress or Gateway API resources, and what failure modes should you anticipate?
+- A Gateway controller is correctly installed, but newly created HTTPRoutes remain in an `Accepted: False` state with reason `NoMatchingParent`. How do you systematically diagnose and resolve this?
+- How do you approach capacity planning and autoscaling for an Ingress controller, and what metrics should drive scaling decisions?
+
+_Committed & pushed: yes_

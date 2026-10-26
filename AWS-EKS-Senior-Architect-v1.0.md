@@ -5101,3 +5101,59 @@ This scenario is a classic cold-start vs. warm-pool mismatch. The situation aros
 
 **Resolution:**
 1. **Over-
+
+
+---
+
+## 🗓️ Added 2026-10-26 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-26 20:17 -->
+
+### Q: A production EKS cluster's aws-node (VPC CNI) DaemonSet is healthy, but you are observing a gradual exhaustion of available secondary IP addresses on nodes despite pods not fully consuming the node's ENI capacity. How do you investigate and resolve this?
+
+**Key diagnostic and remediation steps:**
+
+- **Check warm pool settings:** VPC CNI maintains a warm pool of pre-allocated IPs (`WARM_IP_TARGET`, `WARM_ENI_TARGET`, `MINIMUM_IP_TARGET`). Over-aggressive defaults cause IPs to be reserved but never assigned to pods — query `kubectl describe ds aws-node -n kube-system` and review env vars.
+- **Audit ENI/IP leaks:** Terminated pods can leave stale IP entries if the CNI plugin failed to clean up; inspect `aws ec2 describe-network-interfaces --filters Name=attachment.instance-id,Values=<node-id>` and cross-reference with `kubectl get pods -o wide` for that node.
+- **Check ipamd logs:** `kubectl logs -n kube-system ds/aws-node -c aws-node` for errors around `AddNetworkReply`, `DEL` failures, or throttled EC2 API calls — throttling on `AssignPrivateIpAddresses` or `AttachNetworkInterface` can stall cleanup.
+- **Prefix delegation interaction:** If prefix delegation (`ENABLE_PREFIX_DELEGATION=true`) is enabled, each ENI attachment now holds a /28 prefix (16 IPs); unexpected node churn or rapid pod scheduling can exhaust the subnet's CIDR range faster than expected — verify subnet has sufficient free IPs.
+- **Resolution:** Tune `WARM_IP_TARGET` to a realistic value matching average pod density; enable `DISABLE_NETWORK_RESOURCE_PROVISIONING=false` checks; ensure the node termination lifecycle hook gives `ipamd` time to drain before the instance is terminated; and patch stale ENIs with automated Lambda-based cleanup triggered by EC2 state-change events.
+- **Long-term:** Use `/19` or larger dedicated CNI subnets per AZ, monitor with CloudWatch metric `NetworkInterfaceUtilization`, and alert when free IPs in a subnet fall below 20%.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level horizontal scaling safety — ensuring HPA and KEDA scalers do not cause thundering-herd restarts, cascade failures, or cost explosions during traffic spikes?
+
+**Architecture and enforcement strategy:**
+
+- **HPA stabilization windows:** Set `scaleDown.stabilizationWindowSeconds` (default 300 s) and `scaleUp.stabilizationWindowSeconds` explicitly; use `behavior.scaleUp.policies` with `periodSeconds` and `value` to limit burst rate — e.g., allow at most 4 new replicas per 60 s regardless of metric demand.
+- **KEDA scaler hygiene:** For event-driven workloads (SQS, Kafka, Prometheus), set `minReplicaCount ≥ 1` to avoid cold-start delays; use `cooldownPeriod` and `pollingInterval` tuned to your queue drain rate; audit `ScaledObject` resources via OPA/Gatekeeper to enforce minimum stabilization periods and maximum replica ceilings per namespace.
+- **PodDisruptionBudget pairing:** Every HPA-managed Deployment must have a PDB guaranteeing `minAvailable ≥ 1`; validate this with a mutating webhook or CI policy gate so scale-down events never terminate all pods simultaneously.
+- **Thundering-herd prevention:** Use `topologySpreadConstraints` to spread new replicas across AZs and nodes; combine with pod startup probes and `minReadySeconds` on Deployments so pods are not counted as "available" until genuinely warm — preventing HPA from immediately scaling back down.
+- **Cost explosion guardrails:** Enforce `maxReplicas` via namespace-scoped LimitRanges cross-checked by OPA policies; integrate KEDA with a custom external scaler that caps scaling velocity based on current AWS Spot price or budget thresholds from AWS Budgets API.
+- **Observability:** Emit HPA and KEDA scaling events to your observability platform; alert on `DesiredReplicas - ReadyReplicas > N` for more than 2 minutes as a leading indicator of a scaling storm or broken readiness probe blocking convergence.
+
+---
+
+### Q: Describe a situation where an EKS cluster's control plane appeared healthy but kubectl commands intermittently hung for 30–90 seconds before responding. Walk through your investigation and resolution.
+
+**Incident narrative and methodology:**
+
+- **Initial triage:** Confirmed API server pods were healthy via EKS console and CloudWatch `APIServer RequestCount` metrics showed no drop, but `APIServer RequestLatency p99` had spiked — indicating requests were queuing, not failing.
+- **Watch and list pressure:** Identified a recently deployed third-party operator that issued unbounded `LIST` calls on `Pods` and `Events` across all namespaces without label selectors, causing large response payloads and exhausting API server watch cache memory — visible in `kube-apiserver` audit logs filtered for `verb=list` with `objectCount > 10000`.
+- **Priority and fairness (APF):** Checked API Priority and Fairness flow schemas (`kubectl get flowschemas`, `kubectl get prioritylevelconfigurations`) — the operator's service account was falling into the `global-default` priority level with a concurrency share of only 5, creating a queue backlog that also delayed interactive user requests sharing the same bucket.
+- **Resolution:** Patched the operator to use informers with proper cache and field selectors; created a dedicated `FlowSchema` + `PriorityLevelConfiguration` for the operator's service account with its own concurrency envelope so its LIST storms could not bleed into the `kubectl` interactive bucket.
+- **Secondary finding:** Node kubelets were also doing aggressive certificate rotation polling because `rotateCertificates` combined with a short `kubelet-client-certificate` TTL was generating hundreds of `CertificateSigningRequest` creates per minute — resolved by extending the kubelet certificate TTL in the EKS managed node group's bootstrap config.
+- **Preventive controls:** Added CloudWatch alarms on `APIServer RequestLatency p99 > 2s` and `etcd_request_duration_seconds p99 > 500ms`; enforced per-service-account APF flow schemas for all controllers via GitOps; added load testing of API server in the pre-production environment as part of operator release gates.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level init container and sidecar lifecycle safety — ensuring dependency ordering, crash loop prevention, and graceful coordinated shutdown?
+
+**Design and enforcement approach:**
+
+- **Dependency ordering with init containers:** Model hard startup dependencies (schema migrations, config fetch, Vault secret injection) as init containers with explicit `restartPolicy: Never` and idempotent logic; enforce via OPA/Gatekeeper policies that workloads with known DB-dependent images must declare a corresponding migration or readiness init container.
+- **Native sidecar graduation (Kubernetes 1.29+/EKS 1.29+):** Use the promoted `initContainers` with `restartPolicy: Always` for sidecars (e.g., Envoy, OTEL Collector, Fluent Bit) so they start before app containers and, critically, terminate *after* them — eliminating the classic race condition where a logging sidecar exits before the app finishes flushing logs.
+- **Crash loop prevention:** Set `startupProbe` with generous `failureThreshold` × `periodSeconds` on init containers doing slow network operations; cap init container resource requests tightly to prevent a runaway init loop from consuming node resources; use `terminationMessagePath` and `terminationMessagePolicy: FallbackToLogsOnError` to surface crash reasons without manual log diving.
+- **Graceful coordinated shutdown:** Set `terminationGracePeriodSeconds` at the Pod level to be longer than the slowest sidecar drain time (e.g., Envoy's `--drain-time-s`); use a `preStop` hook on the main container to sleep briefly (typically 5 s) so Envoy finishes in-flight requests before the app exits; validate this with load tests and chaos experiments injecting pod terminations under traffic.
+- **Admission enforcement:**

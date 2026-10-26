@@ -920,3 +920,70 @@ This is a cut-over migration requiring parallel infrastructure, traffic shifting
 5. **Incremental DNS cut-over** — shift DNS weights (10 % → 50 % → 100 %) service-by-service with monitoring burn-in periods. For external-dns users, annotate the new `Gateway` to take over DNS records once at 100 %.
 6. **Rollback gate** — keep old Ingress resources and controller deployed but weighted at 0 % for at least one full traffic cycle (e.g., 24 h including peak); this allows instant rollback by re-weighting without a redeploy.
 7. **Cleanup** — delete old `Ingress` resources, drain the old controller deployment, and remove the old `IngressClass`; update CI/CD pipelines to target `HTTPRoute` going forward.
+
+
+---
+
+## 🗓️ Added 2026-10-26 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-26 20:18 -->
+
+### Q: How do you implement request mirroring (traffic shadowing) with Gateway API, and what are the operational risks?
+
+**Answer:**
+HTTPRoute supports a `RequestMirror` filter that sends a copy of each inbound request to a secondary backend without affecting the primary response path. You configure it as a filter on a specific rule, specifying the mirror backend ref and an optional percentage (in v1.1+). Key use cases include dark-launching new service versions, load testing with real traffic, and validating backend behavior without user impact.
+
+Operational risks to address:
+- **Double load**: the mirror backend receives full request volume; size it accordingly or use percentage-based mirroring.
+- **Side effects**: if the shadow backend mutates state (writes to a DB, sends emails), mirroring causes real-world consequences—shadow targets must be read-safe or use separate data stores.
+- **Response discarding**: mirror responses are dropped, so errors on the shadow backend are invisible unless you instrument it independently with metrics/logs.
+- **Latency coupling**: some implementations hold the upstream connection slightly longer while dispatching the mirror; benchmark the controller's behavior under high fan-out.
+- Always validate in staging that the mirroring percentage knob is respected under high concurrency.
+
+---
+
+### Q: How do you integrate external DNS automation with Ingress or Gateway API resources, and what failure modes should you anticipate?
+
+**Answer:**
+ExternalDNS watches Ingress and (via a Gateway API provider) Gateway/HTTPRoute resources and reconciles DNS records in an external provider (Route 53, Cloud DNS, etc.) based on `spec.rules[].host` or `spec.addresses`. For Gateway API, ExternalDNS needs the controller's `status.addresses` to be populated before it can publish a record—so any delay in the Gateway controller setting status blocks DNS propagation.
+
+Failure modes to anticipate:
+- **Status never populated**: if the GatewayClass controller is unhealthy, the Gateway's `Ready` condition and address never appear, so ExternalDNS waits indefinitely; alert on Gateway status conditions.
+- **Stale records on deletion**: if ExternalDNS crashes between a resource deletion and the DNS API call, orphaned records persist; use TTLs and reconcile-interval settings defensively.
+- **Annotation conflicts**: multiple Ingress resources declaring the same hostname cause ExternalDNS to write and overwrite the record continuously—enforce hostname uniqueness through admission webhooks.
+- **Provider throttling**: mass deployments can saturate DNS API rate limits; configure batch mode and exponential backoff.
+- **Split-brain during migration**: running ExternalDNS against both old Ingress and new HTTPRoute simultaneously for the same hostname causes record flapping; phase the migration or use ownership annotations.
+
+---
+
+### Q: A Gateway controller is correctly installed, but newly created HTTPRoutes remain in an `Accepted: False` state with reason `NoMatchingParent`. How do you systematically diagnose and resolve this?
+
+**Answer:**
+`NoMatchingParent` means the HTTPRoute's `parentRef` does not resolve to an actual Gateway that the route is allowed to bind to. Diagnostic steps:
+
+1. **Check `parentRef` fields**: verify `name`, `namespace`, `sectionName`, and `port` exactly match a `spec.listeners[]` entry on the target Gateway—`sectionName` must equal `listener.name`, not an arbitrary string.
+2. **Inspect Gateway listener conditions**: `kubectl get gateway <name> -o yaml` and check `status.listeners[].conditions`; a listener in `Conflicted` or `Detached` state will reject all routes.
+3. **Validate namespace isolation**: if the HTTPRoute is in a different namespace than the Gateway, confirm a `ReferenceGrant` exists in the Gateway's namespace allowing routes from the HTTPRoute's namespace, and that the Gateway listener's `allowedRoutes.namespaces` selector matches.
+4. **Confirm GatewayClass controller is running**: if the GatewayClass has no active controller, Gateways are never reconciled and emit no `Programmed` condition, causing all route bindings to fail.
+5. **Verify API version alignment**: mixing `gateway.networking.k8s.io/v1` resources with a controller that only watches `v1beta1` causes silent non-reconciliation.
+6. After fixes, force a resync by annotating the route or restarting the controller; watch `status.parents[]` for an `Accepted: True` condition with the correct `controllerName`.
+
+---
+
+### Q: How do you approach capacity planning and autoscaling for an Ingress controller, and what metrics should drive scaling decisions?
+
+**Answer:**
+Ingress controllers are often treated as static infrastructure but are actually on the critical request path; under-provisioning causes cascading failures across all services. Approach:
+
+**Horizontal scaling**: run the controller as a Deployment (not DaemonSet) when you want HPA-driven scaling. Drive HPA on **active connections**, **requests per second**, and **upstream response latency p99** rather than CPU alone, since many controllers are I/O-bound.
+
+**Key metrics to monitor**:
+- `nginx_ingress_controller_requests` / Envoy `downstream_rq_total`—throughput baseline.
+- `nginx_ingress_controller_response_duration_seconds` p95/p99—latency signal for scaling before errors appear.
+- `nginx_ingress_controller_ssl_expire_time_seconds`—not a scaling metric but critical for capacity of TLS handshake threads.
+- Active upstream connections vs. worker process limits—NGINX `worker_connections` sets a hard ceiling; hitting it causes 502s without CPU saturation.
+- Configuration reload latency and frequency—frequent reloads in NGINX block new connections briefly; high reload rates indicate a need for a controller that supports hot reconfiguration (e.g., Envoy-based).
+
+**Vertical limits**: increase `worker_processes` and `worker_connections` in NGINX config or Envoy's concurrency before adding replicas, since coordination overhead grows with pod count.
+
+**Load testing**: use tools like `k6` or `wrk2` against a staging cluster sized identically to production; establish breaking points for connections, SSL handshake rate, and TLS session cache saturation before setting HPA thresholds.
