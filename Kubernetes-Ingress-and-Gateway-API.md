@@ -987,3 +987,70 @@ Ingress controllers are often treated as static infrastructure but are actually 
 **Vertical limits**: increase `worker_processes` and `worker_connections` in NGINX config or Envoy's concurrency before adding replicas, since coordination overhead grows with pod count.
 
 **Load testing**: use tools like `k6` or `wrk2` against a staging cluster sized identically to production; establish breaking points for connections, SSL handshake rate, and TLS session cache saturation before setting HPA thresholds.
+
+
+---
+
+## 🗓️ Added 2026-10-27 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-27 19:49 -->
+
+### Q: How do you implement IP-based allowlisting and denylisting at the Ingress/Gateway layer, and what are the limitations of relying on source IP for access control in Kubernetes?
+
+**Model Answer:**
+
+For classic Ingress (nginx), allowlisting is typically done via the `nginx.ingress.kubernetes.io/whitelist-source-range` annotation; for Gateway API, it depends on controller support—some expose `HTTPRoute` filters or vendor-specific policy attachments (e.g., Envoy's `AuthorizationPolicy` or custom `ExtensionRef` filters). Key limitations include:
+
+- **Source IP accuracy**: Behind a cloud load balancer, the source IP seen by the controller is the LB's IP unless `externalTrafficPolicy: Local` is set on the Service, or `proxy-protocol` is enabled end-to-end.
+- **PROXY Protocol / XFF header**: Trusting `X-Forwarded-For` is insecure unless you strip and re-set it at a controlled ingress point; attackers can spoof it.
+- **CGNAT and shared egress**: Corporate users may share a single egress IP, so allowlisting an IP grants access to an entire office—allowlisting is coarse-grained.
+- **Dynamic IP churn**: Cloud NAT gateways rotate IPs, making static lists operationally expensive.
+- Prefer layering IP controls with stronger authentication (mTLS, OIDC) rather than treating IP allowlisting as a sole security boundary.
+
+---
+
+### Q: A canary HTTPRoute is receiving 100% of traffic instead of the intended 10%, even though weights are configured correctly. How do you diagnose and fix this?
+
+**Model Answer:**
+
+Start by verifying the actual resource state rather than the manifest:
+
+1. **Check both BackendRef weights add up correctly** — a single BackendRef with no sibling automatically gets 100%; you need at least two BackendRefs with explicit weights (e.g., 90 + 10).
+2. **Confirm the controller has reconciled the resource** — look at `HTTPRoute` status conditions; `ResolvedRefs: False` or a stale `ObservedGeneration` means the controller hasn't processed the latest spec.
+3. **Inspect the controller's actual data-plane config** — for Envoy-based controllers, query `envoy-admin /config_dump` and verify the weighted cluster reflects 90/10; the bug may be a controller reconciliation issue, not a spec problem.
+4. **Check for duplicate HTTPRoutes with overlapping rules** — a second HTTPRoute matching the same hostname/path with a single backend will shadow the weighted route; rule precedence (exact > prefix > regex, then creation timestamp) determines which wins.
+5. **Validate Service endpoints** — if the canary Service has no ready endpoints, some controllers fall back to the only healthy backend, silently ignoring the weight.
+6. Fix by ensuring both Services have healthy endpoints, resolving any conflicting routes, and confirming controller version supports weighted BackendRefs (it's a relatively recent GA feature in Gateway API v0.8+).
+
+---
+
+### Q: How do you expose TCP or UDP services through the Gateway API, and what are the current maturity and portability constraints you should communicate to stakeholders?
+
+**Model Answer:**
+
+Gateway API handles TCP and UDP via **`TCPRoute`** and **`UDPRoute`** resources, both of which are currently in the **Experimental** channel (as of Gateway API v1.1) — meaning they are not GA and APIs may change. Key points:
+
+- A `Gateway` listener must be configured with `protocol: TCP` (or `UDP`) and a specific port; the `TCPRoute` then binds to that listener via `parentRef`.
+- `TCPRoute` supports only backend routing (no header manipulation, no path matching) since TCP is stream-based — you route purely on the listener port.
+- **Portability is low**: TCP/UDP route support is controller-specific; NGINX Ingress requires separate `--tcp-services-configmap` configuration entirely outside Gateway API, while Envoy Gateway and Cilium have better experimental support.
+- **Security surface**: Exposing raw TCP ports bypasses all L7 WAF, authentication, and header-policy controls — communicate this trade-off explicitly.
+- For stakeholders, recommend wrapping TCP services in gRPC or HTTP/2 where possible to regain L7 observability and policy; fall back to `TCPRoute` only for legacy protocols (databases, MQTT, etc.) and ensure those listeners are locked down at the `Gateway` level via `allowedRoutes` namespace selectors.
+
+---
+
+### Q: Describe how you would conduct a blameless post-mortem after an Ingress misconfiguration caused a 30-minute customer-facing outage, and what systemic changes would you propose to prevent recurrence?
+
+**Model Answer:**
+
+**Post-mortem structure:**
+- Establish a precise timeline from monitoring data (ingress error-rate spike, alerts fired, first customer report, mitigation applied, full recovery) — avoid relying on memory.
+- Identify the contributing factors without assigning blame: Was it a missing review gate? An annotation typo that validation didn't catch? A controller upgrade that changed default behavior silently?
+- Invite the engineer who made the change — psychological safety is essential for accurate root-cause data.
+
+**Systemic improvements typically surfaced:**
+- **Admission validation**: Deploy `ingress-nginx`'s admission webhook or a policy engine (OPA/Kyverno) that rejects syntactically or semantically invalid Ingress/HTTPRoute resources before they reach the API server.
+- **Progressive delivery of routing changes**: Treat Ingress/HTTPRoute changes with the same rigor as application deploys — gate on smoke tests, use canary weight shifts rather than hard cutovers.
+- **Automated conformance testing**: Run Gateway API conformance tests in a staging environment against every controller upgrade PR.
+- **Observability gaps**: If the issue wasn't caught by alerting for 10+ minutes, add SLO-aligned error-rate and latency alerts at the Ingress layer specifically, not just at the application layer.
+- **Runbook update**: Document the specific misconfiguration pattern and its observable signature so on-call engineers can diagnose it in under 5 minutes next time.
+- Publish the post-mortem within 5 business days and track action items in your issue tracker with owners and due dates.

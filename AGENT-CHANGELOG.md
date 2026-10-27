@@ -787,3 +787,21 @@ _Committed & pushed: yes_
 - How do you approach capacity planning and autoscaling for an Ingress controller, and what metrics should drive scaling decisions?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-27 19:49:11
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7735 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level topology spread constraints to guarantee high availability across zones and nodes at scale?
+- A production EKS cluster's Control Plane logs show a sudden flood of `certificatesigningrequests` from kubelets causing API server saturation. What is the likely root cause and how do you remediate it?
+- How do you design an EKS strategy for managing and enforcing workload-level readiness and liveness probe standards to prevent cascading failures during deployments and traffic spikes?
+- Describe a situation where an EKS cluster passed all automated compliance scans but was later found to have a significant security gap. What happened and what architectural changes did you make?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6214 chars)
+- How do you implement IP-based allowlisting and denylisting at the Ingress/Gateway layer, and what are the limitations of relying on source IP for access control in Kubernetes?
+- A canary HTTPRoute is receiving 100% of traffic instead of the intended 10%, even though weights are configured correctly. How do you diagnose and fix this?
+- How do you expose TCP or UDP services through the Gateway API, and what are the current maturity and portability constraints you should communicate to stakeholders?
+- Describe how you would conduct a blameless post-mortem after an Ingress misconfiguration caused a 30-minute customer-facing outage, and what systemic changes would you propose to prevent recurrence?
+
+_Committed & pushed: yes_

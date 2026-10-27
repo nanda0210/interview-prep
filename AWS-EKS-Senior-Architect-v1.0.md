@@ -5157,3 +5157,76 @@ This scenario is a classic cold-start vs. warm-pool mismatch. The situation aros
 - **Crash loop prevention:** Set `startupProbe` with generous `failureThreshold` × `periodSeconds` on init containers doing slow network operations; cap init container resource requests tightly to prevent a runaway init loop from consuming node resources; use `terminationMessagePath` and `terminationMessagePolicy: FallbackToLogsOnError` to surface crash reasons without manual log diving.
 - **Graceful coordinated shutdown:** Set `terminationGracePeriodSeconds` at the Pod level to be longer than the slowest sidecar drain time (e.g., Envoy's `--drain-time-s`); use a `preStop` hook on the main container to sleep briefly (typically 5 s) so Envoy finishes in-flight requests before the app exits; validate this with load tests and chaos experiments injecting pod terminations under traffic.
 - **Admission enforcement:**
+
+
+---
+
+## 🗓️ Added 2026-10-27 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-27 19:48 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level topology spread constraints to guarantee high availability across zones and nodes at scale?
+
+**Model Answer:**
+
+Topology spread constraints are the primary mechanism, but without guardrails they are often misconfigured or omitted entirely. A robust strategy layers several controls:
+
+- **Admission enforcement:** Deploy an OPA/Gatekeeper or Kyverno policy that requires every `Deployment`, `StatefulSet`, and `DaemonSet` with `replicas > 1` to declare at least one `topologySpreadConstraint` scoped to `topology.kubernetes.io/zone` with `whenUnsatisfiable: DoNotSchedule` (or `ScheduleAnyway` for best-effort tiers).
+- **Policy library:** Maintain a curated library of constraint templates (zone spread, node spread, combined) versioned in Git; teams select the appropriate template rather than authoring raw YAML.
+- **Karpenter alignment:** Ensure Karpenter NodePools cover all three (or more) AZs and carry matching zone labels; a spread constraint referencing zones that have no schedulable capacity silently falls back—alert on `FailedScheduling` events citing topology reasons.
+- **Drift detection:** A weekly CI job renders all live workload specs, evaluates spread constraints against actual node topology, and files tickets for non-compliant owners.
+- **Testing in staging:** Chaos experiments (pod termination per zone, AZ-level node drain) validate that spread constraints actually prevent single-zone concentration before production promotion.
+- **Metrics:** Export `kube_pod_info` with node and zone labels to Prometheus; a Grafana dashboard shows per-workload AZ distribution and fires alerts when any zone holds > 60% of a deployment's replicas.
+
+---
+
+### Q: A production EKS cluster's Control Plane logs show a sudden flood of `certificatesigningrequests` from kubelets causing API server saturation. What is the likely root cause and how do you remediate it?
+
+**Model Answer:**
+
+The most common root cause is a **mass node replacement event** (Karpenter NodePool update, managed node group rolling update, or an ASG launch template change) where hundreds of nodes simultaneously bootstrap and each kubelet issues a CSR for its serving certificate via the TLS bootstrapping flow. Secondary causes include a bug in a custom node-init script causing kubelet restarts in a tight loop, or an expired cluster CA forcing all nodes to re-request certificates.
+
+**Immediate triage:**
+1. `kubectl get csr --sort-by=.metadata.creationTimestamp` — identify volume and originating nodes.
+2. Check API server `apiserver_request_total` and `apiserver_current_inflight_requests` metrics; correlate with node launch timestamps.
+3. Inspect kubelet logs on affected nodes for repeated `waiting for CSR to be approved` or `certificate expired` messages.
+
+**Remediation:**
+- If rolling update triggered it, pause the update (`aws eks update-nodegroup-config` with `maxUnavailable=0` or Karpenter disruption budget set to 0) to stop new node churn.
+- Auto-approve non-malicious serving CSRs via `kube-controller-manager`'s `csrapproving` controller (enabled by default on EKS for `kubernetes.io/kube-apiserver-client-kubelet` signers) — verify it is running and not backlogged.
+- Apply API Priority and Fairness (APF) flow schema to deprioritize CSR requests below critical workload traffic.
+- Long-term: stagger node replacements (maxSurge/maxUnavailable limits, Karpenter `disruption.budgets`), and pre-warm certificate rotation before mass rollouts.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level readiness and liveness probe standards to prevent cascading failures during deployments and traffic spikes?
+
+**Model Answer:**
+
+Poorly configured probes are a leading cause of both deployment-time outages (liveness kills slow-starting pods) and traffic-spike cascades (readiness passes too early). The strategy covers policy, standards, and runtime observability:
+
+- **Standards definition:** Publish an opinionated probe standard per workload tier: HTTP services must declare a `/healthz` liveness probe with `initialDelaySeconds` ≥ application p99 cold-start time, `failureThreshold` ≥ 3, and a `/readyz` readiness probe that gates on dependency health (DB connectivity, cache warm). Startup probes are mandatory for workloads with >10s cold starts.
+- **Admission policy:** Kyverno `ClusterPolicy` enforces that all containers in `Running`-class workloads declare both liveness and readiness probes; violations block deployment. Warn-mode policies flag overly aggressive settings (`periodSeconds < 5`, `failureThreshold < 2`).
+- **Probe correctness testing:** Staging pipeline step uses `kube-score` and custom scripts to simulate probe failure scenarios (kill dependency, inject latency) and assert the pod does not receive traffic and does not enter a restart loop.
+- **Traffic guard:** Pair readiness probes with `minReadySeconds` and `progressDeadlineSeconds` on Deployments; ALB target group `deregistrationDelay` must exceed the readiness probe's worst-case propagation time to avoid 502s during rolling updates.
+- **Runtime alerting:** Alert on pods with `restartCount > 5` in 10 minutes (liveness probe misconfiguration signal) and on pods cycling between `Running` and `NotReady` more than 3 times per hour (readiness flap signal).
+- **Quarterly review:** Automated report of probe configurations sorted by restart frequency surfaces candidates for tuning; reviewed in a reliability guild meeting.
+
+---
+
+### Q: Describe a situation where an EKS cluster passed all automated compliance scans but was later found to have a significant security gap. What happened and what architectural changes did you make?
+
+**Model Answer:**
+
+**Situation:** A fintech cluster running CIS EKS Benchmark scans via `kube-bench` consistently scored 98%. During a purple-team exercise, the security team demonstrated that a compromised application pod in namespace `payments` could exfiltrate data by calling the EC2 Instance Metadata Service (IMDS) on the underlying node, retrieving the node's instance profile credentials, and assuming roles far beyond the pod's intended IRSA scope.
+
+**Why scans missed it:** `kube-bench` validated that IMDSv2 was required (`HttpTokens: required`) on the launch template—which was true—but the application container was still able to call IMDS because the node's IMDSv2 hop limit was set to `2`, allowing pod-level access. The benchmark only checked `HttpTokens`, not `HttpPutResponseHopLimit`.
+
+**Root cause:** Default EKS managed node group launch templates set `HttpPutResponseHopLimit=2` to support Docker-in-Docker use cases; the team had not overridden this.
+
+**Remediation and architectural changes:**
+1. Immediately patched all node launch templates to `HttpPutResponseHopLimit=1`, rolling out via managed node group updates; this blocks IMDS access from pods while preserving node-level access.
+2. Added a compliance-as-code check (AWS Config custom rule + Terraform policy-as-code in CI) specifically asserting `HttpPutResponseHopLimit == 1` on every launch template used by EKS node groups.
+3. Deployed a network policy (using VPC CNI network policy) blocking egress to `169.254.169.254/32` from all namespaces except `kube-system`.
+4. Extended the purple-team exercise scope to include IMDS abuse, IRSA token theft, and etcd snapshot access as explicit test cases in the quarterly adversarial review cycle.
+5. Published an internal post-mortem emphasizing that benchmark compliance scores are necessary but not sufficient—threat-model-driven adversarial testing must complement them.
