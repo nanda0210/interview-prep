@@ -1054,3 +1054,67 @@ Gateway API handles TCP and UDP via **`TCPRoute`** and **`UDPRoute`** resources,
 - **Observability gaps**: If the issue wasn't caught by alerting for 10+ minutes, add SLO-aligned error-rate and latency alerts at the Ingress layer specifically, not just at the application layer.
 - **Runbook update**: Document the specific misconfiguration pattern and its observable signature so on-call engineers can diagnose it in under 5 minutes next time.
 - Publish the post-mortem within 5 business days and track action items in your issue tracker with owners and due dates.
+
+
+---
+
+## 🗓️ Added 2026-10-28 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-28 20:04 -->
+
+### Q: How do you implement request/response header mutation at the Gateway API layer, and what are the scoping rules that determine where mutations are applied?
+
+**Answer:**
+Gateway API supports header mutation via `RequestHeaderModifier` and `ResponseHeaderModifier` filters, which can be placed at two scopes: the HTTPRoute rule level (applied to all traffic matching that rule) and the individual `backendRef` level (applied only when traffic is forwarded to that specific backend). Key points interviewers want to hear:
+
+- **Add vs. Set vs. Remove**: `add` appends without overwriting, `set` overwrites, and `remove` strips the header entirely — conflating them causes subtle security or caching bugs.
+- **Scoping precedence**: Backend-level filters are applied *after* route-level filters, so a backend filter can further refine what the route filter already set.
+- **Security implications**: Stripping internal headers (e.g., `X-Internal-User-Id`) before responses leave the cluster prevents information leakage; this should be encoded in a shared policy (e.g., via a PolicyAttachment or common HTTPRoute library in CI/CD).
+- **Portability caveat**: Not all conformant implementations support response header modification equally; validate against the controller's conformance report before relying on it in production.
+- **Testing**: Use canary traffic with curl `-v` or an echo backend to verify the exact headers received by the backend and returned to the client before rolling out broadly.
+
+---
+
+### Q: What is the Gateway API `BackendTLSPolicy` resource, and how does it differ from TLS configuration on the Gateway listener itself?
+
+**Answer:**
+`BackendTLSPolicy` is a Gateway API resource (currently in experimental channel) that governs TLS encryption on the *egress* leg — from the proxy to the backend Service — as opposed to Gateway listener TLS, which governs the *ingress* leg from the client to the proxy. This distinction matters for end-to-end encryption in zero-trust environments:
+
+- **Gateway listener TLS** terminates client-facing TLS; the backend connection is typically plain HTTP unless separately configured.
+- **BackendTLSPolicy** attaches to a Service and instructs the data-plane to open a TLS connection to the pod, providing a CA bundle or a well-known system trust store for verification.
+- **mTLS extension**: Some implementations extend this to mutual TLS toward backends, overlapping with service-mesh concerns — understand whether you're duplicating what a mesh already does.
+- **Certificate rotation**: Backend certs must still be managed (e.g., via cert-manager's `Certificate` on the server side); `BackendTLSPolicy` only tells the proxy *how to trust* those certs, not how to provision them.
+- **Operational risk**: Misconfiguring the CA bundle causes all traffic to the backend to fail with TLS handshake errors; staged rollout and readiness probe validation before cutover are essential.
+
+---
+
+### Q: How would you design an Ingress/Gateway layer that must satisfy PCI-DSS requirements, and what specific controls map to which components?
+
+**Answer:**
+PCI-DSS imposes controls on encryption, access restriction, audit logging, and vulnerability management. Mapping to the Gateway layer:
+
+- **Requirement 4 (encryption in transit)**: Enforce TLS 1.2+ minimum on all Gateway listeners; disable weak cipher suites via controller-specific config or `TLSPolicy`; use `BackendTLSPolicy` for backend encryption where card data flows.
+- **Requirement 1 (network segmentation)**: Use separate GatewayClasses and dedicated controller pods for cardholder data environment (CDE) traffic; apply `ReferenceGrant` strictly so only CDE namespaces can bind HTTPRoutes to the CDE Gateway.
+- **Requirement 6 (WAF)**: Attach a WAF policy at the Gateway layer targeting CDE hostnames; maintain and test the ruleset, and alert on rule update failures.
+- **Requirement 10 (audit logging)**: Enable structured access logs with all required fields (client IP, URI, status, TLS version, response size); ship to a tamper-evident SIEM; ensure log retention meets the 12-month requirement.
+- **Requirement 2 (hardening)**: Remove default ingress-wide catch-all rules; scope controller RBAC minimally; run controllers with read-only root filesystem and non-root UID.
+- **Scope minimization**: Route only the minimum paths through the CDE Gateway; non-CDE services should use a separate Gateway entirely, reducing audit scope.
+
+---
+
+### Q: A junior engineer accidentally deleted the `Gateway` resource in production, taking down all HTTPRoutes bound to it. Walk through how you recover quickly and how you prevent recurrence.
+
+**Answer:**
+
+**Immediate recovery:**
+1. Reapply the `Gateway` manifest from Git (this is why GitOps source-of-truth is critical); the controller reconciles and re-provisions the load balancer or reconfigures the data plane within seconds to minutes depending on the provider.
+2. If the external load balancer's IP/hostname changed on recreation, update DNS records immediately (or confirm external-dns automation handles it) and monitor TTL propagation.
+3. Verify all HTTPRoutes return to `Accepted: True` and `ResolvedRefs: True` status before declaring recovery complete.
+4. Check that TLS certificates are re-attached and valid; some controllers re-request certs from cert-manager on Gateway recreation.
+
+**Prevention:**
+- Enable Kubernetes RBAC to restrict `delete` on `gateways` resources to a break-glass role only; developers should have `get/list/watch` at most.
+- Add a `kubectl` admission webhook or OPA/Kyverno policy that requires a specific annotation or two-person approval label before allowing `Gateway` deletion.
+- Store all Gateway manifests in Git with branch protection; require PR review for changes.
+- Consider Velero or etcd-level backup schedules so the manifest can be recovered even if Git history is somehow unavailable.
+- Run chaos/game-day exercises in non-production to practice recovery and refine runbooks before an incident forces it.

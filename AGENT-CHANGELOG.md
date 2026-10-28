@@ -805,3 +805,21 @@ _Committed & pushed: yes_
 - Describe how you would conduct a blameless post-mortem after an Ingress misconfiguration caused a 30-minute customer-facing outage, and what systemic changes would you propose to prevent recurrence?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-28 20:04:47
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8015 chars)
+- A production EKS cluster's etcd-backed API server is showing increasing p99 request latency (>2 seconds) during peak hours, yet node count and workload count have not significantly changed. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level GPU resource allocation, isolation, and observability at scale — including time-slicing, MIG partitioning, and cost attribution?
+- Describe a situation where EKS workloads using AWS Secrets Manager via the Secrets Store CSI Driver began experiencing intermittent pod startup failures in production. How did you diagnose and resolve it?
+- How do you design an EKS strategy for managing and enforcing cluster-wide API server admission webhook hygiene — ensuring webhooks do not become single points of failure or introduce latency regressions?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6106 chars)
+- How do you implement request/response header mutation at the Gateway API layer, and what are the scoping rules that determine where mutations are applied?
+- What is the Gateway API `BackendTLSPolicy` resource, and how does it differ from TLS configuration on the Gateway listener itself?
+- How would you design an Ingress/Gateway layer that must satisfy PCI-DSS requirements, and what specific controls map to which components?
+- A junior engineer accidentally deleted the `Gateway` resource in production, taking down all HTTPRoutes bound to it. Walk through how you recover quickly and how you prevent recurrence.
+
+_Committed & pushed: yes_

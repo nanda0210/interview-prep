@@ -5230,3 +5230,76 @@ Poorly configured probes are a leading cause of both deployment-time outages (li
 3. Deployed a network policy (using VPC CNI network policy) blocking egress to `169.254.169.254/32` from all namespaces except `kube-system`.
 4. Extended the purple-team exercise scope to include IMDS abuse, IRSA token theft, and etcd snapshot access as explicit test cases in the quarterly adversarial review cycle.
 5. Published an internal post-mortem emphasizing that benchmark compliance scores are necessary but not sufficient—threat-model-driven adversarial testing must complement them.
+
+
+---
+
+## 🗓️ Added 2026-10-28 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-28 20:04 -->
+
+### Q: A production EKS cluster's etcd-backed API server is showing increasing p99 request latency (>2 seconds) during peak hours, yet node count and workload count have not significantly changed. How do you diagnose and resolve this?
+
+**Diagnosis approach:**
+- Enable and review API server audit logs (via CloudWatch Logs) for high-volume callers — look for controllers, operators, or custom workloads performing excessive LIST/WATCH calls without proper label selectors (i.e., unfiltered watches on large resource sets).
+- Check CloudWatch metrics `apiserver_request_duration_seconds` broken down by verb and resource; LIST on large collections (Pods, Events, ConfigMaps) is the most common culprit.
+- Inspect `apiserver_watch_events_total` and `etcd_object_counts` — runaway Event objects or unbounded CRD instance growth dramatically inflates etcd response sizes.
+- Use `kubectl top` and `kubectl get --raw /metrics` to examine `etcd_request_duration_seconds_bucket` and identify slow etcd operations vs. slow API server processing.
+
+**Resolution strategies:**
+- Add `--event-ttl` tuning (default 1h) and enforce namespace-level ResourceQuotas on Events via a custom admission webhook.
+- Refactor LIST-heavy controllers to use informers with shared caches rather than direct API polling.
+- Enable API Priority and Fairness (APF) `FlowSchema` and `PriorityLevelConfiguration` objects to rate-limit low-priority callers (e.g., CI tooling) without starving critical system components.
+- For persistent etcd bloat, compact and defragment etcd via AWS Support on managed control planes — and set up CloudWatch alarms on `etcd_db_total_size_in_bytes`.
+- Long-term: audit all installed operators for controller-runtime cache scope and restrict watched namespaces where full-cluster watches are unnecessary.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level GPU resource allocation, isolation, and observability at scale — including time-slicing, MIG partitioning, and cost attribution?
+
+**Provisioning and isolation:**
+- Use Karpenter NodePool with `nvidia.com/gpu` resource requirements and instance-type constraints (p3, p4d, g5) matched to workload profiles; label nodes by GPU model for precise scheduling via `nodeAffinity`.
+- For multi-tenant GPU sharing, deploy the NVIDIA Device Plugin with time-slicing configuration (`nvidia.com/gpu: N` replicas per physical GPU) via ConfigMap; for A100 instances, prefer MIG partitioning (e.g., `1g.5gb` profiles) to provide hard memory isolation between tenants.
+- Enforce GPU quotas per namespace via ResourceQuota (`requests.nvidia.com/gpu`) and pair with a validating webhook that rejects GPU workloads lacking explicit `limits.nvidia.com/gpu` declarations to prevent unbounded allocation.
+
+**Observability and cost attribution:**
+- Deploy DCGM Exporter as a DaemonSet on GPU nodes and scrape metrics (GPU utilization, memory used, SM occupancy, NVLink throughput) into Prometheus; surface via Grafana dashboards scoped per namespace/team label.
+- Enrich node labels with team/cost-center tags propagated via Karpenter NodeClass EC2 tags; use Kubecost or OpenCost to join GPU-hour consumption with AWS pricing for per-team chargeback.
+- Alert on GPU utilization <10% sustained over 30 minutes to identify idle reserved GPU pods consuming expensive capacity, and integrate with a Slack/Jira workflow to prompt rightsizing.
+
+**Safety guardrails:**
+- Gate GPU workload scheduling via a Gatekeeper OPA policy requiring a `gpu-workload-approved` annotation set only by platform team admission; prevents ad-hoc GPU requests from inflating costs.
+- Use PodDisruptionBudgets and `preemptionPolicy: Never` for long-running training jobs to prevent Karpenter consolidation from evicting multi-hour runs mid-epoch.
+
+---
+
+### Q: Describe a situation where EKS workloads using AWS Secrets Manager via the Secrets Store CSI Driver began experiencing intermittent pod startup failures in production. How did you diagnose and resolve it?
+
+**Situation:** A payments service using the Secrets Store CSI Driver (`secrets-store.csi.k8s.io`) with the AWS provider began seeing pods stuck in `ContainerCreating` for 2–8 minutes during peak deployment windows, causing SLA breaches.
+
+**Diagnosis:**
+- `kubectl describe pod` showed the CSI driver volume mount timing out; the event log contained `failed to fetch secret from Secrets Manager: ThrottlingException`.
+- AWS CloudTrail confirmed `GetSecretValue` calls from the IRSA-bound service account were hitting the default Secrets Manager regional TPS limit (10,000 TPS per region, but per-secret limits apply at a lower tier for burst).
+- The spike coincided with a large deployment rollout where 200+ pod replicas were starting simultaneously, each fetching the same secret independently on mount.
+- CSI driver logs (`kubectl logs -n kube-system -l app=secrets-store-csi-driver`) confirmed no caching was enabled — every pod mount triggered a live API call.
+
+**Resolution:**
+- Enabled the CSI driver's `rotation-poll-interval` and set `SecretProviderClass` with `refreshInterval` to allow the driver to cache secret values node-locally, reducing per-pod API calls to one per node per interval.
+- Implemented a staggered rollout strategy (maxSurge 10%, maxUnavailable 0%) to spread pod starts over time, reducing simultaneous secret fetches.
+- Created a thin Kubernetes Secret syncing sidecar pattern: the CSI driver syncs the secret to a native Kubernetes Secret (using `secretObjects` in `SecretProviderClass`), and subsequent pods consume the K8s Secret directly — eliminating per-pod AWS API calls entirely for non-rotation-sensitive workloads.
+- Added CloudWatch alarms on `SecretsManager` `ThrottleCount` metric scoped to the cluster's IAM role prefix as an early warning.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing cluster-wide API server admission webhook hygiene — ensuring webhooks do not become single points of failure or introduce latency regressions?
+
+**Reliability architecture:**
+- All `MutatingWebhookConfiguration` and `ValidatingWebhookConfiguration` objects must declare `failurePolicy: Fail` only for security-critical webhooks (e.g., OPA Gatekeeper, Kyverno policy enforcement); non-critical webhooks (cost labeling, annotation enrichment) must use `failurePolicy: Ignore` to prevent cluster-wide pod scheduling disruption if the webhook backend is unavailable.
+- Set `timeoutSeconds` conservatively (≤5s for validating, ≤3s for mutating) and configure webhook backends as Deployments with PodDisruptionBudgets, anti-affinity across AZs, and HPA to handle admission burst during large rollouts.
+- Use `namespaceSelector` and `objectSelector` to scope webhooks narrowly — a webhook watching all namespaces on all resource types is a correctness risk and a latency risk; exclude `kube-system` and critical add-on namespaces explicitly.
+
+**Observability and governance:**
+- Instrument webhook backends with histograms on admission decision latency; surface via Prometheus/Grafana and alert if p99 exceeds 1 second — API server adds webhook latency directly to user-facing request latency.
+- Add a CI/CD gate that runs `kubectl apply --dry-run=server` against a staging cluster with all webhooks active before promoting any webhook configuration change to production, catching unintended scope expansions.
+- Maintain a webhook inventory in Git (GitOps-managed via Flux/ArgoCD); any new `MutatingWebhookConfiguration` or `ValidatingWebhookConfiguration` requires a platform team PR review verifying scope, failure policy, timeout, and HA configuration of the backend.
+- Periodically run a chaos test (using a controlled experiment) that terminates all webhook backend pods during off-peak hours to validate `failurePolicy: Ignore` webhooks truly degrade gracefully and `failurePolicy: Fail` webhooks surface alerts without causing unrecoverable cluster state.
