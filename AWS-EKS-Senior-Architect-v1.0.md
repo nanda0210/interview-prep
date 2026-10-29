@@ -5303,3 +5303,71 @@ Poorly configured probes are a leading cause of both deployment-time outages (li
 - Add a CI/CD gate that runs `kubectl apply --dry-run=server` against a staging cluster with all webhooks active before promoting any webhook configuration change to production, catching unintended scope expansions.
 - Maintain a webhook inventory in Git (GitOps-managed via Flux/ArgoCD); any new `MutatingWebhookConfiguration` or `ValidatingWebhookConfiguration` requires a platform team PR review verifying scope, failure policy, timeout, and HA configuration of the backend.
 - Periodically run a chaos test (using a controlled experiment) that terminates all webhook backend pods during off-peak hours to validate `failurePolicy: Ignore` webhooks truly degrade gracefully and `failurePolicy: Fail` webhooks surface alerts without causing unrecoverable cluster state.
+
+
+---
+
+## 🗓️ Added 2026-10-29 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-29 20:03 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes event-driven autoscaling (KEDA) safely at scale — including scaler hygiene, scaling floor/ceiling governance, and preventing runaway scaling cascades?
+
+**Model Answer:**
+
+- **Scaler governance via policy:** Enforce allowed scaler types (Kafka, SQS, Prometheus, etc.) and required `minReplicaCount`/`maxReplicaCount` bounds using OPA/Gatekeeper or Kyverno policies — reject `ScaledObjects` with `maxReplicaCount` above a namespace-level cap or with `minReplicaCount: 0` for latency-sensitive services.
+- **HPA coexistence guard:** Block simultaneous HPA and KEDA `ScaledObject` targeting the same workload via admission webhook; KEDA manages its own HPA under the hood, and a duplicate HPA causes conflicting scaling decisions.
+- **Scaler credential isolation:** Each KEDA `TriggerAuthentication` must reference a namespace-scoped IRSA or ExternalSecret; block `ClusterTriggerAuthentication` for team workloads to prevent cross-tenant credential leakage.
+- **Cooldown and polling hygiene:** Mandate `pollingInterval ≥ 15s` and `cooldownPeriod ≥ 60s` in policy to prevent thrashing; for SQS scalers, require `scaleOnInFlight: false` where job idempotency is unverified.
+- **Runaway cascade prevention:** Set per-namespace `ResourceQuota` on pod count; Karpenter `NodePool` limits act as a secondary ceiling so a runaway `ScaledObject` cannot exhaust cluster capacity.
+- **Observability:** Export KEDA operator metrics (`keda_scaler_metrics_value`, `keda_scaled_object_errors`) to Prometheus; alert on sustained scaler errors or on replicas hitting `maxReplicaCount` for more than 5 minutes (capacity planning signal).
+- **Chaos validation:** Periodically inject artificial queue depth spikes in staging to verify scaling ceilings hold and that downstream dependencies (databases, external APIs) are protected by circuit breakers before KEDA scales into them.
+
+---
+
+### Q: A production EKS cluster's Kubernetes API server audit logs show a sustained, high-volume stream of `PATCH` requests against `leases.coordination.k8s.io` from a single controller, causing API server request queue saturation. How do you diagnose and resolve this?
+
+**Model Answer:**
+
+The `coordination.k8s.io/v1` Lease resource is used for leader election and node heartbeats; an abnormal PATCH flood almost always points to one of three causes: a controller stuck in a tight leader-election retry loop, a broken node heartbeat path, or a misbehaving custom controller.
+
+**Diagnosis steps:**
+1. Parse audit logs filtering `verb=patch`, `resource=leases` — extract `user.username` / `serviceAccountName` and `objectRef.name` to identify the specific controller and which Lease object is being hammered.
+2. Check if the Lease's `holderIdentity` is toggling rapidly — a sign that two replicas of a controller are fighting for leadership, often due to a misconfigured `leaseDuration`/`renewDeadline`/`retryPeriod` triple.
+3. If the source is `system:node:<name>`, the kubelet's lease renewal is broken — check the node's kubelet logs for `failed to update node lease` and verify VPC DNS / API server endpoint reachability from that node.
+4. Correlate with API server `apiserver_request_total` and `apiserver_current_inflight_requests` metrics to quantify queue pressure.
+
+**Resolution:**
+- For a misbehaving custom controller: patch its `Deployment` to scale to 0 immediately to stop the flood, then fix `leaseDuration` (typically 15s), `renewDeadline` (10s), `retryPeriod` (2s) per upstream defaults.
+- Apply a `PriorityLevelConfiguration` (APF) to rate-limit lease PATCH requests from that `ServiceAccount` to protect other API consumers while the fix is deployed.
+- For node heartbeat issues: cordon and drain the affected node, recycle it, and verify kubelet config `nodeStatusUpdateFrequency` and `nodeLeaseDurationSeconds` match cluster defaults.
+- Post-incident: add an alert on `rate(apiserver_audit_event_total{resource="leases",verb="patch"}[1m]) > threshold` segmented by user.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level data-plane traffic observability using AWS VPC flow logs, combined with Kubernetes context enrichment, to enable per-workload network forensics?
+
+**Model Answer:**
+
+- **VPC Flow Logs → Kubernetes context gap:** Flow logs capture IP-level traffic but are pod-IP-unaware natively; bridge this by building a continuous IP-to-pod mapping pipeline — stream ENI/pod IP assignments from the VPC CNI (via `aws-node` or Karpenter node events) into a lookup store (DynamoDB or OpenSearch), keyed by `(srcIP, timestamp_range) → {namespace, pod, node, workloadName}`.
+- **Enrichment pipeline:** Publish VPC Flow Logs to S3 or CloudWatch Logs, then use a Lambda or Kinesis Data Firehose processor that joins each flow record against the IP-to-pod mapping table, emitting enriched records with `k8s.namespace`, `k8s.workload`, and `k8s.node` dimensions into OpenSearch or S3 for Athena queries.
+- **Per-workload dashboards:** Build Grafana or OpenSearch dashboards showing per-namespace/per-workload bytes-in, bytes-out, unique destination IPs, and reject-action flows — the latter indicates NetworkPolicy or security group rule hits, valuable for both operations and compliance.
+- **Anomaly detection:** Feed enriched flows into GuardDuty (which now natively supports EKS runtime and network signals) and add custom Athena scheduled queries to detect workloads communicating with new external CIDRs or exhibiting sudden egress volume spikes.
+- **Forensic retention:** Store raw flow logs in S3 Intelligent-Tiering with a 13-month retention policy (common compliance requirement); enriched metadata in OpenSearch with 90-day hot retention; configure index lifecycle management to roll to cold/frozen tiers.
+- **Governance:** Enforce via SCP that all EKS VPCs have flow logs enabled at `ALL` traffic level and published to a centralized security account S3 bucket, preventing teams from disabling them.
+- **Operational tooling:** Maintain a runbook that uses Athena queries parameterized by pod name + time window to reconstruct full network conversation history during a security incident, including lateral movement detection across namespace boundaries.
+
+---
+
+### Q: Describe a situation where an EKS cluster upgrade from a minor version (e.g., 1.28 → 1.29) caused a previously healthy admission webhook to begin silently rejecting legitimate workload mutations, resulting in deployment failures that bypassed standard rollout monitoring.
+
+**Model Answer:**
+
+**Situation:** During a 1.28 → 1.29 upgrade on a multi-team production cluster, several teams began reporting that new `Deployment` rollouts completed the `kubectl apply` step without error but pods were never created — `ReplicaSets` showed 0 ready replicas and no events, which meant standard deployment progress monitors reported success.
+
+**Root cause:** A mutating admission webhook (injecting Vault sidecar) had `failurePolicy: Fail` and a `matchPolicy: Equivalent` configuration. Kubernetes 1.29 changed the internal serialization version for certain `apps/v1` subfields; the webhook's deserialization library (an older version of `k8s.io/client-go`) could not parse the new API request body format, returning a 500 — causing the API server to treat the mutation as failed and silently drop the object creation without surfacing an event visible to the deploying team.
+
+**Detection:** The break was found by correlating API server audit logs (`annotations.admission.webhook.admission.k8s.io/mutated` absent for expected webhook) with the webhook server's own logs showing deserialization panics — two data sources teams were not routinely monitoring.
+
+**Resolution:**
+- Immediately patched the webhook

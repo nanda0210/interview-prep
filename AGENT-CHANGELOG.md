@@ -823,3 +823,21 @@ _Committed & pushed: yes_
 - A junior engineer accidentally deleted the `Gateway` resource in production, taking down all HTTPRoutes bound to it. Walk through how you recover quickly and how you prevent recurrence.
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-29 20:04:21
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7885 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes event-driven autoscaling (KEDA) safely at scale — including scaler hygiene, scaling floor/ceiling governance, and preventing runaway scaling cascades?
+- A production EKS cluster's Kubernetes API server audit logs show a sustained, high-volume stream of `PATCH` requests against `leases.coordination.k8s.io` from a single controller, causing API server request queue saturation. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level data-plane traffic observability using AWS VPC flow logs, combined with Kubernetes context enrichment, to enable per-workload network forensics?
+- Describe a situation where an EKS cluster upgrade from a minor version (e.g., 1.28 → 1.29) caused a previously healthy admission webhook to begin silently rejecting legitimate workload mutations, resulting in deployment failures that bypassed standard rollout monitoring.
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6901 chars)
+- How do you implement session affinity (sticky sessions) at the Ingress/Gateway layer, and what are the consistency guarantees and failure modes you must account for?
+- Explain how the Gateway API's policy attachment model (`ExtensionRef` vs. `targetRef` policies) works, and what problems it solves compared to Ingress annotations.
+- A sudden spike in 502 errors is reported, and your Ingress controller logs show upstream connection refused errors. Walk through your systematic diagnosis and remediation steps.
+- How do you implement and manage Ingress or Gateway resources using GitOps, and what specific challenges arise that don't exist with other Kubernetes resource types?
+
+_Committed & pushed: yes_

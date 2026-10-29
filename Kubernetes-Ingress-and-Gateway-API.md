@@ -1118,3 +1118,81 @@ PCI-DSS imposes controls on encryption, access restriction, audit logging, and v
 - Store all Gateway manifests in Git with branch protection; require PR review for changes.
 - Consider Velero or etcd-level backup schedules so the manifest can be recovered even if Git history is somehow unavailable.
 - Run chaos/game-day exercises in non-production to practice recovery and refine runbooks before an incident forces it.
+
+
+---
+
+## 🗓️ Added 2026-10-29 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-29 20:04 -->
+
+### Q: How do you implement session affinity (sticky sessions) at the Ingress/Gateway layer, and what are the consistency guarantees and failure modes you must account for?
+
+**Model Answer:**
+
+Session affinity is typically implemented via cookie-based or IP-hash-based load balancing. In classic Ingress, it's controller-specific—nginx uses `nginx.ingress.kubernetes.io/affinity: cookie` with configurable cookie names and TTLs; Traefik has its own `sticky` annotation. Gateway API delegates this to implementation-specific `BackendLBPolicy` (a GEP in progress) or vendor extensions, so portability is limited today.
+
+Key failure modes and trade-offs to articulate:
+
+- **Pod restarts invalidate affinity**: when the target pod is replaced, the cookie still routes to the old upstream; backends must tolerate session loss or externalize session state (Redis, etc.).
+- **Uneven load distribution**: IP-hash is broken by NAT/proxies; cookie-based is safer but requires clients to support cookies, ruling it out for machine-to-machine APIs.
+- **Scale-out skew**: adding pods doesn't rebalance existing sticky sessions, causing hot spots until cookie TTLs expire.
+- **Graceful termination gap**: during rolling updates, in-flight sticky sessions land on a terminating pod; mitigate with a pre-stop sleep and `minReadySeconds`.
+- **Recommendation**: prefer stateless backends and externalize session state; use sticky sessions only as a last resort with a short TTL and clear runbook for pod disruption events.
+
+---
+
+### Q: Explain how the Gateway API's policy attachment model (`ExtensionRef` vs. `targetRef` policies) works, and what problems it solves compared to Ingress annotations.
+
+**Model Answer:**
+
+Gateway API defines a formal **policy attachment** pattern where standalone policy resources (e.g., `TimeoutPolicy`, `RetryPolicy`, `BackendTLSPolicy`) carry a `targetRef` field pointing to a Gateway, HTTPRoute, or Service. This separates *what* the routing does from *how* it behaves, letting platform teams apply policies independently of application teams. `ExtensionRef` inside an HTTPRoute filter, by contrast, is an inline reference to a controller-specific extension object used for per-rule mutations.
+
+Key advantages over Ingress annotations:
+
+- **RBAC-scoped governance**: a platform team can attach a `RateLimitPolicy` to a Gateway without granting app teams write access to that resource.
+- **Reusability**: one policy object can target multiple routes, eliminating copy-paste annotation sprawl.
+- **Conflict resolution hierarchy**: Gateway API specifies precedence rules—policies attached to a more specific resource (HTTPRoute) override those on a parent (Gateway), with status conditions reflecting which policy is active.
+- **Portability caveat**: core policy types are still maturing; many controllers implement them as CRDs with `targetRef`, but field semantics vary, so always validate against the specific controller's conformance profile.
+- **Observability**: policy objects surface status conditions, making it auditable whether a policy is accepted or overridden—impossible with opaque annotations.
+
+---
+
+### Q: A sudden spike in 502 errors is reported, and your Ingress controller logs show upstream connection refused errors. Walk through your systematic diagnosis and remediation steps.
+
+**Model Answer:**
+
+**Immediate triage (first 5 minutes):**
+1. Confirm scope—which services/backends are affected via `kubectl get endpoints <svc>` to check if endpoint slices are populated.
+2. Check pod readiness: `kubectl get pods -l <selector>` and `kubectl describe pod` for failed readiness probes, OOM kills, or CrashLoopBackOff.
+3. Verify the Service `targetPort` matches the container port declared in the pod spec—a mismatch after a recent deploy is a common cause.
+
+**Ingress/controller-layer checks:**
+- Inspect controller access logs for the upstream IP and port being refused; correlate with actual pod IPs in the endpoint slice.
+- Check if `externalTrafficPolicy: Local` is set on a NodePort/LoadBalancer Service—traffic hitting nodes without a local pod endpoint returns connection refused.
+- Review recent `ConfigMap` or annotation changes that may have altered upstream keepalive or health-check settings.
+
+**Deeper investigation:**
+- Run `kubectl exec` into the Ingress controller pod and `curl` the backend directly to isolate network policy or CNI issues.
+- Check NetworkPolicy resources: a recently applied policy may be blocking ingress-controller-to-pod traffic on the backend port.
+- Examine HPA events—if the backend scaled to zero or pods are pending due to resource pressure, endpoints temporarily go empty.
+
+**Remediation pattern:** restore endpoint availability first (scale up, fix probe), then investigate root cause. Post-incident, add synthetic health checks on critical paths and alert on `kube_endpoint_address_available == 0` to catch empty endpoint slices proactively.
+
+---
+
+### Q: How do you implement and manage Ingress or Gateway resources using GitOps, and what specific challenges arise that don't exist with other Kubernetes resource types?
+
+**Model Answer:**
+
+Ingress and Gateway resources integrate naturally into GitOps workflows (Flux, ArgoCD), but several challenges are unique to this layer:
+
+**Certificate and Secret drift**: TLS secrets referenced by Ingress or Gateway are often written by cert-manager or external-secrets-operator at runtime, not stored in Git. The GitOps reconciler must be configured to ignore these fields (ArgoCD `ignoreDifferences`, Flux `spec.ignore`) or the controller will delete live secrets on each sync.
+
+**Status field conflicts**: Controllers write heavily to `.status` on Gateway, HTTPRoute, and GatewayClass. Without proper server-side apply field ownership or ignore rules, reconcilers can enter a fight loop with the controller over status fields.
+
+**Ordering dependencies**: A Gateway must exist and be `Accepted` before HTTPRoutes that reference it become functional. GitOps wave/sync ordering (ArgoCD sync waves, Flux `dependsOn`) must encode this dependency or routes land in `Accepted: False` until the next reconcile cycle.
+
+**Multi-team ownership**: In a GitOps monorepo, different teams own different HTTPRoute files targeting the same Gateway. Merge conflicts and accidental overwrites are common; use directory-per-team structures with CODEOWNERS and OPA/Kyverno policies to prevent cross-team route collisions at admission time rather than post-merge.
+
+**Drift from controller-specific CRDs**: Vendor CRDs (e.g., nginx `IngressClass` parameters, Istio `Gateway`) may be updated by Helm releases independently of the GitOps repo, creating schema drift. Pin CRD versions in Helm charts and validate manifests in CI with `kubeconform` against the specific CRD version deployed in each environment.
