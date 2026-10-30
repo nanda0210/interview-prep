@@ -1196,3 +1196,78 @@ Ingress and Gateway resources integrate naturally into GitOps workflows (Flux, A
 **Multi-team ownership**: In a GitOps monorepo, different teams own different HTTPRoute files targeting the same Gateway. Merge conflicts and accidental overwrites are common; use directory-per-team structures with CODEOWNERS and OPA/Kyverno policies to prevent cross-team route collisions at admission time rather than post-merge.
 
 **Drift from controller-specific CRDs**: Vendor CRDs (e.g., nginx `IngressClass` parameters, Istio `Gateway`) may be updated by Helm releases independently of the GitOps repo, creating schema drift. Pin CRD versions in Helm charts and validate manifests in CI with `kubeconform` against the specific CRD version deployed in each environment.
+
+
+---
+
+## 🗓️ Added 2026-10-30 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-30 19:51 -->
+
+### Q: How do you implement mutual TLS (mTLS) between the Gateway and upstream backend services, and how does this differ from mTLS at the listener level?
+
+**Model Answer:**
+
+mTLS at the **listener level** (south-north) authenticates external clients connecting to the Gateway, configured via `Gateway.spec.listeners[].tls.mode: Mutual` with a `certificateRefs` pointing to a CA bundle. mTLS between the **Gateway and backends** (east-west) is configured through `BackendTLSPolicy` (GA in Gateway API v1.3) where you specify `clientCertificateRefs` so the data-plane presents a certificate to the upstream. Key distinctions:
+
+- **Listener mTLS** terminates at the Gateway edge; the backend sees plain HTTP or re-encrypted traffic depending on policy.
+- **Backend mTLS** requires the backend to present a trusted server certificate *and* the proxy to present a client certificate; both chains must be independently managed.
+- Certificate rotation for backend mTLS is operationally harder because both the Gateway's client cert and every backend's server cert must be renewed in coordination—cert-manager with short-lived certificates and automatic reloads is strongly recommended.
+- Not all controllers fully implement `clientCertificateRefs` yet; verify conformance test results for your chosen implementation before committing to this pattern.
+- Service mesh sidecars (Istio, Linkerd) are an alternative: they handle backend mTLS transparently without Gateway API involvement, but introduce dual-layer TLS complexity if the Gateway also terminates TLS.
+
+---
+
+### Q: Explain how Gateway API conformance profiles work, and how would you use conformance test results when selecting or upgrading a Gateway controller?
+
+**Model Answer:**
+
+The Gateway API project ships a **conformance test suite** that controllers run against and report results as a structured `ConformanceReport` YAML. Results are organized into **profiles** (e.g., `HTTP`, `TLS`, `Mesh`) and **support levels** (`Core`, `Extended`, `Implementation-specific`), so a controller may fully pass `Core` HTTP routing but only partially pass `Extended` features like `URLRewrite` or `BackendTLSPolicy`.
+
+When selecting a controller:
+- Download the published `ConformanceReport` for the candidate controller version and diff it against the Gateway API features your application teams actually use—block on any failed `Core` or required `Extended` tests.
+- Pay attention to the **Gateway API version** the report targets; a controller certified against v1.0 may not cover v1.2 additions like `BackendLBPolicy`.
+
+When upgrading:
+- Re-run conformance tests in a staging cluster *before* upgrading production; a minor controller version bump can regress previously passing `Extended` tests.
+- Treat conformance regressions as a blocking signal equivalent to a failed integration test.
+- Pin the `gatewayClassName` per environment so a controller upgrade in staging doesn't silently affect production `GatewayClass` consumers.
+
+---
+
+### Q: A production HTTPRoute suddenly starts returning 502s for one specific path prefix. Other paths on the same Gateway are healthy. Walk through your systematic debugging approach.
+
+**Model Answer:**
+
+**Scope isolation first:** Confirm only that path prefix is affected using `curl -v` with explicit `Host` headers and checking controller access logs filtered by path—rules out a Gateway-wide issue.
+
+**Check HTTPRoute status:** `kubectl get httproute <name> -o yaml`—inspect `status.parents[].conditions`; a `ResolvedRefs: False` condition points to a broken `backendRef` (wrong service name, port, or namespace without a `ReferenceGrant`).
+
+**Inspect the backend Service and Endpoints:** `kubectl get endpoints <service>`—zero endpoints means no ready pods match the selector, causing 502 at the proxy. Cross-check pod readiness probes.
+
+**Controller-specific config dump:** Most controllers expose a debug endpoint (e.g., NGINX's `/nginx_status`, Envoy's `/config_dump` via admin port)—verify the generated upstream cluster for that path actually points to correct socket addresses.
+
+**Recent change correlation:** `kubectl rollout history` on the Deployment, `git log` on the GitOps repo, and controller audit events (`kubectl get events -n ingress-system`)—a recently merged HTTPRoute with an overlapping path match of higher specificity may have shadowed the broken route entirely.
+
+**Network policy audit:** Confirm no `NetworkPolicy` was recently added that blocks the controller's pod CIDR from reaching backend pods on the target port.
+
+**Escalation path if still unresolved:** Enable controller debug logging, capture a packet trace (`tcpdump` on the backend pod's eth0), and open an issue with the conformance report reference if behavior deviates from spec.
+
+---
+
+### Q: How do you model and enforce service-level routing quotas and fair-use policies for multiple tenant teams sharing a single Gateway, and what are the limitations of in-cluster solutions?
+
+**Model Answer:**
+
+**Policy attachment approach:** Use `HTTPRoute` filters (`RequestHeaderModifier`, `ExtensionRef`) combined with controller-specific `RateLimitPolicy` or `BackendTrafficPolicy` resources attached at the **Route or namespace scope** to assign per-tenant rate limits. Gateway API's `PolicyAttachment` pattern allows platform teams to define limits that tenant HTTPRoutes inherit without being able to override them (when using `inheritedPolicies`).
+
+**Key design decisions:**
+- Attach coarse quotas at the **Gateway or namespace level** via cluster-scoped policies; let tenants define finer-grained limits within their own HTTPRoutes.
+- Use a **shared rate-limit service** (e.g., Envoy's `ratelimit` sidecar backed by Redis) rather than per-instance counters—per-replica counters allow quota bypass at scale.
+- Enforce `ResourceQuota` on the number of HTTPRoute objects per namespace to prevent route-table exhaustion.
+- Require tenant HTTPRoutes to carry a specific label validated by an admission webhook; reject unlabeled routes so policy lookup never has an unmatched tenant.
+
+**Limitations of in-cluster solutions:**
+- Redis-backed rate limiting introduces a **single point of failure**; a Redis outage typically defaults to *allow-all*, not *deny*, unless `failOpen: false` is configured.
+- Cross-region or multi-cluster traffic cannot be accurately counted by a single in-cluster rate-limit store without a globally replicated backend (e.g., Redis Cluster with geo-replication), which adds significant operational overhead.
+- Controller support for `ExtensionRef` rate-limit policies is **non-portable**—migrating controllers means rewriting all quota policies.

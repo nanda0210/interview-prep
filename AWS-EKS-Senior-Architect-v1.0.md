@@ -5371,3 +5371,75 @@ The `coordination.k8s.io/v1` Lease resource is used for leader election and node
 
 **Resolution:**
 - Immediately patched the webhook
+
+
+---
+
+## 🗓️ Added 2026-10-30 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-30 19:50 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level pod security context hardening at scale — including `seccompProfile`, `capabilities`, `runAsNonRoot`, and `readOnlyRootFilesystem` — across hundreds of namespaces without breaking existing workloads?
+
+**Model Answer:**
+
+Start by auditing the current state using `kubectl get pods -A -o json` piped through tools like `kubescape` or `polaris` to baseline which workloads violate target security context standards. Enforce standards progressively using Kubernetes Pod Security Standards (`restricted` mode) at the namespace level, beginning with `warn` and `audit` modes before switching to `enforce` — this surfaces violations without breakage.
+
+- Use OPA Gatekeeper or Kyverno to enforce granular policies beyond what PSS covers (e.g., specific seccomp profiles, capability allowlists), with `exclude` rules for legacy namespaces during migration windows.
+- Deliver approved `seccompProfile: RuntimeDefault` or custom profiles via node-level seccomp directories mounted by DaemonSet, and validate enforcement via Falco runtime alerts.
+- For `readOnlyRootFilesystem`, work with application teams to redirect writable paths to `emptyDir` or ephemeral volumes — automate detection of filesystem writes via eBPF tracing (Tetragon) during staging.
+- Gate CI/CD pipelines with `conftest` or Kyverno CLI to reject non-compliant manifests before merge.
+- Track remediation progress per namespace in a dashboard (e.g., Grafana + OPA audit results exported as metrics) so teams have SLA accountability.
+- Behavioral angle: Frame the rollout as a platform enablement program, not a security mandate — provide golden path Helm chart templates that are pre-hardened so teams adopt correct patterns by default.
+
+---
+
+### Q: A production EKS cluster's cross-AZ pod-to-pod traffic costs are significantly higher than expected, despite Topology Aware Routing being enabled. Walk through how you diagnose and resolve this.
+
+**Model Answer:**
+
+Topology Aware Routing (TAR) relies on the `EndpointSlice` controller annotating endpoints with zone hints, but several conditions silently disable it: if endpoint count is too low per zone, if zone imbalance exceeds a threshold, or if the `service.kubernetes.io/topology-mode: Auto` annotation is missing or overridden. Start by inspecting `EndpointSlices` with `kubectl get endpointslices -o yaml` and verify `hints.forZones` is populated on each endpoint.
+
+- Check kube-proxy or AWS VPC CNI (if using native routing) logs for warnings like "topology aware routing disabled due to insufficient endpoints per zone."
+- Use VPC Flow Logs or the AWS Cost Explorer "Data Transfer" dimension filtered by AZ to confirm which specific service-to-service flows are crossing AZ boundaries.
+- If TAR hints are absent, the fix is ensuring at least 3 replicas spread across 3 AZs and that `topologySpreadConstraints` align with the service's zone distribution.
+- For AWS Load Balancer Controller-fronted services, ensure target group zone affinity (`aws-load-balancer-target-group-attributes: load_balancing.cross_zone.enabled=false`) is set correctly at the NLB/ALB level.
+- Consider Istio or AWS App Mesh locality-weighted load balancing as an alternative that gives finer-grained control with explicit priority/failover semantics.
+- After fixes, validate with a synthetic traffic test and re-examine Flow Logs to confirm intra-AZ traffic percentage has increased before closing the incident.
+
+---
+
+### Q: Describe a situation where EKS workloads using IAM Roles for Service Accounts (IRSA) worked correctly in one AWS region but silently failed in a newly launched region, causing AWS SDK calls to return `AccessDenied` errors despite identical Terraform configurations.
+
+**Model Answer:**
+
+This failure pattern almost always traces to the OIDC provider ARN mismatch or the IAM trust policy referencing the wrong OIDC issuer URL. Each EKS cluster has a unique OIDC issuer URL (even if cluster names match across regions), and the IAM role trust policy's `StringEquals` condition on `token.actions.githubusercontent.com` or the cluster's OIDC URL must exactly match the new cluster's issuer.
+
+- **Root cause I encountered:** Terraform modules used a hardcoded OIDC provider ARN from the source region rather than computing it dynamically from `aws_eks_cluster.cluster.identity[0].oidc[0].issuer` — the new region's cluster registered a different OIDC thumbprint, and the IAM OIDC provider was never created in the new region's AWS account.
+- Verified by running `aws iam list-open-id-connect-providers` in the target region — the provider was absent.
+- Fix: Added a `aws_iam_openid_connect_provider` resource per region in Terraform, feeding the thumbprint from an HTTPS TLS certificate retrieval data source; trust policies were updated to reference the correct per-region provider ARN.
+- Additionally audited for the `sts:AssumeRoleWithWebIdentity` condition using `aws:RequestedRegion` which can block cross-region STS calls if set incorrectly in SCPs.
+- Post-fix: Added a Terraform test (`terratest`) that asserts OIDC provider existence in every target region as a deployment gate.
+- Behavioral lesson: Cross-region expansion of EKS often exposes implicit regional dependencies that single-region Terraform modules paper over — build explicit regional resource creation into your module contract.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes API client rate-limit safety — preventing individual controllers, operators, or application pods from exhausting API server request quotas and causing cluster-wide control-plane degradation?
+
+**Model Answer:**
+
+API server overload from misbehaving clients is a class-1 reliability risk in large EKS clusters. The strategy operates across detection, prevention, and architectural layers:
+
+**Detection:**
+- Enable API server audit logs and ship them to CloudWatch Logs Insights or OpenSearch; query for top `userAgent` + `verb` + `resource` combinations by request count per minute to identify abusive clients.
+- Expose `apiserver_request_total` and `apiserver_current_inflight_requests` metrics via CloudWatch Container Insights or a Prometheus scrape of the managed control plane proxy endpoint; alert when inflight requests exceed 70% of the `--max-requests-inflight` limit (default 400).
+
+**Prevention:**
+- Enforce client-side rate limiting by auditing all in-cluster controllers and operators for `client-go` `QPS` and `Burst` settings; set sane defaults (e.g., QPS≤50, Burst≤100) in Helm chart values and validate via OPA/Kyverno on controller Deployment manifests.
+- Use Kubernetes Priority and Fairness (APF) — configure `FlowSchemas` and `PriorityLevelConfigurations` to bucket workloads (e.g., system controllers, user operators, application pods) with guaranteed shares and queue limits so no single flow starves others.
+- Restrict application pods from directly calling the API server unless necessary; use RBAC to limit `ServiceAccount` permissions and deploy sidecar proxies (e.g., `kube-rbac-proxy`) that enforce per-client rate limits before requests reach the API.
+
+**Architecture:**
+- Offload read-heavy patterns (e.g., config watching) to dedicated caches using `SharedInformerFactory` or operator-sdk's cached client — never raw `List` calls in hot loops.
+- For multi-tenant clusters, assign each tenant's operators to distinct `FlowSchema` buckets with metered quotas enforced at the APF layer.
+- Regularly run `kubectl get --raw /debug/api_priority_and_fairness/dump_priority_levels` to inspect live queue depths and tune `PriorityLevelConfiguration` limits proactively.

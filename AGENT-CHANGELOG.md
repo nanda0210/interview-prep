@@ -841,3 +841,21 @@ _Committed & pushed: yes_
 - How do you implement and manage Ingress or Gateway resources using GitOps, and what specific challenges arise that don't exist with other Kubernetes resource types?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-30 19:51:23
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7785 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level pod security context hardening at scale — including `seccompProfile`, `capabilities`, `runAsNonRoot`, and `readOnlyRootFilesystem` — across hundreds of namespaces without breaking existing workloads?
+- A production EKS cluster's cross-AZ pod-to-pod traffic costs are significantly higher than expected, despite Topology Aware Routing being enabled. Walk through how you diagnose and resolve this.
+- Describe a situation where EKS workloads using IAM Roles for Service Accounts (IRSA) worked correctly in one AWS region but silently failed in a newly launched region, causing AWS SDK calls to return `AccessDenied` errors despite identical Terraform configurations.
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes API client rate-limit safety — preventing individual controllers, operators, or application pods from exhausting API server request quotas and causing cluster-wide control-plane degradation?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6739 chars)
+- How do you implement mutual TLS (mTLS) between the Gateway and upstream backend services, and how does this differ from mTLS at the listener level?
+- Explain how Gateway API conformance profiles work, and how would you use conformance test results when selecting or upgrading a Gateway controller?
+- A production HTTPRoute suddenly starts returning 502s for one specific path prefix. Other paths on the same Gateway are healthy. Walk through your systematic debugging approach.
+- How do you model and enforce service-level routing quotas and fair-use policies for multiple tenant teams sharing a single Gateway, and what are the limitations of in-cluster solutions?
+
+_Committed & pushed: yes_
