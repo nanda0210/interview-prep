@@ -859,3 +859,21 @@ _Committed & pushed: yes_
 - How do you model and enforce service-level routing quotas and fair-use policies for multiple tenant teams sharing a single Gateway, and what are the limitations of in-cluster solutions?
 
 _Committed & pushed: yes_
+
+## Run · 2026-10-31 19:05:38
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8152 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes resource requests and limits auto-rightsizing — including VPA adoption, safety guardrails, and continuous feedback loops?
+- A production EKS cluster's Service Account Token Volume Projection (OIDC-based IRSA) tokens are intermittently rejected by the AWS STS `AssumeRoleWithWebIdentity` call — pods are failing with `InvalidIdentityToken` errors despite correct IAM role trust policies. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes scheduler extender and custom scheduling logic — including bin-packing, workload-aware placement, and safe scheduler customization at scale?
+- Describe a situation where EKS cluster upgrades were executed successfully at the control plane level but caused widespread workload disruption due to deprecated API version removals. How did you detect, remediate, and prevent recurrence?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6889 chars)
+- How do you use `ExtensionRef` and policy attachment in Gateway API to integrate custom vendor-specific features without forking core resources?
+- What is `HTTPRoute` URL rewriting and path redirection, how do they differ, and what bugs most commonly appear in production?
+- How does Kubernetes Ingress or Gateway API interact with `NetworkPolicy`, and what gap exists between L7 routing and L3/L4 network segmentation?
+- A junior engineer asks why their HTTPRoute works in the `default` namespace but immediately stops routing traffic when they move it to a new namespace. Walk through every reason this can happen and how you diagnose each.
+
+_Committed & pushed: yes_

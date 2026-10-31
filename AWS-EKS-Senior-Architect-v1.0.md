@@ -5443,3 +5443,64 @@ API server overload from misbehaving clients is a class-1 reliability risk in la
 - Offload read-heavy patterns (e.g., config watching) to dedicated caches using `SharedInformerFactory` or operator-sdk's cached client — never raw `List` calls in hot loops.
 - For multi-tenant clusters, assign each tenant's operators to distinct `FlowSchema` buckets with metered quotas enforced at the APF layer.
 - Regularly run `kubectl get --raw /debug/api_priority_and_fairness/dump_priority_levels` to inspect live queue depths and tune `PriorityLevelConfiguration` limits proactively.
+
+
+---
+
+## 🗓️ Added 2026-10-31 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-31 19:04 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes resource requests and limits auto-rightsizing — including VPA adoption, safety guardrails, and continuous feedback loops?
+
+**Key points an interviewer wants to hear:**
+
+- Deploy **Vertical Pod Autoscaler (VPA)** in `Off` or `Initial` mode first to gather recommendations without live mutations; use `Auto` mode only after validating recommendation quality per workload class (stateless vs. stateful).
+- Integrate VPA recommendation data into a **GitOps feedback loop**: a controller (or custom operator) reads VPA `status.recommendation` and opens PRs against Helm values, allowing human review before merging to production.
+- Enforce **minimum and maximum bounds** via VPA `resourcePolicy.containerPolicies` to prevent runaway recommendations; pair with `LimitRange` objects per namespace to provide a secondary backstop.
+- For workloads where VPA restarts are unacceptable (e.g., low-replica stateful sets), use VPA in `Off` mode and export recommendations to Grafana/CloudWatch dashboards as advisory metrics for platform engineers.
+- Run **Goldilocks** (Fairwinds) as a visualization layer across namespaces to give teams a self-service view of rightsizing opportunities, reducing the toil burden on the platform team.
+- Gate VPA `Auto` mode adoption using a **MutatingWebhookConfiguration** policy (via OPA/Kyverno): only allow VPA mutation for workloads that carry an explicit opt-in annotation and have ≥2 replicas, preventing single-replica downtime.
+- Define SLOs around rightsizing: target <5% OOMKilled rate and <10% CPU throttling ratio per service, measured in Prometheus, with alerts that trigger a rightsizing review cycle.
+
+---
+
+### Q: A production EKS cluster's Service Account Token Volume Projection (OIDC-based IRSA) tokens are intermittently rejected by the AWS STS `AssumeRoleWithWebIdentity` call — pods are failing with `InvalidIdentityToken` errors despite correct IAM role trust policies. How do you diagnose and resolve this?
+
+**Key points an interviewer wants to hear:**
+
+- **First check clock skew**: `InvalidIdentityToken` from STS most commonly means the JWT `iat`/`exp` claims are outside STS's acceptable window (±5 minutes). Validate NTP/chrony status on nodes with `chronyc tracking`; EC2 instances should use the Amazon Time Sync Service (`169.254.169.123`).
+- Inspect the projected token's actual content: `kubectl exec` into a failing pod and decode the token at `/var/run/secrets/eks.amazonaws.com/serviceaccount/token` with `jwt decode` to compare `iss`, `aud`, and expiry claims against what EKS OIDC is expected to emit.
+- Verify the **EKS OIDC provider endpoint** is reachable and its thumbprint matches the IAM OIDC provider configuration in the AWS account; a thumbprint mismatch after a root CA rotation by EKS causes silent rejections.
+- Check `expirationSeconds` on the projected volume — if set too aggressively short (e.g., 600s), kubelet token rotation races with the STS call window, especially under high pod churn. Set to ≥86400s for most workloads.
+- Review **STS regional endpoint usage**: pods should call `sts.<region>.amazonaws.com` (regional endpoint) rather than the global endpoint to avoid cross-region latency and quota issues; configure via `AWS_STS_REGIONAL_ENDPOINTS=regional` environment variable in pod specs.
+- If the issue is intermittent and correlated with node replacement (Karpenter/node groups), verify that new nodes join with the correct `--hostname-override` and that kubelet's OIDC token signing path is consistent — node bootstrap script errors can cause token issuer mismatch.
+- Remediate systematically: enforce NTP via a DaemonSet health check, pin `expirationSeconds`, and add a CloudWatch alarm on STS `InvalidIdentityToken` error rate scoped to your EKS role ARNs.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes scheduler extender and custom scheduling logic — including bin-packing, workload-aware placement, and safe scheduler customization at scale?
+
+**Key points an interviewer wants to hear:**
+
+- Prefer **Kubernetes Scheduling Framework plugins** (in-tree via `KubeSchedulerConfiguration`) over deprecated scheduler extenders for new logic; extenders add HTTP round-trip latency per scheduling cycle and are a scaling bottleneck at high pod churn rates.
+- For bin-packing (cost reduction), switch the default scoring plugin from `LeastAllocated` to **`MostAllocated`** via `KubeSchedulerConfiguration` `pluginConfig`; validate against your Karpenter/CA node provisioning logic to ensure it doesn't conflict with consolidation behaviors.
+- Deploy a **secondary scheduler** for specialized workloads (e.g., ML batch jobs, GPU workloads) using a separate `Deployment` with a distinct `schedulerName`; this isolates custom scheduling risk from the default scheduler serving production traffic.
+- Use **`NodeAffinity`, `TopologySpreadConstraints`, and `PodAffinity`** as the first line of placement control before writing custom logic — most placement requirements can be expressed declaratively and are enforced without scheduler modification.
+- Enforce `schedulerName` correctness at admission time using Kyverno policies: prevent arbitrary workloads from opting into custom schedulers without an explicit platform-team approval label, avoiding accidental misconfiguration.
+- Monitor scheduler health via its `/metrics` endpoint: track `scheduler_scheduling_duration_seconds` p99, `scheduler_pending_pods`, and `scheduler_framework_extension_point_duration_seconds` per plugin — set alerts for p99 >500ms as an indicator of extender or plugin pathology.
+- Test custom scheduler logic in a **staging cluster with production-representative load** using tools like `kube-scheduler-simulator` before rollout; roll out changes via a secondary scheduler first, migrate a canary workload, then promote.
+
+---
+
+### Q: Describe a situation where EKS cluster upgrades were executed successfully at the control plane level but caused widespread workload disruption due to deprecated API version removals. How did you detect, remediate, and prevent recurrence?
+
+**Key points an interviewer wants to hear:**
+
+- **Detection**: The disruption surfaced as Helm release failures and GitOps sync errors post-upgrade, with errors like `no kind "Ingress" is registered for version "networking.k8s.io/v1beta1"`. Audit logs and Helm history confirmed manifests still used removed API versions.
+- **Root cause**: Teams had not run pre-upgrade API deprecation scans; the control plane upgrade (e.g., 1.21→1.22) silently removed `networking.k8s.io/v1beta1/Ingress` and `rbac.authorization.k8s.io/v1beta1`, which many Helm charts still referenced.
+- **Immediate remediation**: Used `kubectl convert` and Helm `helm-mapkubeapis` plugin to rewrite stored manifests in-cluster; re-ran `helm upgrade` with corrected chart versions; for GitOps (ArgoCD/Flux), patched application manifests in source repos and force-synced.
+- **Tooling adopted for prevention**: Integrated **`pluto`** (Fairwinds) and **`kubent`** (kube-no-trouble) into the CI pipeline to scan all Helm charts, raw manifests, and Helm release secrets in-cluster against the target Kubernetes version's removed/deprecated API list — failing the pipeline before any upgrade is approved.
+- **Process change**: Established a mandatory **upgrade readiness gate**: 30 days before a planned control plane upgrade, all teams receive a deprecation report; platform engineering blocks the upgrade in the change management system until all deprecated API usage is resolved.
+- **Behavioral/cultural change**: Created an internal ADR (Architecture Decision Record) mandating that all Helm chart upgrades pin to `v1` (stable) API versions and that chart authors run `pluto` locally via a pre-commit hook.
+- **Ongoing governance**: Added a Kyverno `ClusterPolicy` in `audit` mode that warns on admission of manifests using any API version flagged as deprecated in the next two Kubernetes minor versions

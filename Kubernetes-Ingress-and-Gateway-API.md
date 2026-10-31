@@ -1271,3 +1271,60 @@ When upgrading:
 - Redis-backed rate limiting introduces a **single point of failure**; a Redis outage typically defaults to *allow-all*, not *deny*, unless `failOpen: false` is configured.
 - Cross-region or multi-cluster traffic cannot be accurately counted by a single in-cluster rate-limit store without a globally replicated backend (e.g., Redis Cluster with geo-replication), which adds significant operational overhead.
 - Controller support for `ExtensionRef` rate-limit policies is **non-portable**—migrating controllers means rewriting all quota policies.
+
+
+---
+
+## 🗓️ Added 2026-10-31 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-10-31 19:05 -->
+
+### Q: How do you use `ExtensionRef` and policy attachment in Gateway API to integrate custom vendor-specific features without forking core resources?
+
+**Key points an interviewer wants to hear:**
+
+- Gateway API provides two official extension points: `extensionRef` filters within `HTTPRoute` rules (for per-request custom filters), and the **Policy Attachment** pattern via `targetRef` on standalone policy objects (e.g., `BackendLBPolicy`, `HealthCheckPolicy`, or vendor CRDs).
+- `extensionRef` lets an HTTPRoute delegate a filter step to a custom CRD handled by a controller-specific webhook or filter chain, keeping the core route resource standards-compliant while enabling capabilities like custom auth or transformation.
+- Policy attachment decouples concern ownership: platform teams ship a `RateLimitPolicy` CRD targeting a Gateway, while app teams own HTTPRoutes — no annotation sprawl, no resource forking.
+- Policies can be **direct** (explicit `targetRef` on a specific resource) or **inherited** (applied to a Gateway and cascading to child routes); controllers must document which model they implement, and conflicts must be resolved via a defined precedence order.
+- A key operational risk is that `extensionRef` resources are controller-specific; a route referencing a missing or mis-spelled CRD will fail admission or leave the route in a degraded state, so you must validate this in CI with dry-run or conformance tooling.
+- When evaluating a controller upgrade, audit whether existing extension CRD schemas remain backward-compatible — Gateway API core is versioned, but vendor extensions are not governed by the same conformance guarantee.
+
+---
+
+### Q: What is `HTTPRoute` URL rewriting and path redirection, how do they differ, and what bugs most commonly appear in production?
+
+**Key points an interviewer wants to hear:**
+
+- **Redirection** (`RequestRedirect` filter) returns a 3xx to the client with a new URL; the client makes a second request. **Rewriting** (`URLRewrite` filter) mutates the upstream request path/host transparently — the client never sees it. Conflating them causes incorrect client caching and broken bookmarks.
+- Both support `ReplacePrefixMatch` and `ReplaceFullPath`; `ReplacePrefixMatch` only works when the associated `path` match is `PathPrefix` — pairing it with `Exact` is a spec violation that controllers handle inconsistently, often silently passing through the original path.
+- Common production bug: stripping a prefix (`/api` → `/`) without accounting for the trailing slash — backends receive `//resource` or an empty path, causing 404s that are hard to trace because the ingress access log shows the rewritten path.
+- Host rewriting that changes the `Host` header can break TLS SNI if the upstream performs virtual hosting, and may invalidate backend-presented certificates if `BackendTLSPolicy` hostname validation is in use.
+- Always emit the rewritten path in access logs and correlate with backend access logs during rollout; a mismatch between observed and expected paths is the fastest debugging signal.
+- Test redirects with `curl -v --max-redirs 0` to inspect the raw 3xx location header before clients follow it.
+
+---
+
+### Q: How does Kubernetes Ingress or Gateway API interact with `NetworkPolicy`, and what gap exists between L7 routing and L3/L4 network segmentation?
+
+**Key points an interviewer wants to hear:**
+
+- Ingress/Gateway API operates at L7 and controls *how* traffic is routed after it arrives at the cluster; `NetworkPolicy` operates at L3/L4 and controls *which pods can communicate at the IP/port level*. They are complementary, not substitutes.
+- A common misconfiguration: teams lock down pod-to-pod traffic with `NetworkPolicy` but forget to allow ingress from the Ingress controller pod CIDR (or namespace label), causing L7 routes to pass but connections to time out at L4, producing misleading 502/504 errors at the gateway.
+- The Ingress controller itself needs an explicit `NetworkPolicy` egress rule to reach backend `Service` endpoints; if the controller runs in its own namespace, a `namespaceSelector` is required on the backend `NetworkPolicy` ingress rule.
+- **The critical gap:** Gateway API can enforce that only tenant A's HTTPRoute reaches service A, but without `NetworkPolicy`, tenant A's pods can still directly call tenant B's pods inside the cluster. True multi-tenant isolation requires both layers.
+- Emerging solutions like FQDN-aware `NetworkPolicy` (Cilium `CiliumNetworkPolicy`) or `AdminNetworkPolicy` (Gateway-adjacent KEP) start closing this gap, but are not yet universally available.
+- For audits, document this gap explicitly: L7 policy is enforced at the gateway perimeter; east-west lateral movement requires separate `NetworkPolicy` or a service mesh enforcement layer.
+
+---
+
+### Q: A junior engineer asks why their HTTPRoute works in the `default` namespace but immediately stops routing traffic when they move it to a new namespace. Walk through every reason this can happen and how you diagnose each.
+
+**Key points an interviewer wants to hear:**
+
+- **`ReferenceGrant` missing:** The Gateway's namespace and the new HTTPRoute's namespace differ; without a `ReferenceGrant` in the Gateway namespace allowing routes from the new namespace, the route is rejected. Check `kubectl get referencegrant -n <gateway-ns>` and the HTTPRoute's `status.parents[].conditions` for `ResolvedRefs: False`.
+- **`Gateway.spec.listeners[].allowedRoutes.namespaces` not updated:** The listener may be restricted to `Same` namespace or an explicit namespace selector that excludes the new namespace. Inspect the Gateway spec and update `allowedRoutes.namespaces.from: Selector` with an appropriate label.
+- **`parentRef` pointing to wrong namespace:** The HTTPRoute's `parentRef` must include `namespace: <gateway-ns>` when the Gateway is in a different namespace; omitting it defaults to the HTTPRoute's own namespace and the reference silently fails to bind.
+- **Service backend in different namespace unreachable:** Even if routing is accepted, the backend `Service` referenced in `backendRefs` must either be in the same namespace as the HTTPRoute or covered by another `ReferenceGrant`. Check `ResolvedRefs` conditions on the route.
+- **RBAC for the controller:** Some controllers use service-account-based watches scoped to specific namespaces; if the new namespace is not in the controller's watch list (Helm `--set controller.watchNamespaces`), the route is never reconciled.
+- **Diagnosis order:** `kubectl get httproute -n <new-ns> -o yaml` → `.status.parents[].conditions`; then `kubectl describe gateway`; then controller logs filtered by the new namespace. Resolving conditions bottom-up (ReferenceGrant → allowedRoutes → backendRefs) is the fastest path to the root cause.
