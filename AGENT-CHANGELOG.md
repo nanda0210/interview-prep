@@ -877,3 +877,21 @@ _Committed & pushed: yes_
 - A junior engineer asks why their HTTPRoute works in the `default` namespace but immediately stops routing traffic when they move it to a new namespace. Walk through every reason this can happen and how you diagnose each.
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-01 19:22:12
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8313 chars)
+- A production EKS cluster's Karpenter-managed nodes are launching successfully, but you observe that a significant percentage of pods are landing on nodes that are immediately over-committed on memory within minutes of node registration. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes leader election safety — ensuring distributed controllers and operators do not experience split-brain or thundering-herd leader churn that causes production instability?
+- Describe a situation where EKS workloads relying on AWS EFS (via the EFS CSI Driver) began experiencing severe I/O latency and mount failures intermittently. How did you diagnose it, and what architectural changes did you implement?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes finalizer hygiene — preventing stuck namespace deletions, orphaned cloud resources, and finalizer-related deadlocks in production?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6265 chars)
+- How does the Gateway API handle backend traffic distribution across endpoints when a Service has multiple pods, and how do you achieve per-request load balancing rather than per-connection?
+- Explain how `GRPCRoute` differs from using an `HTTPRoute` with `grpc` protocol hints, and what conformance guarantees exist today for gRPC-specific matching fields.
+- A new GatewayClass is deployed by the platform team, but application teams report their HTTPRoutes are being silently ignored by the new controller while the old one still handles traffic. How do you diagnose and resolve this?
+- What are the operational implications of Gateway API's "infrastructure vs. application" ownership boundary, and how have you seen this boundary cause friction in real organizations?
+
+_Committed & pushed: yes_

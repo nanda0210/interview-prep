@@ -1328,3 +1328,36 @@ When upgrading:
 - **Service backend in different namespace unreachable:** Even if routing is accepted, the backend `Service` referenced in `backendRefs` must either be in the same namespace as the HTTPRoute or covered by another `ReferenceGrant`. Check `ResolvedRefs` conditions on the route.
 - **RBAC for the controller:** Some controllers use service-account-based watches scoped to specific namespaces; if the new namespace is not in the controller's watch list (Helm `--set controller.watchNamespaces`), the route is never reconciled.
 - **Diagnosis order:** `kubectl get httproute -n <new-ns> -o yaml` → `.status.parents[].conditions`; then `kubectl describe gateway`; then controller logs filtered by the new namespace. Resolving conditions bottom-up (ReferenceGrant → allowedRoutes → backendRefs) is the fastest path to the root cause.
+
+
+---
+
+## 🗓️ Added 2026-11-01 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-01 19:22 -->
+
+### Q: How does the Gateway API handle backend traffic distribution across endpoints when a Service has multiple pods, and how do you achieve per-request load balancing rather than per-connection?
+
+**Model Answer:**
+By default, most Gateway implementations forward traffic to a Kubernetes Service, which then relies on kube-proxy (iptables/IPVS) for endpoint selection—this results in per-connection load balancing, not per-request, because a single upstream connection can be reused for many requests. To achieve per-request load balancing, the Gateway controller must bypass the ClusterIP VIP and resolve individual pod endpoints directly (endpoint slicing), establishing its own upstream connection pool per pod. NGINX-based controllers support this via `upstream` directives; Envoy-based controllers (e.g., Contour, Istio) handle it natively through EDS (Endpoint Discovery Service). The `BackendLBPolicy` resource (experimental in Gateway API v1.1) formalizes load-balancing algorithm selection—round-robin, least-request, consistent hashing—per backend. Consistent hashing is particularly relevant for caches or session-sensitive backends; you configure a hash key on a request header or cookie. The key interview point is that using a ClusterIP Service hides individual pod health from the gateway, so unhealthy pod traffic is not removed until kube-proxy updates iptables—direct endpoint mode allows faster failure detection via active health checks defined in `BackendLBPolicy`.
+
+---
+
+### Q: Explain how `GRPCRoute` differs from using an `HTTPRoute` with `grpc` protocol hints, and what conformance guarantees exist today for gRPC-specific matching fields.
+
+**Model Answer:**
+`GRPCRoute` is a first-class Gateway API resource (graduated to GA in v1.1) purpose-built for gRPC, supporting matching on gRPC service name and method name as distinct fields, rather than mapping them to HTTP path prefixes as `HTTPRoute` does (e.g., `/package.Service/Method`). Using `HTTPRoute` for gRPC works at the wire level because gRPC is HTTP/2, but you lose semantic clarity, cannot match on service and method independently, and headers like `content-type: application/grpc` must be added manually. `GRPCRoute` also models gRPC-specific headers natively and integrates cleanly with observability tooling that understands the gRPC framing. Conformance: the Core conformance profile for `GRPCRoute` requires unary RPC routing; streaming RPC routing falls under Extended conformance, meaning not all controllers guarantee it. When selecting a controller for gRPC workloads, you should run the official conformance suite filtered to `GRPCRoute` and verify streaming support explicitly. A common production pitfall is neglecting to enforce HTTP/2 on both the listener and the backend connection, causing h2c vs. TLS mismatch that manifests as `PROTOCOL_ERROR` or silent downgrade to HTTP/1.1 which breaks all gRPC calls.
+
+---
+
+### Q: A new GatewayClass is deployed by the platform team, but application teams report their HTTPRoutes are being silently ignored by the new controller while the old one still handles traffic. How do you diagnose and resolve this?
+
+**Model Answer:**
+Start by inspecting the `status.conditions` on each HTTPRoute—look for `Accepted: False` or a missing `ResolvedRefs` condition that identifies which `parentReference` (Gateway) accepted or rejected the route. Next, confirm that each HTTPRoute's `parentReference.gatewayClassName` (via the referenced Gateway) matches the new GatewayClass name; a common mistake is routes still pointing to a Gateway object fronted by the old GatewayClass. Check the new Gateway's `status.listeners[].attachedRoutes` count—if it's zero, the controller is not reconciling any routes. Examine controller logs for reconciliation errors, particularly around RBAC (the controller's ServiceAccount may lack permission to read HTTPRoute resources in application namespaces). Verify `ReferenceGrant` resources exist if routes are cross-namespace. Confirm the new GatewayClass's `spec.parametersRef` is correctly pointing to a valid controller-specific config object; an invalid ref causes the GatewayClass to stay in `InvalidParameters` status, halting all downstream reconciliation. Resolution typically requires coordinating the Gateway object migration (update `parentReference` in each HTTPRoute) and ensuring the old controller is not also claiming the same hostnames, which would cause silent conflicts.
+
+---
+
+### Q: What are the operational implications of Gateway API's "infrastructure vs. application" ownership boundary, and how have you seen this boundary cause friction in real organizations?
+
+**Model Answer:**
+Gateway API explicitly separates concerns: cluster operators own `GatewayClass` and `Gateway` resources (infrastructure tier), while application developers own `HTTPRoute`, `GRPCRoute`, etc. (application tier). This mirrors real organizational boundaries between platform/SRE teams and product teams, which is a deliberate design goal. In practice, friction arises when application teams need capabilities that require Gateway-level changes—for example, adding a new listener port, adjusting listener TLS settings, or enabling a protocol not yet on the Gateway—but the platform team has a slower change-management cycle. Another common friction point is that Gateway resource limits (e.g., max hostname attachment, allowed namespaces via `allowedRoutes`) are set by the platform team, and application teams hit undocumented ceilings without clear error messages. Behavioral answer: in one scenario the platform team enforced a `allowedRoutes.namespaces.from: Selector` policy that excluded newly created tenant namespaces matching a new label scheme; HTTPRoutes in those namespaces were silently unattached for days. Resolution involved a documented intake process and automated validation (OPA/Kyverno policies that reject HTTPRoutes whose parent Gateway does not allow their namespace). The lesson is that the ownership boundary requires explicit communication contracts, not just Kubernetes RBAC, and that admission webhooks enforcing conformance at deploy time prevent silent failures in production.

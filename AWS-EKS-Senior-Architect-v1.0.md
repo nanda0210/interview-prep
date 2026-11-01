@@ -5504,3 +5504,69 @@ API server overload from misbehaving clients is a class-1 reliability risk in la
 - **Process change**: Established a mandatory **upgrade readiness gate**: 30 days before a planned control plane upgrade, all teams receive a deprecation report; platform engineering blocks the upgrade in the change management system until all deprecated API usage is resolved.
 - **Behavioral/cultural change**: Created an internal ADR (Architecture Decision Record) mandating that all Helm chart upgrades pin to `v1` (stable) API versions and that chart authors run `pluto` locally via a pre-commit hook.
 - **Ongoing governance**: Added a Kyverno `ClusterPolicy` in `audit` mode that warns on admission of manifests using any API version flagged as deprecated in the next two Kubernetes minor versions
+
+
+---
+
+## 🗓️ Added 2026-11-01 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-01 19:21 -->
+
+### Q: A production EKS cluster's Karpenter-managed nodes are launching successfully, but you observe that a significant percentage of pods are landing on nodes that are immediately over-committed on memory within minutes of node registration. How do you diagnose and resolve this?
+
+**Key diagnostic steps and resolution:**
+
+- **Root cause vectors:** Karpenter bin-packs based on pod *requests*, not actual usage. If requests are set too low relative to real consumption, nodes appear schedulable but are immediately over-committed at the OS level.
+- **Diagnosis:** Cross-reference `kubectl top nodes` actual usage vs. `kubectl describe node` allocatable/requested ratios; check Karpenter's `NodeClaim` events for the instance types selected and their allocatable memory after OS/DaemonSet reservation overhead.
+- **DaemonSet overhead miscalculation:** Karpenter must account for DaemonSet resource requests when simulating bin-packing. Validate that all DaemonSets have accurate resource requests — unset or zero requests cause Karpenter to undercount overhead, leading to over-commitment at scheduling time.
+- **Instance type selection:** If `NodePool` allows too many small instance types, Karpenter may pack many pods onto a small node; restrict instance families or set `minMemory` constraints to avoid pathological packing.
+- **Resolution path:** Enforce accurate resource requests via VPA recommendation + OPA/Gatekeeper policy; configure Karpenter `kubeletConfig.systemReserved` and `kubeReserved` to correctly model non-pod memory; add `NodePool` weight or `limits` to preference larger instance types for memory-heavy workloads.
+- **Preventive guardrails:** Implement VPA in `Audit` mode with alerting on pods whose actual usage exceeds requests by >150%; add Prometheus alerts on `kube_node_status_allocatable{resource="memory"}` vs. scheduled request sum per node.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes leader election safety — ensuring distributed controllers and operators do not experience split-brain or thundering-herd leader churn that causes production instability?
+
+**Architecture and enforcement approach:**
+
+- **Understand the mechanism:** Kubernetes leader election uses `Lease` objects (or older `ConfigMap`/`Endpoints`). Churn happens when lease duration, retry period, and renew deadline are poorly tuned or when API server latency spikes cause false lease expiry.
+- **Standardized tuning policy:** Enforce via OPA/Gatekeeper or a custom admission webhook that validates leader election flags (`--leader-elect-lease-duration`, `--leader-elect-renew-deadline`, `--leader-elect-retry-period`) on known controller Deployments. AWS-recommended baseline: lease=15s, renew=10s, retry=2s — deviate only with documented justification.
+- **Thundering-herd prevention:** When many replicas compete simultaneously (e.g., after a node failure), jitter in retry-period prevents simultaneous storms. Confirm operators use `k8s.io/client-go/tools/leaderelection` with jitter enabled; reject homegrown election loops via code review gates.
+- **API server latency protection:** Leader election failures spike during API server pressure. Implement HPA/VPA on CoreDNS and monitor `apiserver_request_duration_seconds` p99; if it exceeds renew-deadline, false leader flips are guaranteed.
+- **Multi-replica safety:** For critical operators (e.g., cert-manager, external-dns), run exactly 2 replicas across AZs with PDBs ensuring 1 always running; avoid 1-replica deployments that have zero HA, and avoid >3 replicas that amplify election noise.
+- **Observability:** Alert on `leader_election_master_status` metric transitions > N per hour; correlate with API server audit logs for `leases` resource PATCH storms; use Prometheus `rate()` on lease updates to surface unhealthy controllers.
+- **GitOps enforcement:** Codify approved leader election configurations in Helm chart defaults and block arbitrary overrides via OPA policies in CI pipelines.
+
+---
+
+### Q: Describe a situation where EKS workloads relying on AWS EFS (via the EFS CSI Driver) began experiencing severe I/O latency and mount failures intermittently. How did you diagnose it, and what architectural changes did you implement?
+
+**Situation and diagnosis:**
+
+- **Initial symptoms:** Pods reported `Input/output error` or hung in `ContainerCreating` with `MountVolume.SetUp failed`; others that were already running saw p99 file operation latency jump from <10ms to >5 seconds intermittently.
+- **EFS CSI Driver investigation:** Checked `efs-csi-node` DaemonSet logs — found repeated `DescribeMountTargets` and `DescribeFileSystems` API calls throttled by EFS service; the driver was retrying aggressively, causing a backoff storm across hundreds of pods mounting simultaneously during a rolling deployment.
+- **NFS connection exhaustion:** EFS uses NFSv4.1; each mount consumes a connection slot per mount target per AZ. With prefix-delegation CNI and dense pod counts per node, the per-mount-target connection limit was approached; confirmed via CloudWatch EFS `ClientConnections` metric.
+- **Mount target AZ alignment:** Discovered several pods were mounting via a mount target in a different AZ due to a misconfigured `StorageClass` that lacked the `az` topology key, incurring cross-AZ NFS traffic and additional latency.
+
+**Architectural remediation:**
+
+- Switched `StorageClass` to use topology-aware provisioning with `volumeBindingMode: WaitForFirstConsumer` and added EFS mount target per AZ.
+- Enabled EFS Access Points per team/namespace to provide isolation and reduce blast radius.
+- Implemented a `ReadOnlyMany` access pattern for shared static assets, reducing active writer contention.
+- Added exponential backoff + jitter in mount retry logic via EFS CSI Driver `mountOptions`; set `tls` and `iam` mount options explicitly to avoid negotiation overhead.
+- Established CloudWatch alarms on EFS `PercentIOLimit` > 80% and `BurstCreditBalance` depletion to catch saturation before it causes failures.
+- For latency-sensitive workloads, migrated to EBS (`gp3`) with `ReadWriteOnce` semantics, using EFS only for genuinely shared, throughput-tolerant workloads.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes finalizer hygiene — preventing stuck namespace deletions, orphaned cloud resources, and finalizer-related deadlocks in production?
+
+**Strategy and enforcement design:**
+
+- **Risk framing:** Finalizers on namespaces, PVCs, or custom resources that reference unavailable controllers cause indefinite blocking — a deleted namespace with a stuck finalizer can orphan all its resources and block GitOps reconciliation loops indefinitely.
+- **Admission control:** Deploy an OPA/Gatekeeper or Kyverno policy that restricts which controllers may register which finalizers; block unknown or non-approved finalizer strings on Namespace, PVC, and CRD-backed resources at creation time.
+- **Operator hygiene standards:** Require all internal operators to implement finalizer removal as idempotent and to handle the case where the external resource (e.g., an AWS resource) no longer exists — never block removal on a 404 from an AWS API; treat it as already cleaned up.
+- **Deadlock detection:** Build a Prometheus-based alert that fires when any resource has had a non-empty `.metadata.finalizers` list for >N minutes in a `Terminating` state; surface this to on-call via PagerDuty with the specific resource and finalizer string.
+- **Runbook for stuck resources:** Maintain a documented, access-controlled runbook for manual finalizer patching (`kubectl patch ... -p '{"metadata":{"finalizers":[]}}'`) requiring SRE approval, with the action audit-logged via CloudTrail through the EKS API server audit logs.
+- **CRD lifecycle governance:** When deprecating a CRD, require a migration plan that includes finalizer draining before the controller is removed; enforce this in the platform team's change management process to prevent controller removal leaving zombie finalizers.
+- **Testing:** Include finalizer-stuck scenarios in chaos engineering runbooks — deliberately terminate a controller while resources are deleting —
