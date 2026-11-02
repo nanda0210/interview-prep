@@ -5570,3 +5570,61 @@ API server overload from misbehaving clients is a class-1 reliability risk in la
 - **Runbook for stuck resources:** Maintain a documented, access-controlled runbook for manual finalizer patching (`kubectl patch ... -p '{"metadata":{"finalizers":[]}}'`) requiring SRE approval, with the action audit-logged via CloudTrail through the EKS API server audit logs.
 - **CRD lifecycle governance:** When deprecating a CRD, require a migration plan that includes finalizer draining before the controller is removed; enforce this in the platform team's change management process to prevent controller removal leaving zombie finalizers.
 - **Testing:** Include finalizer-stuck scenarios in chaos engineering runbooks — deliberately terminate a controller while resources are deleting —
+
+
+---
+
+## 🗓️ Added 2026-11-02 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-02 22:59 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes NetworkPolicy-to-security-group (SGPP) migration — ensuring pods transition from namespace-level network controls to fine-grained Security Group per Pod (SGPP) isolation without traffic disruption?
+
+**Key points an interviewer wants to hear:**
+
+- **Assessment phase:** Audit all existing NetworkPolicies and identify workloads (Deployments, StatefulSets) that warrant per-pod SG isolation — typically those with direct RDS, ElastiCache, or MSK connectivity requirements where CIDR-based rules are insufficient.
+- **Prerequisite enforcement:** Validate that all target node instance types support the `--enable-pod-eni` trunk interface feature; use a Karpenter or managed node group label requirement to ensure SGPP-capable instance families (e.g., `m5`, `c5`, excluding `t3`) are used for enrolled workloads.
+- **Incremental rollout:** Annotate pods with `vpc.amazonaws.com/pod-eni: "true"` on a per-Deployment basis; shadow-mode test by running SGPP pods alongside namespace-policy-protected pods and validating connectivity with `netshoot` probes before removing legacy rules.
+- **Admission control:** Deploy an OPA/Kyverno policy that enforces: (a) SGPP-enabled workloads must not simultaneously declare host-network mode, and (b) the correct `SecurityGroupPolicy` CRD exists before the annotated Deployment becomes Ready.
+- **Capacity awareness:** Track branch ENI limits per node (e.g., `m5.xlarge` supports 14 branch ENIs); integrate a Kyverno check or custom admission webhook that rejects SGPP pod admission if the node's branch ENI capacity would be exceeded.
+- **Observability:** Emit CloudWatch metrics on `SecurityGroupPolicy` reconcile errors and VPC CNI branch ENI allocation failures; alert on non-zero error rates to catch misconfigured CRDs before they silently block pod startup.
+- **Rollback posture:** Maintain namespace-level NetworkPolicies in parallel until SGPP is validated; use a feature flag (label selector) on `SecurityGroupPolicy` objects to toggle enrollment without redeployment.
+
+---
+
+### Q: A production EKS cluster's Kubernetes Jobs and CronJobs are completing successfully per status, but downstream systems report missing or duplicated data artifacts — how do you systematically diagnose and remediate idempotency and exactly-once execution failures at the Job level?
+
+**Key points an interviewer wants to hear:**
+
+- **Root cause categories:** The issue is almost always one of: (a) `completions`/`parallelism` misconfiguration causing multiple pod replicas processing the same work unit, (b) Job controller restart mid-run creating a second Job Pod after a node failure (default `restartPolicy: OnFailure` + non-idempotent code), or (c) CronJob `concurrencyPolicy: Allow` permitting overlapping runs.
+- **Immediate triage:** Cross-reference `.status.succeeded` count with actual artifact count in the downstream system; pull pod logs for all pods under the Job (including previously terminated ones via `kubectl logs --previous`) to identify duplicate execution windows; check Job controller events for `BackoffLimitExceeded` or pod recreation events.
+- **CronJob concurrency fix:** Set `concurrencyPolicy: Forbid` for non-reentrant jobs; add a `startingDeadlineSeconds` to prevent missed-schedule backfill storms that can trigger multiple simultaneous runs after cluster disruption.
+- **Idempotency enforcement in code:** Require all Job workloads to implement write-once semantics using conditional writes (S3 `If-None-Match`, DynamoDB conditional expressions, or database upserts with deduplication keys) — treat the Kubernetes Job guarantee as at-least-once, never exactly-once.
+- **Pod failure policy (Kubernetes 1.26+):** Use `podFailurePolicy` with `action: Ignore` for transient infrastructure errors and `action: FailJob` for application-level errors to prevent unnecessary retries that amplify duplication.
+- **Observability:** Instrument Jobs to emit a unique `run_id` (e.g., Job UID + attempt index via `JOB_COMPLETION_INDEX` env var) into all output artifacts; downstream consumers validate run_id uniqueness to detect duplicates before committing.
+- **GitOps enforcement:** Add a CI lint step (conftest/OPA) that rejects CronJob manifests missing `concurrencyPolicy: Forbid` or `Forbid`-equivalent logic, and flags Jobs with `restartPolicy: OnFailure` without documented idempotency rationale.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes admission control layering — ensuring Validating and Mutating Webhooks from multiple controllers (Kyverno, OPA Gatekeeper, Istio, AWS ACK) compose safely without conflict, performance degradation, or silent policy gaps?
+
+**Key points an interviewer wants to hear:**
+
+- **Webhook inventory and ordering:** Maintain a GitOps-managed registry of all `MutatingWebhookConfiguration` and `ValidatingWebhookConfiguration` objects; use `reinvocationPolicy: IfNeeded` on mutating webhooks selectively to handle cases where Kyverno mutations must be visible to Istio's sidecar injector, and explicitly document the dependency order.
+- **Conflict detection:** Run a periodic CI job using `kubectl diff` plus a synthetic test manifest library to detect when two mutating webhooks set conflicting values on the same field (e.g., Kyverno setting `securityContext.runAsUser` vs. an Istio webhook overriding it); alert on detected divergence.
+- **Failure mode governance:** Audit all webhooks for `failurePolicy` settings — enforce `Ignore` only for non-security-critical webhooks (e.g., cost annotation injectors) and `Fail` for security-critical ones (PSS, image signing); document exceptions with approved rationale in Git.
+- **Performance SLOs:** Instrument webhook p99 latency via API server audit logs (`responseStatus`, `requestReceivedTimestamp`); set a policy that any webhook exceeding 500ms p99 triggers a PagerDuty alert and automated review; use `timeoutSeconds` on each webhook to bound worst-case API server latency impact.
+- **Namespace scoping and selector hygiene:** Scope webhooks to the minimum necessary namespace/label selectors; prevent webhook sprawl by requiring all new webhook registrations to go through an approval workflow that checks for selector overlap with existing webhooks.
+- **Testing pipeline:** Maintain a webhook integration test suite (using `envtest` or a dedicated kind cluster) that replays representative manifests through the full webhook chain after any controller upgrade; gate EKS add-on upgrades (Kyverno, Gatekeeper) on passing this suite.
+- **Silent gap detection:** Use Kyverno's `audit` mode to continuously scan existing resources for policy violations that `enforce` mode would have blocked — this surfaces gaps where webhook bypasses occurred (e.g., direct etcd writes, controller-created resources skipping admission).
+
+---
+
+### Q: Describe a situation where an EKS cluster's node group rolling update (AMI refresh) completed without errors, but a subset of workloads experienced elevated error rates for 10–20 minutes per node replacement cycle — how did you diagnose and permanently fix the disruption pattern?
+
+**Key points an interviewer wants to hear:**
+
+- **Symptom pattern:** Errors were correlated precisely with node drain events; `kubectl drain` was completing successfully, but pods on the draining node were receiving in-flight requests for several seconds after being marked `Terminating` because the ALB target group deregistration lagged behind pod termination.
+- **Root cause — deregistration race:** The ALB target group health check deregistration delay was set to 300 seconds default, but pods were receiving `SIGTERM` and exiting within 5 seconds; the load balancer continued routing traffic to the terminating pod's IP for the remaining deregistration window, receiving connection refused errors.
+- **Secondary issue — PDB interaction:** Several Deployments had `maxUnavailable: 0` PDBs but only 1 replica, making `kubectl drain` block indefinitely until PDB violations were force-overridden by the node group update timeout, causing abrupt pod termination rather than graceful drain.
+- **Fix 1 — Graceful shutdown alignment:** Added a

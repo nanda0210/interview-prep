@@ -895,3 +895,21 @@ _Committed & pushed: yes_
 - What are the operational implications of Gateway API's "infrastructure vs. application" ownership boundary, and how have you seen this boundary cause friction in real organizations?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-02 23:00:12
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8332 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes NetworkPolicy-to-security-group (SGPP) migration — ensuring pods transition from namespace-level network controls to fine-grained Security Group per Pod (SGPP) isolation without traffic disruption?
+- A production EKS cluster's Kubernetes Jobs and CronJobs are completing successfully per status, but downstream systems report missing or duplicated data artifacts — how do you systematically diagnose and remediate idempotency and exactly-once execution failures at the Job level?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes admission control layering — ensuring Validating and Mutating Webhooks from multiple controllers (Kyverno, OPA Gatekeeper, Istio, AWS ACK) compose safely without conflict, performance degradation, or silent policy gaps?
+- Describe a situation where an EKS cluster's node group rolling update (AMI refresh) completed without errors, but a subset of workloads experienced elevated error rates for 10–20 minutes per node replacement cycle — how did you diagnose and permanently fix the disruption pattern?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (7286 chars)
+- How do you implement request authentication and authorization using Gateway API's policy attachment model, and what are the trade-offs between doing this at the gateway versus delegating to sidecars?
+- What is the `Infrastructure` API layer being developed as part of Gateway API's roadmap, and how does it relate to today's GatewayClass and provisioner model?
+- A sudden spike of 502 errors appears on a specific HTTPRoute immediately after a backend Deployment rollout. How do you diagnose and fix the issue, and what preventive measures would you put in place?
+- How do you think about and implement observability specifically for cross-namespace Gateway API routing, and what unique blind spots appear that don't exist with single-namespace Ingress setups?
+
+_Committed & pushed: yes_

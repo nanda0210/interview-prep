@@ -1361,3 +1361,81 @@ Start by inspecting the `status.conditions` on each HTTPRoute—look for `Accept
 
 **Model Answer:**
 Gateway API explicitly separates concerns: cluster operators own `GatewayClass` and `Gateway` resources (infrastructure tier), while application developers own `HTTPRoute`, `GRPCRoute`, etc. (application tier). This mirrors real organizational boundaries between platform/SRE teams and product teams, which is a deliberate design goal. In practice, friction arises when application teams need capabilities that require Gateway-level changes—for example, adding a new listener port, adjusting listener TLS settings, or enabling a protocol not yet on the Gateway—but the platform team has a slower change-management cycle. Another common friction point is that Gateway resource limits (e.g., max hostname attachment, allowed namespaces via `allowedRoutes`) are set by the platform team, and application teams hit undocumented ceilings without clear error messages. Behavioral answer: in one scenario the platform team enforced a `allowedRoutes.namespaces.from: Selector` policy that excluded newly created tenant namespaces matching a new label scheme; HTTPRoutes in those namespaces were silently unattached for days. Resolution involved a documented intake process and automated validation (OPA/Kyverno policies that reject HTTPRoutes whose parent Gateway does not allow their namespace). The lesson is that the ownership boundary requires explicit communication contracts, not just Kubernetes RBAC, and that admission webhooks enforcing conformance at deploy time prevent silent failures in production.
+
+
+---
+
+## 🗓️ Added 2026-11-02 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-02 23:00 -->
+
+### Q: How do you implement request authentication and authorization using Gateway API's policy attachment model, and what are the trade-offs between doing this at the gateway versus delegating to sidecars?
+
+**Model Answer:**
+
+Gateway API itself has no built-in authn/authz primitives, so authentication is typically implemented via vendor-specific policy resources (e.g., Istio's `RequestAuthentication` + `AuthorizationPolicy`, Envoy Gateway's `SecurityPolicy`, or NGINX's custom CRDs) attached to a Gateway or HTTPRoute using the policy attachment pattern. Attaching at the Gateway level enforces a uniform policy for all routes but reduces per-team flexibility; attaching at the HTTPRoute level gives teams autonomy at the cost of policy sprawl and audit complexity.
+
+Compared to sidecar-based enforcement (e.g., Envoy sidecar in a service mesh), gateway-layer auth offloads JWT validation and token inspection before traffic even enters the cluster network, reducing backend load and providing a single enforcement choke point—but it requires the gateway to hold or reach the JWKS endpoint, and a misconfigured policy can silently pass or drop all traffic.
+
+Key trade-offs to articulate:
+- **Single point of control vs. defense in depth**: gateway-only auth means a misconfigured route bypass reaches backends unprotected; layered (gateway + sidecar) is more secure but harder to debug.
+- **Latency**: external auth calls (e.g., OPA, OAuth2 Proxy via `ExtensionRef`) add a synchronous hop; cache TTLs must be tuned.
+- **Observability gap**: rejected requests may never appear in backend logs; ensure gateway access logs capture auth failure reasons.
+- **Portability**: policy resources are almost always controller-specific; migrating controllers means rewriting auth config.
+
+---
+
+### Q: What is the `Infrastructure` API layer being developed as part of Gateway API's roadmap, and how does it relate to today's GatewayClass and provisioner model?
+
+**Model Answer:**
+
+The Gateway API roadmap includes an "Infrastructure" layer (sometimes discussed under GAMMA and GEP-1651 style proposals) that aims to let platform engineers declaratively describe *how* a Gateway is provisioned—compute resources, cloud load balancer parameters, node placement—rather than encoding that in GatewayClass parameters via opaque `ParametersRef` objects pointing to controller-specific CRDs. Today, GatewayClass points to a `parametersRef` (e.g., an `AWSGatewayClassConfig`) that is fully vendor-defined with no schema portability; the Infrastructure layer would standardize common knobs (replica count, resource requests, topology hints) inside the API itself.
+
+From an interview perspective, the key points are:
+- **Current gap**: GatewayClass parameters are opaque blobs; there is no portable way to say "provision this Gateway with 3 replicas behind an internal NLB" without knowing the exact controller CRD schema.
+- **Implication for platform teams**: today you must maintain controller-specific parameter manifests per environment; the Infrastructure layer would let you write that once portably.
+- **GAMMA initiative**: extends Gateway API to cover service-mesh (east-west) traffic, meaning `HTTPRoute` can attach to a `Service` as a `parentRef` directly, blurring the distinction between ingress and mesh routing.
+- Knowing this roadmap signals to interviewers that you track upstream evolution and can anticipate API migration costs before they become emergencies.
+
+---
+
+### Q: A sudden spike of 502 errors appears on a specific HTTPRoute immediately after a backend Deployment rollout. How do you diagnose and fix the issue, and what preventive measures would you put in place?
+
+**Model Answer:**
+
+**Immediate diagnosis steps:**
+1. Check gateway access logs for upstream connection errors (connection refused vs. upstream reset mid-request) to distinguish "pod not ready" from "pod crashing after accepting connection."
+2. Inspect the rollout: if `maxUnavailable > 0` or `readinessProbe` is misconfigured/absent, the Endpoints slice can contain IPs of pods that are not yet serving traffic.
+3. Verify `EndpointSlice` churn with `kubectl get endpointslices -w`—rapid add/remove cycles indicate the readiness probe is flapping.
+4. Check if the gateway's endpoint watch is lagging: some controllers cache endpoint state and may send traffic to deleted pod IPs for seconds after pod termination.
+
+**Root causes and fixes:**
+- Missing or too-lenient readiness probe → tighten `initialDelaySeconds` and `failureThreshold`.
+- No `preStop` hook with a sleep → pod stops accepting connections before kube-proxy/gateway removes it from rotation; add `preStop: exec: command: ["sleep","5"]`.
+- `terminationGracePeriodSeconds` shorter than the gateway's connection drain timeout → increase it or configure the controller's drain window.
+
+**Preventive measures:**
+- Enforce readiness probes via OPA/Kyverno admission policy.
+- Use PodDisruptionBudgets to cap simultaneous unavailability.
+- Enable progressive delivery (Argo Rollouts + HTTPRoute weight shifting) so 502s surface at low blast radius before full cutover.
+- Alert on 5xx rate per HTTPRoute backend during deployment windows, not just globally.
+
+---
+
+### Q: How do you think about and implement observability specifically for cross-namespace Gateway API routing, and what unique blind spots appear that don't exist with single-namespace Ingress setups?
+
+**Model Answer:**
+
+In cross-namespace Gateway API routing, a single request traverses resources owned by different teams: a Gateway in `infra-system`, an HTTPRoute in `team-a`, and a backend Service in `team-a-backend`. This ownership fragmentation creates several observability blind spots:
+
+**Unique blind spots:**
+- **Policy attribution**: a request rejected by a `SecurityPolicy` attached to the Gateway is logged at the gateway level with no namespace context visible to the application team—they see 403s with no clue why.
+- **Span ownership**: distributed traces may show the gateway span under a service name that no application team recognizes, breaking alert routing in tools like Jaeger or Tempo.
+- **Metric label cardinality**: gateway-emitted metrics (e.g., `request_total`) must include both the Gateway namespace and the HTTPRoute namespace as labels; without both, you can't distinguish which team's route is causing elevated error rates.
+- **ReferenceGrant blindness**: if a `ReferenceGrant` is deleted, traffic breaks silently from the application team's perspective; there's no event or metric emitted by default.
+
+**Implementation recommendations:**
+- Configure the gateway to emit access logs that include the matched HTTPRoute name *and* namespace, not just the upstream cluster name.
+- Use OpenTelemetry with baggage propagation so traces carry HTTPRoute metadata end-to-end.
+- Create per-HTTPRoute-namespace Prometheus recording rules aggregating gateway metrics filtered by route labels, then expose them to each team's Grafana namespace via `GrafanaDashboard` CRs.
+- Set up a `ReferenceGrant` existence alert (e.g., watch for HTTPRoutes in `Accepted: False` with `RefNotPermitted` reason) as a platform-level SLO signal visible to both platform and application teams.
