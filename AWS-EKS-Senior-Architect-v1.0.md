@@ -5628,3 +5628,64 @@ API server overload from misbehaving clients is a class-1 reliability risk in la
 - **Root cause — deregistration race:** The ALB target group health check deregistration delay was set to 300 seconds default, but pods were receiving `SIGTERM` and exiting within 5 seconds; the load balancer continued routing traffic to the terminating pod's IP for the remaining deregistration window, receiving connection refused errors.
 - **Secondary issue — PDB interaction:** Several Deployments had `maxUnavailable: 0` PDBs but only 1 replica, making `kubectl drain` block indefinitely until PDB violations were force-overridden by the node group update timeout, causing abrupt pod termination rather than graceful drain.
 - **Fix 1 — Graceful shutdown alignment:** Added a
+
+
+---
+
+## 🗓️ Added 2026-11-03 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-03 20:46 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes ConfigMap and Secret hot-reload safety — ensuring applications consuming dynamic configuration do not enter split-brain or partial-reload states during updates?
+
+**Key points an interviewer wants to hear:**
+
+- **Root cause of split-brain**: Kubernetes propagates ConfigMap/Secret changes to mounted volumes asynchronously (kubelet sync period + cache TTL, default ~1–2 min), meaning different pods or even different containers within the same pod may observe different config versions simultaneously during a rollout.
+- **Immutable ConfigMaps/Secrets by default**: Adopt a versioned naming convention (`config-v42`) and reference specific versions in Deployment specs; config changes trigger a Deployment rollout rather than in-place mutation, eliminating split-brain entirely for the common case.
+- **Hot-reload where required**: For workloads that legitimately require hot-reload (e.g., Prometheus, Envoy), use a sidecar watcher (e.g., `config-reloader`, `stakater/Reloader`) that sends `SIGHUP` only after the full file sync is confirmed, and validate the new config before signaling.
+- **Admission control**: Use OPA/Gatekeeper or Kyverno policies to block direct mutation of live ConfigMaps consumed by running Deployments; require version bumps to go through GitOps pipelines.
+- **Observability**: Instrument applications to expose a `/config-version` or equivalent metric/endpoint; alert when two pods of the same Deployment report differing config hashes for more than N minutes.
+- **Secrets rotation safety**: For AWS Secrets Manager via Secrets Store CSI Driver with rotation enabled, pin `SecretProviderClass` to a specific secret version ARN in production, promoting new versions through a staged rollout rather than allowing background auto-rotation to hit all pods simultaneously.
+- **Testing**: Include a chaos-engineering step in CI/CD that deliberately triggers a ConfigMap update mid-rollout and validates that no pod serves a mixed config state using integration tests.
+
+---
+
+### Q: A production EKS cluster's Kubernetes API server begins returning `429 Too Many Requests` to all clients during a planned GitOps reconciliation wave. How do you diagnose root cause, remediate the immediate incident, and redesign to prevent recurrence?
+
+**Key points an interviewer wants to hear:**
+
+- **Immediate triage**: Check API server audit logs and `apiserver_request_total` / `apiserver_current_inflight_requests` metrics; identify which user-agent/SA is generating the flood — typically Flux/ArgoCD reconcile loops all firing simultaneously.
+- **Short-term remediation**: Temporarily increase `--max-requests-inflight` and `--max-mutating-requests-inflight` on the managed control plane (via EKS support escalation or by reducing load); pause the GitOps controller's reconciliation interval or scale it down to drain the queue.
+- **Root cause**: A large-fleet GitOps wave causes O(N) LIST/WATCH and PATCH calls simultaneously; compounded if controllers are not using `server-side apply` (which is cheaper) and are instead doing GET-then-PATCH cycles.
+- **Architectural fix — sharding**: Shard GitOps controllers by namespace or application set; run multiple ArgoCD Application Controllers with shard-aware scheduling so reconcile load is distributed.
+- **Flow control (APF)**: Configure Kubernetes API Priority and Fairness (`FlowSchema` + `PriorityLevelConfiguration`) to carve out a lower-priority queue for GitOps controllers, protecting critical system traffic (kubelet, kube-controller-manager) from being starved.
+- **Staggered reconciliation**: Introduce jitter in reconcile intervals (ArgoCD's `--self-heal-timeout-seconds` with jitter, Flux's `interval` spread across ApplicationSets); avoid all controllers waking up at the same second.
+- **Caching and informers**: Ensure controllers use shared informer caches and avoid raw API calls inside hot loops; enforce this via code review and linting (e.g., `controller-runtime` best practices).
+- **Load testing**: Add a pre-production GitOps load test that simulates a full fleet reconcile wave and validates that APF queuing metrics stay within safe bounds.
+
+---
+
+### Q: Describe a situation where EKS workloads using Amazon RDS via IAM database authentication (token-based) began experiencing intermittent authentication failures, even though the pods' IRSA roles had the correct `rds-db:connect` permission. How did you diagnose and resolve it?
+
+**Key points an interviewer wants to hear:**
+
+- **Symptom pattern**: Auth failures were intermittent and correlated with high pod churn (scale-out events) or token cache exhaustion — not a steady-state failure, which immediately ruled out IAM policy misconfiguration.
+- **RDS IAM token TTL**: RDS IAM authentication tokens are valid for only **15 minutes**; applications that cached the token at startup and reused it without refresh would begin failing after the token expired — a classic long-lived connection + cached token anti-pattern.
+- **IRSA token freshness**: Additionally, the projected OIDC service account token used by the AWS SDK to call STS has its own expiry (default 24 h, can be as low as 1 h); on pods that were running for extended periods, the AWS SDK's credential refresh cycle was hitting a race with the token file rotation.
+- **Diagnosis steps**: Correlated `psql`/`mysql` error timestamps with pod age and token issuance time; enabled AWS SDK debug logging to capture STS `AssumeRoleWithWebIdentity` call failures; confirmed the token file on disk had been rotated but the application's file descriptor was still pointing to the old inode (a known issue with some SDKs that read the file once).
+- **Resolution**: Updated the application's database connection library to call `generate-db-auth-token` (or the SDK equivalent) before each new connection acquisition rather than at startup; ensured the AWS SDK was configured to re-read the token file on each credential refresh (not cache the file descriptor).
+- **Preventive controls**: Added a Prometheus metric for database connection auth failure rate with an alert threshold; implemented connection pool health-check probes that force token refresh before the 15-minute window; documented the pattern in internal runbooks.
+- **Behavioral note**: Communicated the root cause to the application team without blame, ran a post-mortem, and added this token-refresh requirement to the EKS platform onboarding checklist.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes node affinity and taint/toleration governance at scale — preventing scheduling misconfigurations that cause workloads to land on incorrect node classes, violate cost boundaries, or break compliance isolation?
+
+**Key points an interviewer wants to hear:**
+
+- **Policy-as-code enforcement**: Use Kyverno or OPA/Gatekeeper to validate that workloads targeting specific node classes (e.g., GPU nodes, compliance-scoped nodes, Spot-only pools) carry both the correct `nodeSelector`/`nodeAffinity` **and** the corresponding toleration — rejecting half-configured workloads at admission time.
+- **Taint-driven isolation**: Apply mandatory taints to sensitive node classes (e.g., `compliance=pci:NoSchedule`, `hardware=gpu:NoSchedule`); only workloads that explicitly tolerate and request these nodes can land there, preventing accidental co-tenancy.
+- **Karpenter NodePool scoping**: Use Karpenter's `NodePool` with `taints` and `labels` to ensure auto-provisioned nodes for specific workload classes are labeled/tainted correctly from birth; `NodePool` selectors prevent cross-class provisioning drift.
+- **Cost boundary enforcement**: Map node classes to AWS instance families via Karpenter `NodePool` `requirements`; use admission policies to block Deployments from requesting instance families above their team's approved tier (e.g., prevent general workloads from requesting `p4d` GPU instances).
+- **Drift detection**: Periodically run a `kubectl` or Kubernetes API query (via a CronJob or Falco rule) to detect pods running on nodes whose labels don't match the pod's declared `nodeAffinity`; alert on drift caused by label changes post-scheduling.
+- **Developer experience**: Provide a curated set of `nodeSelector` label presets via Helm chart defaults and documented profiles; teams choose a profile (`batch-spot`, `web-on-demand`, `ml-gpu

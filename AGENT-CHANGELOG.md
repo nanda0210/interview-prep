@@ -913,3 +913,21 @@ _Committed & pushed: yes_
 - How do you think about and implement observability specifically for cross-namespace Gateway API routing, and what unique blind spots appear that don't exist with single-namespace Ingress setups?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-03 20:47:18
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8538 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes ConfigMap and Secret hot-reload safety — ensuring applications consuming dynamic configuration do not enter split-brain or partial-reload states during updates?
+- A production EKS cluster's Kubernetes API server begins returning `429 Too Many Requests` to all clients during a planned GitOps reconciliation wave. How do you diagnose root cause, remediate the immediate incident, and redesign to prevent recurrence?
+- Describe a situation where EKS workloads using Amazon RDS via IAM database authentication (token-based) began experiencing intermittent authentication failures, even though the pods' IRSA roles had the correct `rds-db:connect` permission. How did you diagnose and resolve it?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes node affinity and taint/toleration governance at scale — preventing scheduling misconfigurations that cause workloads to land on incorrect node classes, violate cost boundaries, or break compliance isolation?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6849 chars)
+- How do you implement connection draining and graceful shutdown for an Ingress controller during node maintenance or pod eviction, and what parameters control the behavior?
+- What is the difference between `Exact`, `PathPrefix`, and `RegularExpression` path match types in HTTPRoute, and how does the precedence algorithm work when multiple rules could match?
+- How would you debug and resolve a situation where cert-manager fails to provision a TLS certificate for a Gateway listener, and the listener remains in a degraded state?
+- A platform team wants to allow application teams to customize timeout and retry settings per route without giving them write access to the shared Gateway resource. How do you design the policy delegation model using Gateway API?
+
+_Committed & pushed: yes_

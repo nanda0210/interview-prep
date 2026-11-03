@@ -1439,3 +1439,84 @@ In cross-namespace Gateway API routing, a single request traverses resources own
 - Use OpenTelemetry with baggage propagation so traces carry HTTPRoute metadata end-to-end.
 - Create per-HTTPRoute-namespace Prometheus recording rules aggregating gateway metrics filtered by route labels, then expose them to each team's Grafana namespace via `GrafanaDashboard` CRs.
 - Set up a `ReferenceGrant` existence alert (e.g., watch for HTTPRoutes in `Accepted: False` with `RefNotPermitted` reason) as a platform-level SLO signal visible to both platform and application teams.
+
+
+---
+
+## 🗓️ Added 2026-11-03 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-03 20:47 -->
+
+### Q: How do you implement connection draining and graceful shutdown for an Ingress controller during node maintenance or pod eviction, and what parameters control the behavior?
+
+**Model Answer:**
+
+Connection draining ensures in-flight requests complete before the controller pod is terminated. The key mechanisms are:
+
+- **`terminationGracePeriodSeconds`** on the controller Pod must be set longer than the longest expected request; the default 30 s is frequently too short for streaming or long-poll endpoints.
+- **`preStop` hook**: inject a `sleep` or call the controller's drain endpoint (e.g., NGINX's `/quit`) to delay `SIGTERM` until the load balancer finishes de-registering the pod from upstream health checks (cloud LB propagation lag is typically 5–30 s).
+- **NGINX-specific**: `worker_shutdown_timeout` governs how long workers wait for connections to close; set it to match `terminationGracePeriodSeconds` minus hook sleep.
+- **Cloud LB deregistration delay**: on AWS, set the target-group deregistration delay annotation (`alb.ingress.kubernetes.io/deregistration-delay`) to match your preStop sleep.
+- **Gateway API controllers** expose the same OS-level signals; some (Envoy-based) support a `--drain-time-s` flag for graceful listener drain.
+- Validate with chaos engineering: use `kubectl drain` during load tests and measure the 5xx spike; tune until it reaches zero.
+
+The most common mistake is setting `terminationGracePeriodSeconds` without accounting for cloud-side health-check propagation, leaving a window where the pod is gone but traffic still arrives.
+
+---
+
+### Q: What is the difference between `Exact`, `PathPrefix`, and `RegularExpression` path match types in HTTPRoute, and how does the precedence algorithm work when multiple rules could match?
+
+**Model Answer:**
+
+Gateway API defines three path match types:
+- **`Exact`**: the request path must equal the specified string byte-for-byte.
+- **`PathPrefix`**: the request path must start with the prefix; a trailing `/` is implied if the prefix itself is a directory segment.
+- **`RegularExpression`**: matches via RE2 syntax; support is implementation-specific (marked Extended in conformance profiles).
+
+**Precedence** follows the spec's deterministic rule set (applied in order):
+1. Longer (more specific) matches win.
+2. `Exact` beats `PathPrefix` of the same length.
+3. Among equal-length prefixes, `Exact` > `PathPrefix` > `RegularExpression`.
+4. Within the same HTTPRoute, rules are evaluated in declaration order as a tiebreaker.
+
+**Common production bugs:**
+- A short `PathPrefix: /api` unintentionally swallows `/api-v2` traffic because the team assumed word-boundary semantics.
+- Mixing regex and prefix rules across two HTTPRoutes pointing to the same Gateway listener—spec says the more specific rule wins, but some implementations apply first-match, causing inconsistency.
+- Forgetting that path matching is case-sensitive by default, breaking clients that uppercase paths.
+
+Always validate effective rule precedence with `kubectl get httproute -o yaml` and test with `curl` before promoting to production.
+
+---
+
+### Q: How would you debug and resolve a situation where cert-manager fails to provision a TLS certificate for a Gateway listener, and the listener remains in a degraded state?
+
+**Model Answer:**
+
+The integration between cert-manager and Gateway API uses the **`gateway.cert-manager.io/v1beta1`** experimental support (or the stable `v1` annotation path), which translates `tls.certificateRefs` into cert-manager `Certificate` objects. Debug steps:
+
+1. **Check listener status**: `kubectl get gateway <name> -o jsonpath='{.status.listeners}'` — look for `ResolvedRefs: False` with a reason like `InvalidCertificateRef`.
+2. **Inspect cert-manager Certificate/CertificateRequest objects**: `kubectl get certificate,certificaterequest -n <ns>` and describe failed ones for ACME challenge errors.
+3. **ACME HTTP-01 challenges**: the solver creates a temporary Ingress/HTTPRoute pointing `/.well-known/acme-challenge/`; verify no existing HTTPRoute or NetworkPolicy blocks external traffic to that path.
+4. **DNS-01**: confirm the solver has credentials and the DNS TTL has propagated; use `kubectl logs -n cert-manager deploy/cert-manager` for ACME API responses.
+5. **Secret namespace mismatch**: the Gateway listener references a Secret; cert-manager must write it to the same namespace as the Gateway, which may differ from the cert-manager namespace — confirm with `certificateRef.namespace`.
+6. **ReferenceGrant**: if cert-manager writes the Secret to a different namespace, a `ReferenceGrant` must exist allowing the Gateway to reference it.
+7. Once resolved, force a re-trigger: `kubectl delete certificaterequest <name>` to let cert-manager retry.
+
+Preventive measure: use `kubectl cert-manager status certificate <name>` (cert-manager kubectl plugin) in CI to gate deployments on certificate readiness.
+
+---
+
+### Q: A platform team wants to allow application teams to customize timeout and retry settings per route without giving them write access to the shared Gateway resource. How do you design the policy delegation model using Gateway API?
+
+**Model Answer:**
+
+This is exactly the use case Gateway API's **policy attachment** model and role hierarchy address:
+
+- **Platform team owns**: `GatewayClass` and `Gateway` — sets global defaults (e.g., overall connection timeouts, TLS config). These are cluster- or namespace-scoped resources requiring elevated RBAC.
+- **Application team owns**: `HTTPRoute` in their namespace — they attach route-level policies without touching the Gateway.
+- **`BackendLBPolicy` / `BackendTLSPolicy`** (targeting Services) and **implementation-specific policies** (e.g., NGINX's `ClientSettingsPolicy`, Envoy Gateway's `BackendTrafficPolicy`) allow per-route timeout and retry configuration attached by the application team.
+- **Hierarchy and merging**: route-level policy overrides Gateway-level defaults for matched traffic. Conflicts are resolved by specificity (most-attached-to-most-specific resource wins); the spec calls this *Hierarchical Policy Inheritance*.
+- **Guard rails**: platform team can enforce maximum values using an admission webhook or OPA/Kyverno policy (e.g., deny `HTTPRoute` or policy objects where `retries > 5` or `timeout > 60s`) before they reach the controller.
+- **RBAC design**: grant application teams `create/update/delete` on `HTTPRoute` and implementation policy CRDs scoped to their namespace only; they never need `patch` on `Gateway`.
+
+The key communication artifact is a documented "policy menu" listing which policy CRDs are available, their schema, and the platform-enforced ceilings — otherwise teams will resort to undocumented annotations, defeating the model.
