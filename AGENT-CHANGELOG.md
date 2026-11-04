@@ -931,3 +931,21 @@ _Committed & pushed: yes_
 - A platform team wants to allow application teams to customize timeout and retry settings per route without giving them write access to the shared Gateway resource. How do you design the policy delegation model using Gateway API?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-04 21:03:45
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8019 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level cross-cluster service discovery and traffic routing — including failover between clusters in different AWS regions?
+- A production EKS cluster's CoreDNS pods are healthy, but workloads are reporting intermittent DNS resolution failures and elevated NXDOMAIN rates. How do you systematically diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes RBAC hygiene at scale — including detecting privilege escalation paths, automating role reviews, and preventing over-permissioned service accounts?
+- Describe a situation where EKS workloads began experiencing sudden, partial network connectivity failures — some pods could reach external endpoints but others on the same node could not — and how you identified and resolved the root cause.
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6776 chars)
+- How do you implement request size limiting and body buffering policies at the Gateway/Ingress layer, and how do these settings interact with backend application behavior?
+- What is the difference between Gateway API's `Merge` and `Replace` semantics for header modification, and how do conflicts between multiple filters in a single HTTPRoute get resolved?
+- How do you safely test and validate Ingress or HTTPRoute changes in production without impacting live users, and what tooling supports this?
+- A platform engineer tells you that Gateway API resources in your cluster are "partially implemented"—some features work and others silently do nothing. How do you systematically diagnose which features are supported, and how do you communicate this to application teams?
+
+_Committed & pushed: yes_

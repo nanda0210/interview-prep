@@ -1520,3 +1520,66 @@ This is exactly the use case Gateway API's **policy attachment** model and role 
 - **RBAC design**: grant application teams `create/update/delete` on `HTTPRoute` and implementation policy CRDs scoped to their namespace only; they never need `patch` on `Gateway`.
 
 The key communication artifact is a documented "policy menu" listing which policy CRDs are available, their schema, and the platform-enforced ceilings — otherwise teams will resort to undocumented annotations, defeating the model.
+
+
+---
+
+## 🗓️ Added 2026-11-04 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-04 21:03 -->
+
+### Q: How do you implement request size limiting and body buffering policies at the Gateway/Ingress layer, and how do these settings interact with backend application behavior?
+
+**Model Answer:**
+
+Request size limiting is typically configured via controller-specific annotations (e.g., `nginx.ingress.kubernetes.io/proxy-body-size`) in classic Ingress, or through vendor-specific policy attachments in Gateway API. Key considerations:
+
+- **Buffering vs. streaming**: Most controllers buffer request bodies in memory or on disk before forwarding; disabling buffering reduces latency for large uploads but increases backend pressure and can expose backends to slow-loris attacks.
+- **Interaction with backends**: If the gateway enforces a 10 MB limit but the application also validates size, the gateway rejection (413) is preferable because it spares the backend CPU; mismatches cause confusing double-validation errors.
+- **Chunked encoding**: Some clients send chunked transfer-encoding, making content-length unavailable at the gateway; controllers handle this differently—some buffer the full body before proxying, others stream, which can bypass size checks.
+- **Operational risk**: Increasing limits during an incident without understanding backend capacity can cause OOM kills in backend pods; always pair size limit changes with backend memory/resource audits.
+- **Gateway API gap**: As of v1.2, there is no standard `HTTPRoute` field for body size limits; teams must use `ExtensionRef` or sidecar-level policies, making portability a concern.
+
+---
+
+### Q: What is the difference between Gateway API's `Merge` and `Replace` semantics for header modification, and how do conflicts between multiple filters in a single HTTPRoute get resolved?
+
+**Model Answer:**
+
+In Gateway API's `HTTPRoute`, header modification filters support two operations: `Set` (replace the header value if it exists, add if absent) and `Add` (append a value, allowing multi-value headers). There is no explicit "merge" keyword; the distinction is in which operation you use:
+
+- **`Set`** semantics replace any existing header with that name—useful for overriding upstream-set values like `X-Forwarded-For` normalization.
+- **`Add`** semantics append, which can create duplicate headers—correct for `Set-Cookie` but dangerous for singleton headers like `Authorization`.
+- **Conflict resolution within a single rule**: The spec states filters are applied in declaration order; if two `RequestHeaderModifier` filters both `Set` the same header, the last one wins, though this behavior is implementation-defined and not guaranteed across controllers—test explicitly.
+- **Conflict between rule-level and backend-level filters**: Backend-level filters (attached to a `backendRef`) are applied after rule-level filters; this layering allows per-backend header injection without overwriting shared rule-level headers.
+- **Common production bug**: Using `Add` for `Content-Type` causes multiple values, which breaks strict parsers on backends; always audit filter operations during HTTPRoute reviews.
+
+---
+
+### Q: How do you safely test and validate Ingress or HTTPRoute changes in production without impacting live users, and what tooling supports this?
+
+**Model Answer:**
+
+The goal is shift-left validation combined with low-blast-radius production verification:
+
+- **Dry-run and admission webhooks**: Many controllers (e.g., NGINX Ingress, Contour) ship validating admission webhooks that reject syntactically invalid resources at apply time; always enable these and include webhook reachability in CI.
+- **Gateway API conformance tests**: Run the upstream conformance suite in a staging cluster that mirrors production's GatewayClass and controller version; gate promotions on conformance pass rate.
+- **Shadow/mirror routing**: Use `HTTPRoute` request mirroring to send a copy of live traffic to a new backend version; validate logs and error rates without affecting the primary response path.
+- **Progressive header-based routing**: Route a small cohort (e.g., internal users identified by a header) to the new HTTPRoute configuration; use feature flags or cookie injection at the edge to control cohort membership.
+- **Automated diff and lint**: Tools like `kube-score`, `conftest` with OPA policies, and controller-specific CLI validators (e.g., `ingress-nginx` `--dry-run` mode) catch annotation typos and schema violations before merge.
+- **Rollback readiness**: Ensure GitOps pipelines can revert an HTTPRoute within one pipeline cycle; test rollback paths in staging by deliberately introducing a bad route and measuring recovery time.
+
+---
+
+### Q: A platform engineer tells you that Gateway API resources in your cluster are "partially implemented"—some features work and others silently do nothing. How do you systematically diagnose which features are supported, and how do you communicate this to application teams?
+
+**Model Answer:**
+
+Silent partial implementation is one of Gateway API's most operationally dangerous failure modes because traffic continues flowing but policy is unenforced:
+
+- **Check conformance profile**: Retrieve the `GatewayClass` status conditions and any conformance annotations the controller exposes; controllers that have passed conformance testing publish a `SupportedFeatures` list in their docs mapped to the Gateway API feature sets (Core, Extended, Implementation-specific).
+- **Inspect `RouteConditions`**: The `HTTPRoute` status `.parents[].conditions` should include `ResolvedRefs` and `Accepted`; some controllers also emit `PartiallyInvalid` with a reason explaining which filter or field was ignored—this is your first diagnostic signal.
+- **Test against the conformance matrix**: Run the upstream Gateway API conformance test suite with the specific profile (e.g., `HTTPRoute`, `TLSRoute`) and collect the `report.yaml`; unimplemented features will show as `SKIPPED` or `FAILED`.
+- **Controller-specific telemetry**: Check controller logs for lines like "unsupported filter type, skipping" or "field X not implemented"; many controllers emit warnings at INFO level that are easy to miss without log aggregation.
+- **Communication strategy**: Publish a supported-features matrix in your internal developer portal, keyed to the controller version; use admission webhooks or OPA policies to reject HTTPRoutes that use unsupported fields with a clear error message rather than silently ignoring them—this converts invisible failures into visible ones.
+- **Upgrade path**: Pin controller versions in your platform GitOps repo and diff the supported-features matrix on every upgrade PR, flagging newly supported or removed features for application team review.

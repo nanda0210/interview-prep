@@ -5689,3 +5689,73 @@ API server overload from misbehaving clients is a class-1 reliability risk in la
 - **Cost boundary enforcement**: Map node classes to AWS instance families via Karpenter `NodePool` `requirements`; use admission policies to block Deployments from requesting instance families above their team's approved tier (e.g., prevent general workloads from requesting `p4d` GPU instances).
 - **Drift detection**: Periodically run a `kubectl` or Kubernetes API query (via a CronJob or Falco rule) to detect pods running on nodes whose labels don't match the pod's declared `nodeAffinity`; alert on drift caused by label changes post-scheduling.
 - **Developer experience**: Provide a curated set of `nodeSelector` label presets via Helm chart defaults and documented profiles; teams choose a profile (`batch-spot`, `web-on-demand`, `ml-gpu
+
+
+---
+
+## 🗓️ Added 2026-11-04 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-04 21:03 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level cross-cluster service discovery and traffic routing — including failover between clusters in different AWS regions?
+
+**Model Answer:**
+
+Multi-cluster service discovery on EKS typically combines AWS Route 53, AWS Global Accelerator, and a service mesh or gateway layer:
+
+- **Control-plane federation**: Use AWS Cloud Map or external-dns with Route 53 weighted/latency routing records so each cluster registers its services; a mesh like Istio (with multi-cluster `ServiceEntry` resources) or Linkerd multicluster extension handles east-west traffic without traversing the public internet via VPC Peering or Transit Gateway.
+- **Health-aware failover**: Route 53 health checks backed by ALB target-group health endpoints trigger automatic DNS failover; p99 latency or error-rate alarms in CloudWatch trigger Route 53 policy weight updates via Lambda or Terraform automation.
+- **Active-active vs. active-passive**: For stateless workloads, prefer active-active with latency routing; for stateful workloads (e.g., RDS Global Database), enforce active-passive with leader-aware DNS to prevent split-brain writes.
+- **GitOps propagation**: Argo CD ApplicationSets with cluster generators ensure the same service manifests are promoted to both clusters, and Argo Rollouts analysis templates validate the target cluster before shifting traffic weight.
+- **Observability**: Correlate traces across clusters using a shared OTel collector endpoint and consistent `cluster` resource attribute; alert on cross-cluster latency differentials that indicate silent failover loops.
+- **Testing**: Conduct regular chaos-engineering drills (AWS FIS + Gremlin) to validate RTO/RPO against documented SLAs; ensure connection-draining windows on the primary cluster prevent in-flight request loss.
+
+---
+
+### Q: A production EKS cluster's CoreDNS pods are healthy, but workloads are reporting intermittent DNS resolution failures and elevated NXDOMAIN rates. How do you systematically diagnose and resolve this?
+
+**Model Answer:**
+
+Intermittent DNS failures with healthy CoreDNS pods usually point to capacity, ndots, or VPC resolver throttling rather than a CoreDNS crash:
+
+1. **Metrics first**: Check the `coredns_dns_requests_total`, `coredns_dns_responses_total{rcode="NXDOMAIN"}`, and `coredns_forward_request_duration_seconds` dashboards; a rising NXDOMAIN rate often correlates with ndots-triggered absolute FQDN search failures, not genuine missing records.
+2. **ndots misconfiguration**: Kubernetes default `ndots:5` causes each short name to generate 5+ DNS queries against the search list before falling back to the absolute name; workloads making many external calls (e.g., HTTP clients) can saturate CoreDNS. Fix by explicitly appending `.` to FQDNs in code or lowering `ndots` per-Pod via `dnsConfig`.
+3. **VPC resolver throttling**: Each EC2 instance is limited to 1,024 PPS to the VPC resolver (169.254.169.253). On dense nodes, CoreDNS pods forwarding upstream queries can saturate this. Solution: deploy CoreDNS with `NodeLocal DNSCache` (node-local-dns DaemonSet) to cache upstream responses per node and dramatically reduce PPS to the VPC resolver.
+4. **CoreDNS under-provisioning**: Increase CoreDNS replica count and set a PDB; use HPA based on CPU or the `coredns_dns_requests_total` metric via KEDA; ensure affinity spreads replicas across AZs.
+5. **Connection tracking exhaustion**: High-throughput clusters can exhaust the kernel `conntrack` table for UDP DNS; tune `/proc/sys/net/netfilter/nf_conntrack_max` on nodes or switch CoreDNS to TCP with `prefer_udp false` in the forward plugin.
+6. **Validate fix**: After deploying NodeLocal DNSCache, confirm per-node PPS drops below threshold using VPC Flow Logs and node-level `conntrack -S` counters; set a DNS error-rate SLO alert at <0.1% NXDOMAIN for internal FQDNs.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes RBAC hygiene at scale — including detecting privilege escalation paths, automating role reviews, and preventing over-permissioned service accounts?
+
+**Model Answer:**
+
+RBAC hygiene at scale requires policy-as-code, continuous graph analysis, and automated review workflows:
+
+- **Least-privilege IRSA baseline**: Every workload gets a dedicated ServiceAccount bound to a scoped IAM role via IRSA; wildcard `*` verbs or resources in ClusterRoles are blocked by an OPA/Gatekeeper policy at admission time, failing the deployment.
+- **Privilege escalation graph analysis**: Integrate tools like `rbac-police`, `KubeHound`, or Steampipe's Kubernetes plugin into CI and nightly scheduled jobs; they model the RBAC graph and surface paths where a compromised pod can escalate to `cluster-admin` (e.g., via `create pods/exec` + permissive ClusterRoleBinding).
+- **Automated review workflow**: Emit all RBAC object changes to an S3-backed audit pipeline (via API server audit logs → Kinesis → Lambda); weekly Jira tickets are auto-created for any ClusterRoleBinding referencing a human user older than 90 days without a renewal annotation, forcing access recertification.
+- **Namespace-scoped by default**: Enforce via policy that no workload ServiceAccount receives a ClusterRole unless it has an approved annotation and is in an `ops` namespace; application teams get only Roles scoped to their namespace.
+- **Aggregated ClusterRoles**: Use Kubernetes aggregated ClusterRoles (`aggregationRule`) to compose fine-grained roles; avoids copy-paste drift and allows platform teams to centrally extend permissions without touching each team's manifests.
+- **Detection in runtime**: Deploy Falco rules for `k8s_audit` events matching `create/update clusterrolebindings` or `exec into pods` from non-CI identities; alert to PagerDuty within seconds of a suspicious escalation attempt.
+- **Metrics**: Track the count of ClusterRoleBindings, wildcard rules, and over-permissioned ServiceAccounts as platform KPIs; regression in these metrics blocks environment promotion in the GitOps pipeline.
+
+---
+
+### Q: Describe a situation where EKS workloads began experiencing sudden, partial network connectivity failures — some pods could reach external endpoints but others on the same node could not — and how you identified and resolved the root cause.
+
+**Model Answer:**
+
+This pattern — node-scoped, pod-selective connectivity failure — is a strong indicator of IP address or ENI attachment exhaustion on specific nodes rather than a cluster-wide networking issue:
+
+**Symptoms observed**: A subset of pods on certain nodes failed outbound TCP connections with `connection timed out`, while pods on other nodes and all pods on the affected nodes that were scheduled earlier remained connected. `kubectl exec` into affected pods confirmed no route to external IPs; `kubectl exec` into healthy pods on the same node succeeded.
+
+**Diagnosis**:
+- Ran `aws ec2 describe-network-interfaces --filters "attachment.instance-id=<node>"` and found the node had reached its ENI + secondary IP limit for the instance type (e.g., `m5.large` supports max 3 ENIs × 10 IPs = 29 secondary IPs).
+- VPC CNI logs (`kubectl logs -n kube-system aws-node-<id>`) showed `failed to assign an IP address to container` errors with error code `InsufficientFreeAddressesInSubnet` on some entries and `MaxENILimitReached` on others.
+- Confirmed the subnet associated with that AZ had fewer than 20 free IPs remaining; the other two AZ subnets were healthy — a capacity imbalance caused by earlier Karpenter launching multiple large-pod workloads into one AZ due to a missing topology spread constraint.
+
+**Resolution**:
+1. **Immediate**: Cordoned affected nodes and triggered pod rescheduling to healthy nodes; expanded the exhausted subnet CIDR via a secondary CIDR block attached to the VPC, then associated a new subnet with the existing route table.
+2. **Short-term**:
