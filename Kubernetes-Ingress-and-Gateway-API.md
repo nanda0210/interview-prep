@@ -1583,3 +1583,69 @@ Silent partial implementation is one of Gateway API's most operationally dangero
 - **Controller-specific telemetry**: Check controller logs for lines like "unsupported filter type, skipping" or "field X not implemented"; many controllers emit warnings at INFO level that are easy to miss without log aggregation.
 - **Communication strategy**: Publish a supported-features matrix in your internal developer portal, keyed to the controller version; use admission webhooks or OPA policies to reject HTTPRoutes that use unsupported fields with a clear error message rather than silently ignoring them—this converts invisible failures into visible ones.
 - **Upgrade path**: Pin controller versions in your platform GitOps repo and diff the supported-features matrix on every upgrade PR, flagging newly supported or removed features for application team review.
+
+
+---
+
+## 🗓️ Added 2026-11-05 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-05 21:20 -->
+
+### Q: How do you implement and test IPv6 and dual-stack support at the Ingress/Gateway layer, and what failure modes are specific to that configuration?
+
+**Model Answer:**
+
+Kubernetes dual-stack requires both the cluster CNI and the Ingress/Gateway controller to support IPv6. At the Gateway layer, you must ensure the `Gateway` listener binds to `::` (or a specific IPv6 address) and that the underlying cloud load balancer is provisioned with a dual-stack frontend IP. Key steps:
+
+- Verify the GatewayClass implementation explicitly advertises IPv6/dual-stack support in its conformance profile; many controllers silently fall back to IPv4-only.
+- Confirm the `Service` backing the controller is `ipFamilyPolicy: RequireDualStack` or `PreferDualStack`, otherwise the controller only gets an IPv4 cluster IP and cannot proxy IPv6 connections end-to-end.
+- Test with `curl -6` and `curl -4` from outside the cluster to both the ingress VIP and directly to backend pods to isolate whether the failure is at the LB, the controller, or the pod network.
+
+**Common failure modes:** DNS returning only A records (not AAAA) because external-dns wasn't configured for IPv6; `kube-proxy` IPVS mode mishandling IPv6 source IPs; and TLS SNI validation failing when the client presents an IPv6 literal address instead of a hostname in the SNI field.
+
+---
+
+### Q: What is the purpose of the `Infrastructure` field in a `Gateway` spec, and how would you use it to standardize load-balancer provisioning across teams?
+
+**Model Answer:**
+
+The `infrastructure` field (promoted in Gateway API v1.1) allows you to annotate the underlying infrastructure object—typically a cloud load balancer—directly from the `Gateway` spec without relying on vendor-specific annotations on the `Gateway` resource itself. It supports `annotations` and `labels` sub-fields that the controller propagates to the provisioned LB service or cloud resource.
+
+**Practical use:**
+
+- A platform team defines a `GatewayClass` with a `ParametersRef` pointing to a cluster-scoped config object that sets baseline tags (cost center, environment), then allows application teams to add only approved annotations via the `infrastructure` field—enforced by an OPA/Kyverno policy that allowlists permitted keys.
+- This separates *what infrastructure to provision* (the GatewayClass) from *how to tag/configure it* (per-Gateway infrastructure field), enabling consistent FinOps tagging and security group assignment without granting teams direct access to the underlying `Service` object the controller creates.
+
+**Gotcha:** Not all controllers implement propagation of this field yet; always check the conformance report. Silently ignored annotations cause billing or network-policy drift that is hard to detect until an audit.
+
+---
+
+### Q: A multi-tenant cluster has HTTPRoutes from different teams occasionally "stealing" hostnames already claimed by another team's route. How does Gateway API's hostname binding model prevent this, and what gaps remain?
+
+**Model Answer:**
+
+Gateway API provides two layers of hostname protection:
+
+1. **Listener hostname filtering:** A `Gateway` listener can specify a `hostname` (e.g., `*.team-a.example.com`). Only HTTPRoutes whose `hostnames` are a subset of that pattern will be accepted; routes claiming `team-b.example.com` are rejected with `Accepted: False / NoMatchingListenerHostname`.
+2. **ReferenceGrant + namespace isolation:** By placing each team's Gateway in its own namespace and requiring `ReferenceGrant` for cross-namespace backend references, you prevent one team from routing to another team's services even if they forge a matching hostname.
+
+**Remaining gaps:**
+
+- Wildcard listeners are coarse; `*.example.com` still permits any subdomain, so a rogue team could claim `internal.example.com` if they can create HTTPRoutes in an allowed namespace.
+- There is currently no first-class "hostname reservation" or "claim" CRD in core Gateway API; teams must layer OPA/Kyverno admission policies that maintain a registry of owned hostnames and reject duplicates at admission time.
+- Conflict resolution when two accepted HTTPRoutes share the same hostname/path is implementation-defined (usually "oldest wins"), so without admission control you can get silent traffic theft during a rollout.
+
+---
+
+### Q: Describe how you would design a Gateway API–based ingress architecture to support hundreds of microservices while keeping control-plane load, API server watch pressure, and reconciliation latency manageable.
+
+**Model Answer:**
+
+At scale, the naive approach of one HTTPRoute per microservice with a single shared Gateway creates watch storms and slow reconciliation. Key design principles:
+
+- **Shard Gateways by domain or team boundary** rather than one monolithic Gateway. Each shard reduces the number of HTTPRoutes a single controller instance must reconcile, and failures are blast-radius–limited.
+- **Aggregate routes where possible:** Use path-prefix rules within a single HTTPRoute to cover multiple services owned by one team, reducing total object count. HTTPRoute allows multiple `rules` entries, so one object can route `/api/users` → user-svc and `/api/orders` → order-svc.
+- **Use `labelSelector`-based controller sharding** (supported by NGINX Gateway Fabric, Envoy Gateway, and others) so each controller replica only watches a subset of GatewayClasses or namespaces, distributing API server list/watch load.
+- **Cache and rate-limit reconciliation loops:** Tune the controller's resync period and work-queue rate limiters; aggressive re-queuing on transient errors (e.g., cloud API throttling) can amplify API server load. Set appropriate `--resync-period` and configure exponential backoff.
+- **Monitor `gateway_reconcile_duration_seconds` and API server `watch_cache_capacity_overflow` metrics** to detect saturation before it causes latency spikes.
+- **GitOps discipline:** Use server-side apply and strategic merge to avoid unnecessary resource updates (annotation churn from CI/CD is a common hidden source of reconcile churn at scale).

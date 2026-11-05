@@ -5759,3 +5759,77 @@ This pattern — node-scoped, pod-selective connectivity failure — is a strong
 **Resolution**:
 1. **Immediate**: Cordoned affected nodes and triggered pod rescheduling to healthy nodes; expanded the exhausted subnet CIDR via a secondary CIDR block attached to the VPC, then associated a new subnet with the existing route table.
 2. **Short-term**:
+
+
+---
+
+## 🗓️ Added 2026-11-05 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-05 21:20 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level mutual TLS (mTLS) at scale — including certificate lifecycle, identity bootstrapping, and observability across hundreds of services?
+
+**Model Answer:**
+
+- **Service mesh as the foundation:** Deploy Istio or AWS App Mesh (or Linkerd for lower overhead) cluster-wide, enforcing `STRICT` PeerAuthentication mode via policy so plaintext traffic is rejected at the data plane rather than relying on application code.
+- **Certificate lifecycle automation:** Integrate with cert-manager backed by AWS Private CA (ACM PCA) as the SPIFFE-compatible issuer; configure short-lived certificate TTLs (1–24 hours) with automatic rotation, eliminating long-lived credential risk.
+- **Identity bootstrapping:** Bind workload identity to Kubernetes Service Accounts via SPIFFE SVIDs — each pod receives a cryptographic identity scoped to its namespace and service account, not its IP, making identity portable across rescheduling events.
+- **Policy layering:** Enforce AuthorizationPolicies at the mesh level alongside Kubernetes NetworkPolicy at the CNI level — defense in depth so a misconfigured mesh policy doesn't leave the network path open.
+- **Observability:** Instrument Envoy sidecar mTLS handshake metrics (`ssl_handshake_errors`, `ssl_connection_error`) in Prometheus and surface per-service mTLS coverage dashboards; alert when any workload drops below 100% mTLS traffic ratio.
+- **Admission control enforcement:** Use OPA/Gatekeeper or Kyverno to prevent Service or Deployment creation unless the namespace has the required sidecar injection label and a matching PeerAuthentication policy, preventing misconfigurations from reaching production.
+- **Migration path:** Use `PERMISSIVE` mode per namespace during rollout, track coverage via Kiali or the mesh control plane API, and graduate namespaces to `STRICT` on a gated schedule with automated rollback if error rates spike.
+
+---
+
+### Q: A production EKS cluster's Persistent Volume Claims backed by AWS EBS (via the EBS CSI Driver) are becoming stuck in `Terminating` state for extended periods after pod deletion. How do you diagnose and resolve this?
+
+**Model Answer:**
+
+The root cause is almost always a **volume attachment finalizer** (`kubernetes.io/pvc-protection` or the CSI external-attacher finalizer) not being cleared because the detach workflow is blocked.
+
+**Diagnosis steps:**
+1. `kubectl describe pvc <name>` — check finalizers list and events for detach errors.
+2. `kubectl logs -n kube-system` for `ebs-csi-controller` pods — look for `DescribeVolumes` or `DetachVolume` API errors (e.g., `VolumeInUse`, throttling, or IAM permission denials).
+3. Check the node the volume was last attached to — if the node was forcibly terminated (spot interruption, `kubectl delete node`), the kubelet never issued the detach, leaving the VolumeAttachment object in a stuck state.
+4. `kubectl get volumeattachment` — if the attachment object persists for a node that no longer exists, the external-attacher is waiting for confirmation it can't get.
+
+**Resolution:**
+- For orphaned VolumeAttachment objects from deleted nodes: manually delete the VolumeAttachment object; the CSI driver will then issue a force-detach via EC2 API.
+- If the volume is still in-use on a live node, ensure the pod fully terminated before deletion completes — check for zombie processes holding the mount.
+- **Preventive design:** Enable the EBS CSI driver's node-level detach on node shutdown via the `--feature-gates=CSIMigration` flag; implement PodDisruptionBudgets and graceful termination to allow orderly unmounting; use `volumeBindingMode: WaitForFirstConsumer` to avoid cross-AZ attachment issues.
+- Audit IAM role attached to the EBS CSI controller's IRSA for `ec2:DetachVolume` permission — missing permissions are a common silent failure.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes API deprecation safety — ensuring that workloads and infrastructure-as-code are proactively validated against upcoming EKS version upgrades?
+
+**Model Answer:**
+
+- **Static analysis in CI:** Integrate `pluto` and `kubent` (kube-no-trouble) into CI/CD pipelines to scan all Helm charts, Kustomize manifests, and raw YAML against the target Kubernetes version's deprecation matrix — fail the pipeline if deprecated APIs are detected.
+- **Cluster-side detection:** Run `kubent` as a CronJob against the live cluster to detect in-use deprecated API versions from API server audit logs and resource discovery, generating reports consumed by an alerting channel.
+- **Helm chart governance:** Enforce minimum chart versions via OPA/Gatekeeper or Kyverno admission policies that reject Helm-deployed resources using known deprecated apiVersions; maintain an internal Helm chart compatibility matrix tied to EKS versions.
+- **Upgrade rehearsal environments:** Maintain a non-production cluster one minor version ahead of production; promote workloads there first and use automated smoke tests to surface runtime API incompatibilities before production upgrade.
+- **API server audit log monitoring:** Enable EKS control plane audit logs and stream them to CloudWatch or S3; use Athena queries or a SIEM to detect `k8s.io/deprecated` annotations in audit events, which the API server emits when deprecated APIs are called.
+- **Operator and CRD governance:** Track CRD apiVersions for all operators (e.g., cert-manager, Karpenter, AWS Load Balancer Controller) against their compatibility matrices with each EKS version; require operator upgrades to be tested in the rehearsal cluster before the control plane upgrade.
+- **Communication and ownership:** Assign API deprecation remediation tickets to workload owners with SLAs tied to the upgrade schedule; block the production upgrade in the change management process until all deprecated API usage is resolved.
+
+---
+
+### Q: Describe a situation where EKS workloads began experiencing sudden, unexplained latency spikes correlated with Kubernetes node scale-out events triggered by Cluster Autoscaler or Karpenter. How did you diagnose and resolve it?
+
+**Model Answer:**
+
+**Scenario:** During peak traffic, Cluster Autoscaler launched new nodes and scheduled pods onto them, but for 90–180 seconds after pods reported `Running`, they served requests with p99 latency 5–10x above baseline before returning to normal.
+
+**Diagnosis:**
+1. Correlated latency spikes in APM (Datadog/X-Ray) with Kubernetes events showing new node registrations and pod scheduling — timing matched exactly.
+2. Inspected ALB target group registration delays: new pod IPs were registering in the target group but ALB health checks required 3 consecutive passes (default 30-second intervals) before the target was marked healthy, yet the Kubernetes readiness probe was passing sooner, causing traffic to reach pods before the ALB considered them healthy — but the real issue was the inverse: pods were receiving traffic from internal service mesh routing before they had fully warmed up JVM/connection pools.
+3. Used `kubectl describe endpoints` and VPC Flow Logs to confirm traffic was reaching new pod IPs immediately upon readiness.
+4. Identified that the application (a Java service) required ~60 seconds of JVM JIT warmup and connection pool priming before it could serve at target throughput.
+
+**Resolution:**
+- Implemented a **startup probe** with a longer `initialDelaySeconds` to prevent readiness from passing before the application was truly ready.
+- Added a **custom readiness endpoint** in the application that only returned 200 after the connection pool reported `minIdle` connections established and a synthetic internal request completed successfully.
+- Configured **preStop hooks** with a sleep matching the ALB deregistration delay to handle the shutdown path symmetrically.
+- For Karpenter, enabled **warm pools** (via EC2 Fleet) for predictable base capacity to reduce cold-start frequency during scaling events.
+- Established a latency regression alert specifically scoped to new pod IPs to catch future warmup issues before they affect broad traffic.

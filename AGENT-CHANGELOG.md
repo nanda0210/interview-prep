@@ -949,3 +949,21 @@ _Committed & pushed: yes_
 - A platform engineer tells you that Gateway API resources in your cluster are "partially implemented"—some features work and others silently do nothing. How do you systematically diagnose which features are supported, and how do you communicate this to application teams?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-05 21:20:47
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8241 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level mutual TLS (mTLS) at scale — including certificate lifecycle, identity bootstrapping, and observability across hundreds of services?
+- A production EKS cluster's Persistent Volume Claims backed by AWS EBS (via the EBS CSI Driver) are becoming stuck in `Terminating` state for extended periods after pod deletion. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes API deprecation safety — ensuring that workloads and infrastructure-as-code are proactively validated against upcoming EKS version upgrades?
+- Describe a situation where EKS workloads began experiencing sudden, unexplained latency spikes correlated with Kubernetes node scale-out events triggered by Cluster Autoscaler or Karpenter. How did you diagnose and resolve it?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6158 chars)
+- How do you implement and test IPv6 and dual-stack support at the Ingress/Gateway layer, and what failure modes are specific to that configuration?
+- What is the purpose of the `Infrastructure` field in a `Gateway` spec, and how would you use it to standardize load-balancer provisioning across teams?
+- A multi-tenant cluster has HTTPRoutes from different teams occasionally "stealing" hostnames already claimed by another team's route. How does Gateway API's hostname binding model prevent this, and what gaps remain?
+- Describe how you would design a Gateway API–based ingress architecture to support hundreds of microservices while keeping control-plane load, API server watch pressure, and reconciliation latency manageable.
+
+_Committed & pushed: yes_
