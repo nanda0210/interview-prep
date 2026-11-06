@@ -5833,3 +5833,61 @@ The root cause is almost always a **volume attachment finalizer** (`kubernetes.i
 - Configured **preStop hooks** with a sleep matching the ALB deregistration delay to handle the shutdown path symmetrically.
 - For Karpenter, enabled **warm pools** (via EC2 Fleet) for predictable base capacity to reduce cold-start frequency during scaling events.
 - Established a latency regression alert specifically scoped to new pod IPs to catch future warmup issues before they affect broad traffic.
+
+
+---
+
+## 🗓️ Added 2026-11-06 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-06 20:41 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes pod disruption and eviction safety during cluster-wide node recycling events — including Karpenter drift remediation, managed node group AMI refreshes, and voluntary evictions triggered by Cluster Autoscaler?
+
+**Key points an interviewer wants to hear:**
+
+- **PDB as the foundational gate:** Every stateful and traffic-serving workload must declare a `PodDisruptionBudget` with `maxUnavailable: 0` or `minAvailable` matching minimum viable replica count; enforce this via OPA/Gatekeeper policy that blocks Deployment/StatefulSet creation without a corresponding PDB.
+- **Eviction API respect:** Confirm all node recycling paths (Karpenter `--disruption` controller, managed node group drain, Cluster Autoscaler) use the Eviction API, not raw `DELETE` on pods, so PDBs are honored; Karpenter's `Disruption` budgets add a second layer for fleet-level concurrency control.
+- **Coordinated drain sequencing:** Use `kubectl drain --grace-period` matching the longest workload `terminationGracePeriodSeconds`; set Karpenter `disruption.budgets` to limit simultaneous node replacements to a safe percentage (e.g., 10% of fleet) during business hours via time-window expressions.
+- **Readiness gates for safe traffic cut-over:** Implement pod readiness gates tied to ALB/NLB target health so eviction only proceeds after the replacement pod is confirmed in-service by the load balancer, eliminating the gap between pod `Running` and actual traffic readiness.
+- **Alerting on stalled evictions:** Monitor `karpenter_disruption_blocked_node_pool_total` and `evictions_blocked_by_pdb` metrics; alert when evictions are blocked >10 minutes, which surfaces misconfigured PDBs that could stall an entire AMI rollout.
+- **Chaos validation:** Periodically run `kube-chaos` or `AWS Fault Injection Simulator` node termination experiments in pre-prod to verify PDBs hold under realistic concurrent disruption load before each EKS minor version upgrade cycle.
+
+---
+
+### Q: A production EKS cluster's Kubernetes control plane metrics show a sustained rise in `apiserver_current_inflight_requests` for `WATCH` requests, eventually causing API server timeouts for controllers and operators. How do you diagnose and remediate this?
+
+**Key points an interviewer wants to hear:**
+
+- **Root cause pattern:** Excessive `WATCH` requests typically originate from controllers or operators that reconnect in a tight loop (e.g., after frequent `410 Gone` responses when the API server's watch cache is overwhelmed or etcd compaction lags), or from too many independent informers watching high-churn resources like `Pods` or `Endpoints`.
+- **Diagnosis:** Query `apiserver_current_inflight_requests{request_kind="WATCH"}` broken down by `user` and `resource` via CloudWatch Container Insights or Prometheus; cross-reference with API audit logs to identify the top principals and resource types generating watches.
+- **Controller consolidation:** Ensure all custom operators use `controller-runtime` shared informer caches rather than creating per-controller watches; audit Helm-deployed operators for redundant CRD watches and upgrade to versions that use `SharedIndexInformer`.
+- **Watch cache tuning:** For EKS, the managed control plane automatically sizes the watch cache, but reducing unnecessary watch scopes (adding `fieldSelector` or `labelSelector` to narrow watch scope) significantly reduces server-side fan-out.
+- **Request priority and fairness (APF):** Configure `PriorityLevelConfiguration` and `FlowSchema` objects to place watch-heavy operators in a lower-priority bucket, protecting leader-election and admission-critical flows from starvation during watch storms.
+- **Remediation:** Rolling-restart the offending operators to clear reconnection storms; consider deploying a `ListWatcher` rate limiter via `--kube-api-qps` and `--kube-api-burst` flags on operator deployments; add HPA or replicas only after cache-sharing is confirmed.
+- **Long-term:** Instrument operators with `reflector_watch_duration_seconds` metrics; set SLO alerts on watch request saturation before it impacts admission latency.
+
+---
+
+### Q: Describe a situation where an EKS multi-tenant cluster's namespace-scoped teams began experiencing cross-namespace data access due to a misconfigured Kubernetes service account and IRSA binding. How did you detect it, contain it, and redesign the guardrails?
+
+**Key points an interviewer wants to hear:**
+
+- **Situation:** A team's application ServiceAccount was bound to an IAM role via IRSA annotation, but the IAM role's trust policy used an overly broad OIDC condition (`StringLike` with a wildcard namespace), allowing ServiceAccounts in other namespaces to also assume the role and access the same S3 bucket containing another team's data.
+- **Detection:** AWS CloudTrail showed `AssumeRoleWithWebIdentity` calls from unexpected EKS pod OIDC subjects (different namespace prefixes); GuardDuty's IAM finding `UnauthorizedAccess:IAMUser/TorIPCaller` was a secondary signal; the primary catch was a weekly IAM access analyzer report flagging the wildcard trust condition.
+- **Containment:** Immediately scoped the trust policy to the exact `system:serviceaccount:<namespace>:<name>` subject; rotated any long-lived credentials in the S3 bucket policy; revoked existing STS sessions via IAM policy condition `aws:TokenIssueTime`.
+- **Root cause:** The IRSA trust policy template in the team's Terraform module used `StringLike` with `sts.amazonaws.com:sub: system:serviceaccount:*:app-sa` instead of `StringEquals` with the fully qualified namespace and name.
+- **Redesign:** Enforced IRSA trust policy generation through a centralized Terraform module that always uses `StringEquals` and parameterizes namespace and service account name; added an OPA policy in CI that rejects IAM role PRs containing wildcard OIDC subjects; enabled IAM Access Analyzer at the organization level to continuously validate trust policies.
+- **Behavioral takeaway:** Instituted quarterly IRSA trust policy audits and added `aws iam simulate-principal-policy` checks in the GitOps pipeline for every IRSA role change, turning a manual review into an automated gate.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes ephemeral container and debug access policies — ensuring developers can perform live pod debugging without compromising runtime security posture or violating compliance requirements?
+
+**Key points an interviewer wants to hear:**
+
+- **Ephemeral container gating:** Enable the `EphemeralContainers` feature gate (GA in 1.25+) but restrict who can invoke `kubectl debug` via RBAC — create a dedicated `ClusterRole` with only `pods/ephemeralcontainers` sub-resource `update` verb, bound to developers via `RoleBinding` scoped to non-production namespaces by default.
+- **Image allowlisting:** Use an OPA/Gatekeeper or Kyverno policy that intercepts `EphemeralContainers` admission and validates the debug image against an approved registry allowlist (e.g., only images from `internal-registry/debug-tools:*`), preventing arbitrary image injection into running pods.
+- **No privilege escalation:** Enforce that ephemeral containers cannot set `securityContext.privileged: true`, `capabilities.add`, or `runAsUser: 0` via admission policy; this prevents using debug sessions as a privilege escalation vector even if the target pod runs as root.
+- **Audit and session logging:** Route `kubectl exec` and ephemeral container API calls to CloudTrail via EKS API audit logs with `RequestResponse` level logging; integrate with a session recording solution (e.g., Teleport or AWS Systems Manager Session Manager for node-level access) to maintain a tamper-evident transcript for compliance.
+- **Production access workflow:** For production namespaces, require a just-in-time (JIT) approval workflow — a Slack/PagerDuty-integrated operator grants a time-boxed `RoleBinding` for `pods/ephemeralcontainers` only after incident manager approval, automatically revoked after TTL via a controller watching binding annotations.
+- **Distro

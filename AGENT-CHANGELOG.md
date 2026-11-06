@@ -967,3 +967,21 @@ _Committed & pushed: yes_
 - Describe how you would design a Gateway API–based ingress architecture to support hundreds of microservices while keeping control-plane load, API server watch pressure, and reconciliation latency manageable.
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-06 20:42:21
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8256 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes pod disruption and eviction safety during cluster-wide node recycling events — including Karpenter drift remediation, managed node group AMI refreshes, and voluntary evictions triggered by Cluster Autoscaler?
+- A production EKS cluster's Kubernetes control plane metrics show a sustained rise in `apiserver_current_inflight_requests` for `WATCH` requests, eventually causing API server timeouts for controllers and operators. How do you diagnose and remediate this?
+- Describe a situation where an EKS multi-tenant cluster's namespace-scoped teams began experiencing cross-namespace data access due to a misconfigured Kubernetes service account and IRSA binding. How did you detect it, contain it, and redesign the guardrails?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes ephemeral container and debug access policies — ensuring developers can perform live pod debugging without compromising runtime security posture or violating compliance requirements?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6487 chars)
+- How does Gateway API's `BackendLBPolicy` (or equivalent load-balancing extension) differ from Service-level `kube-proxy` load balancing, and when does each layer apply?
+- A GatewayClass has `controllerName` set correctly, but after a controller upgrade the existing Gateways start oscillating between `Accepted: True` and `Accepted: False` every few seconds. What are the likely causes and how do you stabilize the cluster?
+- How do you implement and enforce rate limiting at the Gateway layer in a multi-tenant environment, and how do you prevent one tenant's rate-limit configuration from interfering with another's?
+- Describe the trust model and security boundary implications of allowing application teams to create their own `Gateway` resources versus restricting them to only creating `HTTPRoute` resources that attach to platform-managed Gateways.
+
+_Committed & pushed: yes_
