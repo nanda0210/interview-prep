@@ -1678,3 +1678,74 @@ Rate limiting at the Gateway layer is implemented either through vendor-specific
 ### Q: Describe the trust model and security boundary implications of allowing application teams to create their own `Gateway` resources versus restricting them to only creating `HTTPRoute` resources that attach to platform-managed Gateways.
 
 When application teams can create `Gateway` resources they implicitly control infrastructure provisioning—triggering cloud load-balancer creation, consuming IP addresses, and configuring TLS termination—which introduces cost, security, and compliance risks outside platform oversight. The Gateway API was explicitly designed with a layered ownership model: cluster operators own `GatewayClass` and `Gateway`; application teams own `HTTPRoute` and related route resources. Restricting teams to `HTTPRoute` only means the platform team controls the attack surface at the TLS and load-balancer level (cipher suites, certificate authorities, public IP exposure), while teams retain autonomy over path routing, header matching, and traffic weights. The `ReferenceGrant` and `allowedRoutes` fields on the `Gateway` listener enforce this boundary in-band: a listener can restrict which namespaces' routes it accepts, so a misconfigured or malicious HTTPRoute in another namespace simply fails to attach rather than hijacking traffic. Use RBAC to deny `create`/`update` on `gateways.gateway.networking.k8s.io` for application-team service accounts, and use `ValidatingAdmissionPolicy` (CEL) or OPA/Gatekeeper to enforce that any `Gateway` created outside the platform namespace is rejected. Audit `Gateway` creation events via audit logs and alert on unexpected provisioning, since a rogue Gateway could expose internal services to the internet without going through the standard security review process.
+
+
+---
+
+## 🗓️ Added 2026-11-07 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-07 19:16 -->
+
+### Q: How does Gateway API's `ParentReference` `sectionName` field enable fine-grained listener binding, and what misconfiguration patterns cause routes to silently attach to the wrong listener?
+
+**Model Answer:**
+
+`sectionName` in a `parentReference` lets an HTTPRoute (or other route type) bind to a **specific named listener** on a Gateway rather than all listeners on that Gateway. This is critical when a single Gateway exposes both port 80 and port 443, or HTTP and gRPC listeners, and you want a route to attach only to one. Common misconfiguration patterns include:
+
+- **Omitting `sectionName`**: the route attaches to every listener that accepts its hostname, which can inadvertently expose a route over HTTP when it was intended only for HTTPS.
+- **Listener name typo**: the route's `sectionName` doesn't match any listener name, so the route is never admitted—`RouteConditionAccepted` is `False` with reason `NoMatchingParent`, which teams often miss without alerting on route conditions.
+- **Multiple listeners with overlapping hostnames**: omitting `sectionName` causes both listeners to claim the route, producing unexpected TLS behavior.
+- **Namespace mismatch**: even with the correct `sectionName`, if the Gateway's listener `allowedRoutes.namespaces` doesn't include the route's namespace, attachment silently fails.
+
+Mitigation: always name listeners explicitly, enforce `sectionName` in OPA/Kyverno policies, and alert on any HTTPRoute with `Accepted: False`.
+
+---
+
+### Q: What is the difference between Ingress `pathType: ImplementationSpecific` and the defined path types, and what security risks does using it introduce?
+
+**Model Answer:**
+
+`Exact` and `Prefix` path types have RFC-specified semantics that every conformant controller must implement identically. `ImplementationSpecific` delegates matching behavior entirely to the controller's IngressClass, meaning the same manifest can behave differently across NGINX, Traefik, or ALB controllers. Security risks include:
+
+- **Regex injection**: many controllers interpret `ImplementationSpecific` paths as regular expressions. An attacker with write access to Ingress resources (or a misconfigured CI pipeline) could craft a broad regex that captures paths intended for another service.
+- **Hostname bypass**: some controllers allow partial hostname wildcards only under `ImplementationSpecific`, creating unintended catch-all rules.
+- **Portability trap**: manifests tested on one controller silently misbehave when clusters are migrated or the IngressClass changes.
+- **Audit difficulty**: security reviewers cannot reason about effective routing without knowing the exact controller version and its regex dialect.
+
+Best practice: ban `ImplementationSpecific` via admission policy, migrate to Gateway API `RegularExpression` match type (explicitly gated behind a support flag per controller), and document which controllers in your fleet support it.
+
+---
+
+### Q: A team wants to serve multiple TLS-terminated hostnames from a single Gateway listener using wildcard certificates. Walk through the correct configuration and the edge cases where it breaks.
+
+**Model Answer:**
+
+Configure the Gateway listener with `hostname: "*.example.com"`, `protocol: HTTPS`, and a `certificateRefs` pointing to a Secret holding a wildcard certificate (e.g., `*.example.com`). HTTPRoutes from application teams then specify their concrete hostnames (`api.example.com`, `app.example.com`); the listener admits them because the wildcard matches. Edge cases where this breaks:
+
+- **Second-level wildcard**: TLS wildcard certs cover only one label (`*.example.com` does not cover `a.b.example.com`). Routes for deeper subdomains will produce TLS name mismatch errors.
+- **SAN mismatch**: if the certificate's SAN list doesn't include the wildcard (some older CAs issued CN-only wildcards), modern TLS stacks reject it.
+- **Multiple wildcard listeners**: if a Gateway has both `*.example.com` and `*.internal.example.com` listeners, Gateway API listener precedence rules apply and the more-specific listener wins, but controller implementations vary—test explicitly.
+- **HTTPRoute hostname narrowing**: an HTTPRoute must specify a hostname that is equal to or more specific than the listener hostname; a route with `hostname: "*.example.com"` on a listener that also uses that wildcard is allowed, but a route with a hostname *outside* the wildcard is rejected with `ListenerHostnameConflict`.
+- **Certificate rotation**: wildcard certs are high-blast-radius targets; automate rotation with cert-manager and ensure the controller watches Secret updates and hot-reloads without dropping connections.
+
+---
+
+### Q: Describe a production incident where an Ingress controller's default `proxy-body-size` or buffer settings caused cascading failures, how you diagnosed it, and what permanent controls you put in place.
+
+**Model Answer (behavioral + technical):**
+
+*Situation*: After a routine NGINX Ingress controller upgrade, a payment service started returning 413 errors for checkout requests exceeding 1 MB—previously working because the old default was unlimited.
+
+*Diagnosis steps*:
+1. Correlated spike in 413s in Datadog with the controller rollout timestamp.
+2. Checked controller pod logs: `client intended to send too large body`.
+3. Inspected the Ingress resource—no explicit `nginx.ingress.kubernetes.io/proxy-body-size` annotation, so the new controller default (`1m`) applied.
+4. Confirmed with `kubectl describe ingress` that no size annotation was present and diff'd the controller's ConfigMap against the previous version.
+
+*Remediation*: added `proxy-body-size: "10m"` annotation to affected Ingress resources within 15 minutes; revert was not needed.
+
+*Permanent controls*:
+- Codified required annotations in a Kyverno `ClusterPolicy` that warns (then blocks) Ingress resources targeting the payment namespace without explicit body-size settings.
+- Added a controller upgrade checklist item to diff the new controller's default ConfigMap values against the current cluster ConfigMap and review changelogs for default changes.
+- Wrote a synthetic canary test that sends a 5 MB POST through the Ingress in CI/CD, failing the pipeline if a non-200 response is returned.
+- Migrated the service to HTTPRoute + `BackendRequestPolicy` (where supported) to make body limits explicit and version-controlled rather than annotation-driven.

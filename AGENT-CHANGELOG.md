@@ -985,3 +985,21 @@ _Committed & pushed: yes_
 - Describe the trust model and security boundary implications of allowing application teams to create their own `Gateway` resources versus restricting them to only creating `HTTPRoute` resources that attach to platform-managed Gateways.
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-07 19:16:08
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7977 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes VerticalPodAutoscaler (VPA) adoption at scale — including safe interaction with HPA, admission risk, and resource recommendation governance?
+- A production EKS cluster's AWS Load Balancer Controller is correctly provisioning NLBs, but you observe that pod IP targets registered in target groups become stale during rapid Karpenter scale-in events, causing brief periods of connection errors to end users. How do you diagnose and permanently resolve this?
+- Describe a situation where an EKS cluster's GitOps pipeline (Argo CD) was operating normally, but a subset of production workloads silently drifted from their desired state without Argo CD detecting or alerting on the drift. Walk through your investigation and the architectural changes you made.
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes pod scheduling latency SLOs — ensuring that pods consistently schedule within acceptable time bounds and that scheduling failures are detected, alerted on, and auto-remediated?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6492 chars)
+- How does Gateway API's `ParentReference` `sectionName` field enable fine-grained listener binding, and what misconfiguration patterns cause routes to silently attach to the wrong listener?
+- What is the difference between Ingress `pathType: ImplementationSpecific` and the defined path types, and what security risks does using it introduce?
+- A team wants to serve multiple TLS-terminated hostnames from a single Gateway listener using wildcard certificates. Walk through the correct configuration and the edge cases where it breaks.
+- Describe a production incident where an Ingress controller's default `proxy-body-size` or buffer settings caused cascading failures, how you diagnosed it, and what permanent controls you put in place.
+
+_Committed & pushed: yes_

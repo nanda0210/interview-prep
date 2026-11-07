@@ -5891,3 +5891,63 @@ The root cause is almost always a **volume attachment finalizer** (`kubernetes.i
 - **Audit and session logging:** Route `kubectl exec` and ephemeral container API calls to CloudTrail via EKS API audit logs with `RequestResponse` level logging; integrate with a session recording solution (e.g., Teleport or AWS Systems Manager Session Manager for node-level access) to maintain a tamper-evident transcript for compliance.
 - **Production access workflow:** For production namespaces, require a just-in-time (JIT) approval workflow — a Slack/PagerDuty-integrated operator grants a time-boxed `RoleBinding` for `pods/ephemeralcontainers` only after incident manager approval, automatically revoked after TTL via a controller watching binding annotations.
 - **Distro
+
+
+---
+
+## 🗓️ Added 2026-11-07 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-07 19:15 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes VerticalPodAutoscaler (VPA) adoption at scale — including safe interaction with HPA, admission risk, and resource recommendation governance?
+
+**Key points an interviewer wants to hear:**
+
+- **Operational mode discipline:** Run VPA in `Off` or `Initial` mode for most workloads initially; reserve `Auto` (which triggers pod evictions) only for stateless, disruption-tolerant workloads protected by PDBs and appropriate `minReplicas`.
+- **HPA/VPA conflict prevention:** Never combine VPA CPU/memory targeting with HPA CPU/memory-based scaling simultaneously — use VPA for resource sizing and HPA for replica scaling driven by custom or external metrics (e.g., SQS depth via KEDA), enforced via OPA/Kyverno policies.
+- **Admission risk:** VPA's `MutatingAdmissionWebhook` can delay pod scheduling if the VPA admission controller is unavailable; set `failurePolicy: Ignore` on the webhook and ensure VPA admission controller is replicated and covered by a PDB.
+- **Recommendation governance:** Scrape VPA `VerticalPodAutoscaler` status objects via a custom controller or Prometheus exporter; alert when recommended requests deviate >30% from current values, triggering a GitOps PR for human review before applying.
+- **Namespace-scoped rollout:** Use a label-driven opt-in model — VPA objects are only created for namespaces with `vpa-enabled: "true"`, enforced by a Kyverno policy that blocks VPA objects in unlabeled namespaces.
+- **History and cold-start:** VPA requires sufficient metrics history (default 8 days via Prometheus); for new deployments, seed initial requests from benchmarking pipelines rather than relying on cold VPA recommendations.
+- **Audit trail:** Capture VPA-driven pod restarts as a custom metric and correlate with application error rates to detect cases where VPA recommendations cause latency regressions at startup.
+
+---
+
+### Q: A production EKS cluster's AWS Load Balancer Controller is correctly provisioning NLBs, but you observe that pod IP targets registered in target groups become stale during rapid Karpenter scale-in events, causing brief periods of connection errors to end users. How do you diagnose and permanently resolve this?
+
+**Key points an interviewer wants to hear:**
+
+- **Root cause:** Karpenter terminates nodes faster than the NLB target group deregistration delay allows; pods are killed before NLB health checks mark them unhealthy and drain in-flight connections, resulting in TCP RSTs or HTTP 502s.
+- **Immediate diagnosis:** Correlate Karpenter `NodeClaim` termination timestamps with NLB access log 502/connection-error timestamps; check `aws_load_balancer_controller` logs for target deregistration events and timing.
+- **Target deregistration delay:** Increase `target-group-attributes: deregistration_delay.timeout_seconds` on the TargetGroupBinding or Ingress annotation to match or exceed your average request duration (e.g., 60–90 seconds for long-lived requests).
+- **Pod lifecycle coupling:** Add a `preStop` hook with a sleep equal to or slightly greater than the deregistration delay so the pod remains alive and continues draining connections before the kubelet sends SIGTERM — this is the most reliable fix.
+- **NLB termination protection:** Enable `connection_termination.enabled=false` (default) and `preserve_client_ip.enabled` carefully; for TCP NLBs ensure `proxy_protocol_v2` is consistent end-to-end to avoid health-check mismatches.
+- **Karpenter disruption budget:** Use `Disruption.budgets` in Karpenter `NodePool` to cap simultaneous node terminations (e.g., max 1 node per 2 minutes) during scale-in, reducing blast radius.
+- **Validation:** Use a synthetic traffic generator (e.g., k6) during a controlled scale-in and assert zero 5xx errors; alert on NLB `UnHealthyHostCount` spikes correlating with Karpenter node termination events.
+
+---
+
+### Q: Describe a situation where an EKS cluster's GitOps pipeline (Argo CD) was operating normally, but a subset of production workloads silently drifted from their desired state without Argo CD detecting or alerting on the drift. Walk through your investigation and the architectural changes you made.
+
+**Key points an interviewer wants to hear:**
+
+- **Scenario:** Argo CD showed all Applications as `Synced` and `Healthy`, but a network policy and a ConfigMap had been mutated in-cluster by an operator-driven admission webhook that normalized fields Argo CD does not diff correctly (e.g., adding default `matchLabels` to NetworkPolicy selectors), causing silent behavioral drift.
+- **Investigation:** Enabled Argo CD's `server.diff.server.side` (server-side diff) mode and immediately surfaced the deltas; also ran `kubectl diff -f` against rendered manifests to confirm discrepancies not visible in client-side diff.
+- **Root cause:** Argo CD's default client-side diff ignores fields added by admission webhooks or defaulting webhooks (e.g., `protocol: TCP` auto-added to container ports); these appeared `Synced` because the diff engine normalized them away.
+- **Fixes:** Switched all Applications to server-side apply (`syncOptions: [ServerSideApply=true]`) so Argo CD is the field manager and drift from other managers is detected and surfaced as `OutOfSync`; enabled `ignoreDifferences` only for explicitly allowed system-managed fields (e.g., `status`, `caBundle` on webhooks).
+- **Alerting:** Deployed `argocd-notifications` with Slack/PagerDuty alerts on `OutOfSync` and `Degraded` states; added a Prometheus alert on `argocd_app_info{sync_status!="Synced"}` persisting >5 minutes.
+- **Governance layer:** Added a Kyverno audit policy that independently validates critical resources (NetworkPolicies, RBAC) against a known-good policy library, providing a second detection path independent of Argo CD's sync state.
+- **Behavioral outcome:** Server-side apply with field manager ownership eliminated the class of silent drift; subsequent webhook-driven mutations now surface as `OutOfSync` within one reconciliation cycle.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes pod scheduling latency SLOs — ensuring that pods consistently schedule within acceptable time bounds and that scheduling failures are detected, alerted on, and auto-remediated?
+
+**Key points an interviewer wants to hear:**
+
+- **SLO definition:** Define scheduling latency as the delta between pod `creationTimestamp` and the `PodScheduled` condition `lastTransitionTime`; set SLOs by workload class (e.g., P99 < 30s for batch, P99 < 10s for user-facing services).
+- **Metrics instrumentation:** Expose `kube_pod_status_scheduled` and `kube_pod_status_unschedulable` via kube-state-metrics; instrument `scheduler_scheduling_duration_seconds` histogram from the EKS control plane metrics endpoint (if enabled) or via Prometheus remote write.
+- **Alerting:** Alert on `kube_pod_status_unschedulable > 0` for any pod in a user-facing namespace persisting >2 minutes; alert on P99 scheduling latency breaching SLO thresholds using Prometheus recording rules.
+- **Root cause taxonomy:** Distinguish between resource-pressure unschedulability (insufficient CPU/memory — trigger Karpenter scale-out), taint/affinity mismatches (misconfiguration — trigger GitOps PR), and PVC topology constraints (EBS AZ binding — alert and optionally migrate PVC).
+- **Karpenter integration:** Ensure Karpenter `NodePool` coverage is broad enough that any unschedulable pod triggers node provisioning within seconds; tune `--batch-idle-duration` and `--batch-max-duration` to balance provisioning latency against over-provisioning.
+- **Proactive capacity:** Use Karpenter's `Disruption.consolidateAfter` and over-provisioning via low-priority pause pods (placeholder technique) to maintain a buffer of schedulable headroom, keeping scheduling latency near-
