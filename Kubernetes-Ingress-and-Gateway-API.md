@@ -1749,3 +1749,57 @@ Configure the Gateway listener with `hostname: "*.example.com"`, `protocol: HTTP
 - Added a controller upgrade checklist item to diff the new controller's default ConfigMap values against the current cluster ConfigMap and review changelogs for default changes.
 - Wrote a synthetic canary test that sends a 5 MB POST through the Ingress in CI/CD, failing the pipeline if a non-200 response is returned.
 - Migrated the service to HTTPRoute + `BackendRequestPolicy` (where supported) to make body limits explicit and version-controlled rather than annotation-driven.
+
+
+---
+
+## 🗓️ Added 2026-11-08 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-08 19:20 -->
+
+### Q: How does the Gateway API `PolicyStatus` and policy ancestry model work, and how do you debug a policy that is attached but not taking effect?
+
+**Key points an interviewer wants to hear:**
+
+- Gateway API policies (e.g., `BackendTLSPolicy`, vendor extension policies) report their status via a `PolicyStatus` structure that includes `ancestors`—each ancestor being the target resource the policy is bound to, the controller that processed it, and a set of conditions (`Accepted`, `Conflicted`, etc.).
+- A policy silently not taking effect is almost always visible in `PolicyStatus.ancestors[*].conditions`: look for `Accepted: False` or `Conflicted: True` with a descriptive reason (e.g., `TargetNotFound`, `InvalidTargetReference`, `NotAllowed`).
+- Common root causes: the policy targets a resource in a different namespace without a `ReferenceGrant`; the target resource doesn't exist yet (ordering problem in GitOps); the controller doesn't implement that policy type at all (check `SupportedFeatures` in `GatewayClass` status); or two policies target the same resource and the controller's merge/conflict semantics reject one.
+- Debugging workflow: `kubectl get <policytype> -o yaml` → inspect `.status.ancestors`; cross-reference controller logs filtered by the policy name; verify the target's own status for related condition messages; check whether the controller exposes a `PolicyBinding` or similar custom event.
+- Behavioral/design angle: when designing multi-team policy hierarchies, prefer a single owner per policy type per target resource to avoid conflict conditions that are often silently swallowed by controllers that implement "first-write-wins."
+
+---
+
+### Q: What is the difference between Gateway API's `Shared` and `Exclusive` listener hostname semantics, and when would you choose one over the other?
+
+**Key points an interviewer wants to hear:**
+
+- A Gateway listener's `hostname` field acts as a filter: only HTTPRoutes whose `hostnames` are equal to or a subdomain of the listener's hostname are allowed to bind. If a listener omits `hostname` (wildcard), it accepts any hostname an HTTPRoute declares, which is the "shared" pattern.
+- **Exclusive pattern**: each listener owns a single precise hostname (e.g., `api.example.com`). Provides strong isolation—only HTTPRoutes claiming exactly that hostname can bind. Preferred in high-security or multi-tenant environments where you don't want one team's wildcard route inadvertently matching another's hostname.
+- **Shared/wildcard pattern**: a single listener with `hostname: "*.example.com"` accepts all subdomain HTTPRoutes. Reduces listener proliferation and cloud LB cost (fewer certificates, fewer ports), but requires you to rely on `ReferenceGrant` and namespace selectors for tenant isolation rather than listener-level filtering.
+- TLS interactions: exclusive listeners can use a per-hostname certificate directly in `tls.certificateRefs`; shared wildcard listeners typically require a wildcard certificate or SAN cert, and cert-manager's `Certificate` resource must cover the wildcard.
+- Operational trade-off: exclusive listeners scale poorly (one listener per domain), but they produce cleaner `RouteBindingSucceeded` conditions per tenant. Shared listeners are operationally simpler but put more trust in RBAC and `ReferenceGrant` to prevent hostname squatting.
+
+---
+
+### Q: A platform team is rolling out Gateway API, but the networking team insists on keeping existing NGINX Ingress for 18 months. How do you operate both controllers in parallel safely?
+
+**Key points an interviewer wants to hear:**
+
+- **Class isolation first**: every Ingress resource must have `ingressClassName` set, and every Gateway resource must reference a specific `GatewayClass`. Never leave `ingressClassName` unset—the classic NGINX default "watches all unclassed Ingresses" behavior will cause the controller to pick up resources it shouldn't.
+- **Namespace or label partitioning**: agree on a convention (e.g., namespaces prefixed `gw-` use Gateway API; others use Ingress) and enforce it with admission webhooks or OPA/Kyverno policies that reject cross-class resources.
+- **DNS and LB coexistence**: both controllers will provision separate cloud load balancers (or NodePorts). Use weighted DNS (Route 53 weighted records, Traffic Manager policies) to gradually shift traffic from the Ingress LB to the Gateway LB per hostname, enabling measurable canary migration without changing application code.
+- **Shared certificate store**: if both controllers consume the same `Secret` for TLS, ensure cert-manager `Certificate` resources issue to the correct namespace and that `ReferenceGrant` allows Gateway to reference Ingress-namespace secrets if needed.
+- **Observability parity**: maintain equivalent dashboards (request rate, error rate, latency) for both controllers so you can compare behavior during the cutover window and detect regressions before full migration.
+- **Deprecation gate**: set a hard sunset date for each Ingress resource and track it in a migration backlog; use Kyverno `ClusterPolicy` with `audit` mode to warn on new Ingress creation after the cutover freeze date.
+
+---
+
+### Q: How does Gateway API's `GRPCRoute` differ from using an `HTTPRoute` with gRPC-specific header matches, and what are the conformance implications for controllers that don't yet support `GRPCRoute`?
+
+**Key points an interviewer wants to hear:**
+
+- `GRPCRoute` is a first-class Gateway API resource (graduated to beta in v1.1) that natively expresses gRPC service and method matching via `rules[*].matches[*].method` (with `type: Exact` or `RegularExpression`), abstracting away the underlying HTTP/2 framing details like the `:path` pseudo-header format `/<package>.<Service>/<Method>`.
+- Using `HTTPRoute` for gRPC works but requires manually matching `headers: [{name: "content-type", value: "application/grpc"}]` and path-matching the method URI—this is fragile, non-portable, and not understood semantically by controllers that could optimize gRPC-specific behavior (e.g., trailer-based error codes, flow control).
+- **Conformance**: `GRPCRoute` support is part of the `GRPCRouteListeners` conformance profile. A controller that doesn't support it will leave the `GRPCRoute` with `Accepted: False / UnsupportedFeature`. You must check `GatewayClass` status `supportedFeatures` before deploying `GRPCRoute` to avoid silent drops.
+- **Behavioral differences**: a `GRPCRoute`-aware controller can correctly handle gRPC-Web transcoding, enforce gRPC-specific timeouts (deadline propagation), and emit gRPC-native metrics (status codes 0–16) rather than mapping everything to HTTP 200 with a trailer status.
+- **Migration path**: if your controller doesn't yet support `GRPCRoute`, use `HTTPRoute` with the content-type header match as a stopgap, document the limitation, and plan a migration once the controller ships conformance; avoid mixing both for the same service to prevent duplicate route conflicts.

@@ -1003,3 +1003,21 @@ _Committed & pushed: yes_
 - Describe a production incident where an Ingress controller's default `proxy-body-size` or buffer settings caused cascading failures, how you diagnosed it, and what permanent controls you put in place.
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-08 19:20:25
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8058 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes pod security admission (PSA) migration from PodSecurityPolicy (PSP) — ensuring zero-disruption cutover at scale across dozens of teams?
+- A production EKS cluster's Cluster Autoscaler is consistently failing to scale down underutilized nodes even though pods have been evicted and nodes appear empty. How do you diagnose and resolve this?
+- Describe a situation where an EKS cluster's cross-availability-zone traffic costs unexpectedly tripled after a platform team migrated from ClusterIP services to AWS Load Balancer Controller-managed internal NLBs with IP mode. How did you identify the cause and redesign the traffic path?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes multi-cluster GitOps consistency — ensuring that configuration drift, out-of-band changes, and rollout sequencing are detected and remediated automatically across a fleet of clusters?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (7078 chars)
+- How does the Gateway API `PolicyStatus` and policy ancestry model work, and how do you debug a policy that is attached but not taking effect?
+- What is the difference between Gateway API's `Shared` and `Exclusive` listener hostname semantics, and when would you choose one over the other?
+- A platform team is rolling out Gateway API, but the networking team insists on keeping existing NGINX Ingress for 18 months. How do you operate both controllers in parallel safely?
+- How does Gateway API's `GRPCRoute` differ from using an `HTTPRoute` with gRPC-specific header matches, and what are the conformance implications for controllers that don't yet support `GRPCRoute`?
+
+_Committed & pushed: yes_

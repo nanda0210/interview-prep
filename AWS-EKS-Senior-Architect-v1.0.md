@@ -5951,3 +5951,63 @@ The root cause is almost always a **volume attachment finalizer** (`kubernetes.i
 - **Root cause taxonomy:** Distinguish between resource-pressure unschedulability (insufficient CPU/memory — trigger Karpenter scale-out), taint/affinity mismatches (misconfiguration — trigger GitOps PR), and PVC topology constraints (EBS AZ binding — alert and optionally migrate PVC).
 - **Karpenter integration:** Ensure Karpenter `NodePool` coverage is broad enough that any unschedulable pod triggers node provisioning within seconds; tune `--batch-idle-duration` and `--batch-max-duration` to balance provisioning latency against over-provisioning.
 - **Proactive capacity:** Use Karpenter's `Disruption.consolidateAfter` and over-provisioning via low-priority pause pods (placeholder technique) to maintain a buffer of schedulable headroom, keeping scheduling latency near-
+
+
+---
+
+## 🗓️ Added 2026-11-08 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-08 19:19 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes pod security admission (PSA) migration from PodSecurityPolicy (PSP) — ensuring zero-disruption cutover at scale across dozens of teams?
+
+**Key points an interviewer wants to hear:**
+
+- **Audit-first rollout:** Enable PSA in `audit` mode on all namespaces before enforcing, surfacing violations in API server audit logs without blocking workloads; use `kubectl label` dry-run automation to predict enforcement impact per namespace.
+- **Namespace-level labeling strategy:** Assign `pod-security.kubernetes.io/enforce`, `warn`, and `audit` labels per namespace based on workload risk tier (restricted → baseline → privileged), driven by OPA/Kyverno policy that prevents teams from self-labeling to a weaker standard.
+- **PSP parity mapping:** Systematically map each existing PSP (allowedCapabilities, hostPID, fsGroup, seccomp, etc.) to its PSA equivalent or to a Kyverno/OPA supplementary policy, since PSA is coarser-grained and gaps require admission webhook coverage.
+- **Phased cutover:** Enforce `baseline` cluster-wide first (least disruption), then tighten individual namespaces to `restricted` after workload owners remediate; use a tracking sheet in a Git repo owned by platform engineering.
+- **Breaking-change guardrails:** Admission webhooks (Kyverno `validate` rules) enforce that new Deployments declare `securityContext.runAsNonRoot`, drop `ALL` capabilities, and set `readOnlyRootFilesystem` before namespace enforcement is promoted to `restricted`.
+- **Rollback path:** Keep PSPs active in parallel until all namespaces are enforced; EKS supports both simultaneously until the PSP admission plugin is removed, giving a safe dual-enforcement window.
+- **Observability:** Pipe API server audit logs to CloudWatch Logs Insights; build dashboards counting PSA warn/audit events by namespace and workload to track remediation velocity.
+
+---
+
+### Q: A production EKS cluster's Cluster Autoscaler is consistently failing to scale down underutilized nodes even though pods have been evicted and nodes appear empty. How do you diagnose and resolve this?
+
+**Key points an interviewer wants to hear:**
+
+- **Check CA logs first:** `kubectl logs -n kube-system deployment/cluster-autoscaler` will show explicit "scale-down blocked" reasons per node — most commonly: a pod with no controller (bare pod), a pod with a local PV, a DaemonSet pod preventing emptiness determination, or a PDB blocking eviction.
+- **Bare / system pods:** Pods lacking an owning ReplicaSet/Deployment (e.g., manually created debug pods, static pods, mirror pods) block scale-down; audit with `kubectl get pods --all-namespaces -o json | jq` filtering for pods with no `ownerReferences`.
+- **PDB deadlock:** A PDB with `minAvailable` equal to current replica count prevents eviction; verify with `kubectl get pdb --all-namespaces` and cross-reference replica counts — common during low-traffic periods where replicas have already been reduced by HPA.
+- **Local storage annotation:** Pods using `emptyDir` or `hostPath` are not evicted by default; set `--skip-nodes-with-local-storage=false` in CA flags only after confirming workloads are tolerant, or move workloads to PVCs.
+- **Node annotations blocking scale-down:** Check for `cluster-autoscaler.kubernetes.io/scale-down-disabled: "true"` annotation placed manually or by automation on nodes intended for investigation.
+- **Node group min/max boundaries:** Confirm the ASG min capacity is not equal to current node count, locking scale-down at the ASG layer regardless of CA decisions.
+- **Resolution:** Fix root causes (remove stale bare pods, correct PDB ratios, adjust CA flags), then validate by watching `cluster_autoscaler_scaled_down_nodes_total` metric in CloudWatch Container Insights.
+
+---
+
+### Q: Describe a situation where an EKS cluster's cross-availability-zone traffic costs unexpectedly tripled after a platform team migrated from ClusterIP services to AWS Load Balancer Controller-managed internal NLBs with IP mode. How did you identify the cause and redesign the traffic path?
+
+**Key points an interviewer wants to hear:**
+
+- **Root cause — NLB IP mode and AZ symmetry:** NLB in IP target mode sends each connection to a specific pod IP regardless of which AZ the client is in; without topology-aware routing, 2/3 of traffic crossing AZ boundaries is expected at equal pod distribution, tripling cross-AZ data transfer charges.
+- **Identification:** Correlated the cost spike with the NLB migration date in AWS Cost Explorer (filtering by `DataTransfer-Regional-Bytes`); confirmed cross-AZ flow volume using VPC Flow Logs aggregated in Athena, grouping by source/destination subnet.
+- **Topology Aware Routing (TAR):** Enabled Kubernetes Topology Aware Routing (`service.kubernetes.io/topology-mode: auto`) on internal Services so kube-proxy prefers endpoints in the same AZ as the client pod, dramatically reducing cross-AZ hops.
+- **NLB Availability Zone affinity:** Set the NLB annotation `service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: target_failover.on_deregistration=no_rebalance` and enabled cross-zone load balancing selectively — keeping it disabled so the NLB itself does not rebalance across AZs unnecessarily.
+- **Pod topology spread:** Enforced `topologySpreadConstraints` on all backend Deployments to guarantee roughly equal pod counts across AZs, which is a prerequisite for TAR to work effectively (skewed distribution causes TAR to fall back to cluster-wide routing).
+- **Outcome:** Cross-AZ traffic dropped by ~65%; remaining cross-AZ traffic was attributable to intentional cross-AZ calls and failover scenarios, which were accepted and budgeted.
+- **Ongoing governance:** Added a Kyverno policy that warns when a Service targeting high-throughput workloads lacks the topology-mode annotation, surfaced in CI via dry-run admission.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes multi-cluster GitOps consistency — ensuring that configuration drift, out-of-band changes, and rollout sequencing are detected and remediated automatically across a fleet of clusters?
+
+**Key points an interviewer wants to hear:**
+
+- **Fleet-wide GitOps engine:** Deploy Flux or ArgoCD in a hub-and-spoke model — a management cluster runs ArgoCD ApplicationSets that target spoke EKS clusters via kubeconfig secrets or Cluster API references, ensuring every cluster's desired state is declared in Git and continuously reconciled.
+- **Drift detection and alerting:** ArgoCD's `OutOfSync` status and Flux's `drift detection` (enabled via `--watch-all-namespaces`) emit Prometheus metrics (`argocd_app_info{sync_status="OutOfSync"}`); alert on sustained drift >5 minutes to PagerDuty, and publish a drift inventory dashboard in Grafana.
+- **Out-of-band change prevention:** Admission webhooks (Kyverno `validate` rules) block direct `kubectl apply` mutations to GitOps-owned resources (identified by `app.kubernetes.io/managed-by: argocd` label) in production namespaces, funneling all changes through Git PRs.
+- **Rollout sequencing across clusters:** Use ArgoCD's `SyncWaves` and `ApplicationSet` with a `progressive rollout` strategy (canary → staging → prod-region-1 → prod-region-2), gating promotion on health checks and integration test Jobs completing successfully in the previous wave.
+- **Config parity enforcement:** A nightly CI job diffs rendered Helm/Kustomize manifests across cluster tiers using `helm template` + `kustomize build`, flagging namespace-level overrides that deviate from the fleet baseline; results posted to a Slack channel owned by platform engineering.
+- **Secret hygiene in GitOps:** Secrets never stored in Git; instead, ExternalSecrets Operator syncs from AWS Secrets Manager, and ArgoCD health checks validate `SecretStore` connectivity as part of Application health, blocking sync if the store is unreachable
