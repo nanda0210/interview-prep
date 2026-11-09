@@ -1803,3 +1803,92 @@ Configure the Gateway listener with `hostname: "*.example.com"`, `protocol: HTTP
 - **Conformance**: `GRPCRoute` support is part of the `GRPCRouteListeners` conformance profile. A controller that doesn't support it will leave the `GRPCRoute` with `Accepted: False / UnsupportedFeature`. You must check `GatewayClass` status `supportedFeatures` before deploying `GRPCRoute` to avoid silent drops.
 - **Behavioral differences**: a `GRPCRoute`-aware controller can correctly handle gRPC-Web transcoding, enforce gRPC-specific timeouts (deadline propagation), and emit gRPC-native metrics (status codes 0–16) rather than mapping everything to HTTP 200 with a trailer status.
 - **Migration path**: if your controller doesn't yet support `GRPCRoute`, use `HTTPRoute` with the content-type header match as a stopgap, document the limitation, and plan a migration once the controller ships conformance; avoid mixing both for the same service to prevent duplicate route conflicts.
+
+
+---
+
+## 🗓️ Added 2026-11-09 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-09 23:42 -->
+
+### Q: How does Gateway API's `HTTPRoute` handle precedence when multiple rules within the same resource could match a single request, and what are the common ordering bugs teams introduce?
+
+**Model Answer:**
+
+Within a single `HTTPRoute`, rules are evaluated **in the order they appear in the `spec.rules` list**—the first matching rule wins. The Gateway API specification mandates this ordered evaluation, unlike some Ingress implementations that apply longest-prefix or most-specific-match semantics across rules.
+
+Key precedence points and common bugs:
+- **More specific rules must appear before less specific ones.** A catch-all `PathPrefix: /` placed before a `PathPrefix: /api` will swallow all `/api` traffic.
+- **Within a single rule**, multiple matches are OR'd—a request matching any one match block satisfies that rule.
+- **Across HTTPRoutes** (not within one), the spec defines a specificity ordering: longer/more-precise hostname > more-specific path type > longer path > more header matches. This cross-resource precedence is where teams are most surprised, because it is implementation-defined for ties.
+- A common bug is adding a new `Exact` path match at the bottom of a rules list after a `PathPrefix` that already captures it; the exact rule is never reached.
+- Another bug: relying on alphabetical resource name as a tiebreaker (some controllers do this, others don't), making behavior non-portable.
+
+**Mitigation:** Lint HTTPRoute rule ordering in CI using tools like `kube-linter` or custom OPA policies; write integration tests with known request samples to assert which backend receives each.
+
+---
+
+### Q: What is the difference between `Gateway` listener `AllowedRoutes` with `namespaces.from: Selector` versus `Same` versus `All`, and how do you use this to implement a secure multi-tenant routing model?
+
+**Model Answer:**
+
+`AllowedRoutes.namespaces.from` controls which namespaces can attach `HTTPRoute` (or other Route) resources to a listener:
+- **`Same`** – only Routes in the same namespace as the Gateway can attach. Appropriate for single-team Gateways.
+- **`All`** – any namespace can attach. Useful in development clusters but dangerous in multi-tenant production because a rogue tenant can hijack hostnames.
+- **`Selector`** – only namespaces matching a `LabelSelector` can attach. This is the right model for multi-tenancy: label tenant namespaces (e.g., `gateway-access: allowed`) and reference that label in the listener.
+
+**Secure multi-tenant model:**
+1. Platform team owns the `Gateway` in an `infra` namespace, with `Selector`-based `AllowedRoutes` referencing a label applied only to vetted tenant namespaces.
+2. Tenants create `HTTPRoute` resources in their own namespaces; `ReferenceGrant` is not needed here (it's for cross-namespace backend references, not route attachment).
+3. Hostname uniqueness is enforced by the controller's conflict detection—first accepted Route wins the hostname and others get `Conflicted: True` status.
+4. Remove the label from a namespace to immediately revoke its ability to attach new routes without touching tenant resources.
+
+**Common mistake:** Using `All` for convenience during migration and forgetting to restrict it, leaving production Gateways permanently open.
+
+---
+
+### Q: How do you implement progressive delivery (blue/green and canary) using Gateway API weighted routing combined with an external release controller like Argo Rollouts or Flagger, and where do the integration points break down?
+
+**Model Answer:**
+
+Gateway API's `HTTPRoute` `backendRefs` support integer `weight` fields, making it a natural target for progressive delivery controllers:
+
+**Integration model:**
+- **Argo Rollouts** uses a Gateway API plugin that mutates `HTTPRoute` weights via the Kubernetes API as part of each rollout step. The `Rollout` resource references both a stable and canary `Service`; the plugin shifts weight incrementally.
+- **Flagger** similarly manages two Services and patches `HTTPRoute` weights, optionally using metrics (Prometheus, Datadog) as automated gates before promoting.
+
+**Where breakdowns occur:**
+1. **Weight normalization:** Gateway API requires weights to be non-negative integers (not percentages). If the controller sets `weight: 10` and `weight: 90`, some implementations normalize to actual ratios only when both are non-zero—setting canary weight to `0` may not mean zero traffic on all controllers.
+2. **Status feedback loop:** Flagger/Argo rely on watching `HTTPRoute` status to confirm the controller accepted the weight change. If the controller is slow to update status or sets a generic `Accepted` without reflecting actual applied weights, the feedback loop is broken.
+3. **Multiple listener attachment:** If the HTTPRoute is attached to multiple listeners (HTTP + HTTPS), weight changes must propagate to all; some controllers apply them independently and can desync.
+4. **Header-based canary vs. weight-based:** Mixing header-match rules with weight splits in the same HTTPRoute requires careful rule ordering (header rules first) or the weight split absorbs traffic before the header rule can fire.
+
+**Mitigation:** Use controller-specific conformance tests for traffic splitting; monitor actual backend request rates (not just weight config) during rollouts.
+
+---
+
+### Q: A platform team wants to use Gateway API to terminate TLS at the Gateway but then re-encrypt traffic to backends using `BackendTLSPolicy`. Walk me through the full certificate trust chain, what can go wrong at each hop, and how you would validate end-to-end TLS health in production.
+
+**Model Answer:**
+
+**Full trust chain:**
+
+```
+Client → [TLS terminated at Gateway using listener cert] → Gateway → [mTLS/TLS to backend using BackendTLSPolicy] → Pod
+```
+
+1. **Gateway listener TLS:** Cert stored in a `Secret` in the Gateway's namespace (or referenced via `certificateRefs`). `cert-manager` typically provisions it. Issues: expired cert, wrong SANs, `Secret` not in the allowed namespace.
+2. **BackendTLSPolicy:** Attached to a `Service`, specifies the CA bundle (via `ConfigMap` reference) the Gateway uses to validate the backend's certificate, and optionally the expected hostname (`hostname` field for SNI). The backend pods must present a cert signed by that CA.
+3. **Backend cert issuance:** Usually via `cert-manager` with a `Certificate` resource mounting into the pod, or a service mesh sidecar. The cert's SAN must match the `hostname` in `BackendTLSPolicy`.
+
+**What can go wrong at each hop:**
+- **Listener:** `Secret` missing or in wrong namespace → Gateway reports `ResolvedRefs: False`. Certificate SAN mismatch → client TLS error.
+- **BackendTLSPolicy:** `ConfigMap` with CA bundle not found or in wrong namespace → policy unaccepted. CA bundle doesn't include intermediate certs → handshake failure that only appears at runtime.
+- **Backend pod:** Cert rotation lag causes a window where the new cert isn't yet trusted by the Gateway's cached CA bundle. Some controllers cache CA bundles and require a restart or re-reconcile.
+- **SNI mismatch:** `BackendTLSPolicy` hostname must match what the backend cert presents; using the `Service` DNS name vs. the pod hostname causes subtle failures.
+
+**Validation approach:**
+- Check `BackendTLSPolicy` status conditions (`Accepted`, `ResolvedRefs`) via `kubectl get backendtlspolicy -o yaml`.
+- Use `kubectl exec` with `openssl s_client -connect <podIP>:443 -CAfile <bundle>` from a sidecar or ephemeral debug container to test the backend TLS handshake directly.
+- Instrument Gateway with access logs showing TLS handshake errors and upstream connection errors separately.
+- Set up synthetic probes (e.g., Blackbox Exporter) hitting the full path, alerting on TLS certificate expiry at both hops independently.

@@ -6011,3 +6011,76 @@ The root cause is almost always a **volume attachment finalizer** (`kubernetes.i
 - **Rollout sequencing across clusters:** Use ArgoCD's `SyncWaves` and `ApplicationSet` with a `progressive rollout` strategy (canary → staging → prod-region-1 → prod-region-2), gating promotion on health checks and integration test Jobs completing successfully in the previous wave.
 - **Config parity enforcement:** A nightly CI job diffs rendered Helm/Kustomize manifests across cluster tiers using `helm template` + `kustomize build`, flagging namespace-level overrides that deviate from the fleet baseline; results posted to a Slack channel owned by platform engineering.
 - **Secret hygiene in GitOps:** Secrets never stored in Git; instead, ExternalSecrets Operator syncs from AWS Secrets Manager, and ArgoCD health checks validate `SecretStore` connectivity as part of Application health, blocking sync if the store is unreachable
+
+
+---
+
+## 🗓️ Added 2026-11-09 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-09 23:41 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes graceful shutdown and SIGTERM handling safety — ensuring zero dropped in-flight requests during rolling deploys and node replacements?
+
+**Model Answer:**
+
+Graceful shutdown failures are one of the most common sources of hidden production errors during deployments. The strategy layers several complementary mechanisms:
+
+- **`terminationGracePeriodSeconds` governance:** Enforce via OPA/Gatekeeper that all Deployments declare an explicit `terminationGracePeriodSeconds` appropriate to their p99 request duration plus a safety buffer (typically 60–90 s for HTTP services); reject pods defaulting to 30 s without justification.
+- **`preStop` sleep hook:** Mandate a `preStop: exec: sleep N` hook (5–15 s) for all HTTP workloads to absorb the race condition between Kubernetes removing the endpoint from `kube-proxy`/CNI and the SIGTERM reaching the container — this is the single most common cause of 502s during deploys.
+- **SIGTERM handler validation:** Require application teams to instrument a `/healthz` liveness probe that returns non-200 immediately on SIGTERM receipt, and validate via integration tests that the process drains in-flight requests before exiting.
+- **NLB/ALB deregistration delay alignment:** Set the ALB/NLB target group `deregistration_delay` to match or exceed `terminationGracePeriodSeconds` via the AWS Load Balancer Controller annotation (`alb.ingress.kubernetes.io/target-group-attributes`), preventing the LB from sending new requests to draining targets.
+- **Rolling update `maxUnavailable: 0` + `minReadySeconds`:** Enforce `maxUnavailable: 0` and a `minReadySeconds` ≥ 10 s on all critical Deployments to ensure replacement pods are fully healthy before old pods receive SIGTERM.
+- **PodDisruptionBudget enforcement:** Pair with PDBs so voluntary evictions (node drain, Karpenter consolidation) respect minimum availability during drain windows.
+- **Observability:** Track `http_server_requests_in_flight` during deploy windows and alert on any 5xx spikes correlated with pod termination events using Prometheus + deployment markers.
+
+---
+
+### Q: A production EKS cluster's IAM Roles for Service Accounts (IRSA) is correctly configured, but specific pods intermittently receive `AccessDenied` from AWS APIs despite having the correct IAM policy attached. How do you diagnose and resolve this?
+
+**Model Answer:**
+
+This pattern — correct configuration, intermittent denial — narrows to a small set of causes:
+
+1. **Token audience/expiry mismatch:** The projected OIDC token has a default 24 h TTL but AWS STS `AssumeRoleWithWebIdentity` requires a fresh token. Confirm the `aws-sdk` or `boto3` version respects the token file's `expiry` field; older SDK versions cache credentials without refreshing. Upgrade SDKs and set `AWS_ROLE_SESSION_DURATION` appropriately.
+2. **STS regional endpoint vs. global endpoint:** Global STS (`sts.amazonaws.com`) can return stale tokens during regional brownouts. Enforce `AWS_STS_REGIONAL_ENDPOINTS=regional` and annotate the pod's IAM role with the regional STS endpoint to avoid cross-region token validation failures.
+3. **Trust policy `Condition` drift:** Validate that the OIDC provider thumbprint in IAM hasn't drifted — AWS rotates the EKS OIDC issuer certificate periodically. Run `aws iam list-open-id-connect-providers` and compare thumbprints; re-register if mismatched.
+4. **IAM policy propagation lag:** New policy attachments can take up to 60 s to propagate globally; intermittent denials immediately post-deployment are expected. Implement exponential backoff with jitter in all AWS SDK calls.
+5. **SCPs or permission boundaries:** Inspect AWS Organizations SCPs and any IAM permission boundaries on the role — `AccessDenied` from an SCP appears identical to a policy denial in CloudTrail. Check `cloudtrail:errorCode=AccessDenied` with `serviceControlPolicy` in the event detail.
+6. **Confirm via CloudTrail:** Filter CloudTrail for `AssumeRoleWithWebIdentity` calls from the affected pod's node IP and cross-reference with `errorMessage` to confirm whether the denial is at the assume-role step or at the downstream API call.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes image supply chain security — including image signing, provenance verification, and runtime policy enforcement at scale?
+
+**Model Answer:**
+
+Image supply chain attacks (e.g., SolarWinds, compromised base images) are a top threat vector for Kubernetes clusters. A defense-in-depth strategy covers the full image lifecycle:
+
+- **Signing with Sigstore/Cosign:** Require all images to be signed at CI pipeline exit using Cosign with keys stored in AWS KMS. Signatures and SBOMs are stored in the same ECR repository as OCI artifacts alongside the image manifest.
+- **Admission-time verification:** Deploy **Kyverno** or **Connaisseur** as a validating webhook that verifies Cosign signatures against the KMS public key before any pod is scheduled. Unsigned or signature-mismatched images are rejected with a descriptive audit event.
+- **ECR immutable tags + lifecycle policies:** Enforce ECR immutable tags per repository to prevent tag overwriting. Use ECR lifecycle policies to expire untagged images and limit attack surface from stale layers.
+- **ECR Enhanced Scanning (Inspector):** Enable Amazon Inspector v2 continuous scanning on all ECR repositories; integrate findings into your CI gate so images with CRITICAL CVEs above a threshold are blocked from promotion to production ECR.
+- **SBOM generation and attestation:** Generate CycloneDX or SPDX SBOMs at build time using Syft, attach as Cosign attestations, and store in ECR. Use Grype in admission or CI to query SBOMs for known vulnerable packages.
+- **Runtime enforcement with Falco:** Deploy Falco with custom rules to detect unexpected binary execution, container drift (new files written to image layers), and privilege escalation at runtime — covering attacks that bypass image-time checks.
+- **Policy-as-code for allowed registries:** Enforce via OPA/Kyverno that pods may only reference images from approved ECR repositories (private, account-scoped), blocking `docker.io` or unverified public registry pulls.
+- **Audit and drift detection:** Periodically reconcile running pod image digests against the expected signed digest using a CronJob + Falco/admission audit trail to detect image substitution post-admission.
+
+---
+
+### Q: Describe a situation where an EKS cluster's Karpenter consolidation aggressively evicted pods during a business-critical batch processing window, causing job failures that weren't protected by PodDisruptionBudgets. How did you resolve it and prevent recurrence?
+
+**Model Answer:**
+
+**Situation:** A nightly ETL batch workload running as Kubernetes Jobs experienced repeated pod evictions as Karpenter's consolidation logic identified the nodes as underutilized mid-job (CPU spiked for ~10 min then dropped to ~5% while awaiting I/O). PDBs weren't applied to Jobs (they're not covered by default PDB tooling), and Karpenter evicted nodes treating idle-looking pods as safe targets.
+
+**Diagnosis:**
+- Karpenter logs showed `consolidation: evicting pod` events correlated exactly with job failures.
+- The batch pods had no `do-not-disrupt` annotation and no PDB, so Karpenter's consolidation treated them as freely evictable.
+- The Jobs lacked `restartPolicy: OnFailure` with proper retry logic, so evicted pods didn't restart cleanly.
+
+**Immediate remediation:**
+- Annotated batch Job pod templates with `karpenter.sh/do-not-disrupt: "true"` to signal Karpenter to skip consolidation for these pods — this is the canonical Karpenter mechanism for protecting non-disruptable workloads.
+- Added `restartPolicy: OnFailure` with `backoffLimit: 3` to all Jobs as a short-term safety net.
+
+**Structural fixes:**
+- Created a dedicated Karpenter

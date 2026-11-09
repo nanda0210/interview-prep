@@ -1021,3 +1021,21 @@ _Committed & pushed: yes_
 - How does Gateway API's `GRPCRoute` differ from using an `HTTPRoute` with gRPC-specific header matches, and what are the conformance implications for controllers that don't yet support `GRPCRoute`?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-09 23:42:17
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8031 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes graceful shutdown and SIGTERM handling safety — ensuring zero dropped in-flight requests during rolling deploys and node replacements?
+- A production EKS cluster's IAM Roles for Service Accounts (IRSA) is correctly configured, but specific pods intermittently receive `AccessDenied` from AWS APIs despite having the correct IAM policy attached. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes image supply chain security — including image signing, provenance verification, and runtime policy enforcement at scale?
+- Describe a situation where an EKS cluster's Karpenter consolidation aggressively evicted pods during a business-critical batch processing window, causing job failures that weren't protected by PodDisruptionBudgets. How did you resolve it and prevent recurrence?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (7861 chars)
+- How does Gateway API's `HTTPRoute` handle precedence when multiple rules within the same resource could match a single request, and what are the common ordering bugs teams introduce?
+- What is the difference between `Gateway` listener `AllowedRoutes` with `namespaces.from: Selector` versus `Same` versus `All`, and how do you use this to implement a secure multi-tenant routing model?
+- How do you implement progressive delivery (blue/green and canary) using Gateway API weighted routing combined with an external release controller like Argo Rollouts or Flagger, and where do the integration points break down?
+- A platform team wants to use Gateway API to terminate TLS at the Gateway but then re-encrypt traffic to backends using `BackendTLSPolicy`. Walk me through the full certificate trust chain, what can go wrong at each hop, and how you would validate end-to-end TLS health in production.
+
+_Committed & pushed: yes_
