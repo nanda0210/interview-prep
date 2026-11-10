@@ -1039,3 +1039,21 @@ _Committed & pushed: yes_
 - A platform team wants to use Gateway API to terminate TLS at the Gateway but then re-encrypt traffic to backends using `BackendTLSPolicy`. Walk me through the full certificate trust chain, what can go wrong at each hop, and how you would validate end-to-end TLS health in production.
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-10 21:12:15
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8205 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes network egress control — ensuring pods cannot exfiltrate data to unauthorized external endpoints while minimizing operational friction?
+- A production EKS cluster's Kubernetes control plane upgrade to a new minor version is blocked because several ValidatingWebhookConfigurations have `failurePolicy: Fail` and their backends are unresponsive during the maintenance window. How do you diagnose and recover safely?
+- Describe a situation where EKS workloads using Amazon SQS via IRSA began experiencing sustained message processing failures during an AWS regional brownout, and how you architected a resilient recovery strategy.
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes container resource `requests` to `limits` ratio policies — preventing both resource starvation and node-level CPU throttling at scale?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6450 chars)
+- How does Gateway API handle TLS passthrough for non-HTTP protocols, and what are the architectural trade-offs compared to TLS termination at the Gateway?
+- What is the difference between a Gateway API `HTTPRoute` `backendRef` targeting a `Service` versus a custom `BackendObjectReference` targeting a non-Service resource, and what must an implementation support?
+- Explain the GAMMA initiative within Gateway API. How does it change the model for service-to-service (east-west) traffic compared to the traditional north-south Gateway model?
+- A platform team wants to serve thousands of unique hostnames through a single Gateway. What are the scalability limits and design patterns you would apply?
+
+_Committed & pushed: yes_

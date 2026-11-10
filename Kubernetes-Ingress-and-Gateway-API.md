@@ -1892,3 +1892,71 @@ Client → [TLS terminated at Gateway using listener cert] → Gateway → [mTLS
 - Use `kubectl exec` with `openssl s_client -connect <podIP>:443 -CAfile <bundle>` from a sidecar or ephemeral debug container to test the backend TLS handshake directly.
 - Instrument Gateway with access logs showing TLS handshake errors and upstream connection errors separately.
 - Set up synthetic probes (e.g., Blackbox Exporter) hitting the full path, alerting on TLS certificate expiry at both hops independently.
+
+
+---
+
+## 🗓️ Added 2026-11-10 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-10 21:12 -->
+
+### Q: How does Gateway API handle TLS passthrough for non-HTTP protocols, and what are the architectural trade-offs compared to TLS termination at the Gateway?
+
+**Model Answer:**
+
+TLS passthrough is configured by setting a Gateway listener's `protocol` to `TLS` and `tls.mode` to `Passthrough`. In this mode, the Gateway forwards raw TLS streams to the backend without decrypting them, and routing decisions are made using the SNI hostname from the ClientHello. A `TLSRoute` (not `HTTPRoute`) is used to match SNI values to backends.
+
+Key trade-offs:
+
+- **Passthrough pros:** End-to-end encryption with no key material at the Gateway, mandatory for protocols like MySQL or custom mTLS where the app owns the cert.
+- **Passthrough cons:** No L7 visibility—header manipulation, WAF inspection, JWT validation, and traffic splitting on HTTP semantics are impossible; the Gateway is essentially an L4 router.
+- **Termination pros:** Full L7 policy enforcement, centralized certificate management (cert-manager), richer routing rules.
+- **Portability:** `TLSRoute` is a GA resource but fewer controllers implement it compared to `HTTPRoute`; always check conformance profiles.
+- A common mistake is using `protocol: HTTPS` with `tls.mode: Passthrough`—this is invalid; `HTTPS` implies termination. Mismatched settings typically surface as `Accepted: False` or silent passthrough failures.
+
+---
+
+### Q: What is the difference between a Gateway API `HTTPRoute` `backendRef` targeting a `Service` versus a custom `BackendObjectReference` targeting a non-Service resource, and what must an implementation support?
+
+**Model Answer:**
+
+By default, `backendRef` targets a Kubernetes `Service` (group `""`, kind `Service`), which is the only backend type implementations are required to support for core conformance. The API allows arbitrary `group` and `kind` values to target custom backend types—for example, a `ServiceImport` from the Multicluster Services API for cross-cluster backends, or a vendor-specific `CloudBackend` CRD.
+
+Key points an interviewer wants to hear:
+
+- **ReferenceGrant is still required** for cross-namespace custom backends, just as with Services.
+- Implementations that do not support a given backend kind must set the `ResolvedRefs` condition to `False` with reason `InvalidKind`; routes with unsupported backends should not silently drop traffic.
+- `ServiceImport` as a backend enables locality-aware multi-cluster routing without a service mesh—the implementation resolves it to endpoints across clusters.
+- Testing portability risk: custom backend types tie you to a specific controller, so abstract them behind a conformance-tested wrapper or document the dependency explicitly in your platform contract.
+- A common production bug is referencing `ServiceImport` without enabling the GAMMA or Multicluster feature gate, leaving the route perpetually `Unresolved`.
+
+---
+
+### Q: Explain the GAMMA initiative within Gateway API. How does it change the model for service-to-service (east-west) traffic compared to the traditional north-south Gateway model?
+
+**Model Answer:**
+
+GAMMA (Gateway API for Mesh Management and Administration) extends Gateway API semantics to cover in-cluster, service-mesh-style east-west traffic. The key architectural shift is that an `HTTPRoute` can attach directly to a `Service` as its `parentRef` (using the Service's group/kind) rather than to a `Gateway`, making the Service itself the logical "attachment point" for mesh routing policy.
+
+Important distinctions:
+
+- **North-south:** A `Gateway` owns a listener on an external IP/port; `HTTPRoute` → `Gateway` → backend.
+- **East-west (GAMMA):** No external Gateway resource; `HTTPRoute` attaches to a Service and governs how other services inside the mesh reach that Service. The mesh data plane (e.g., Istio, Linkerd, Cilium) enforces the policy on the client-side proxy or eBPF layer.
+- This enables traffic splitting, header mutation, and retries for internal service calls using the same API objects developers use for ingress, reducing cognitive overhead.
+- **Status quo:** GAMMA is experimental/alpha; not all mesh implementations support it uniformly, so check conformance before relying on it in production.
+- A behavioral difference to call out: ReferenceGrant semantics may differ for mesh attachments, and the `sectionName` on a Service parentRef typically refers to a named port rather than a listener.
+
+---
+
+### Q: A platform team wants to serve thousands of unique hostnames through a single Gateway. What are the scalability limits and design patterns you would apply?
+
+**Model Answer:**
+
+A single Gateway listener with a wildcard hostname (e.g., `*.example.com`) combined with many `HTTPRoute` resources each claiming specific hostnames is the standard pattern—it avoids provisioning a new load balancer per hostname. However, several scalability pressure points emerge at scale:
+
+- **Control-plane reconciliation cost:** Each HTTPRoute triggers a reconcile loop; with thousands of routes the controller's informer cache and diff computation can become a bottleneck. Measure reconcile latency and queue depth in controller metrics (`controller_runtime_reconcile_time_seconds`).
+- **Data-plane config size:** Implementations that push full routing tables to each proxy (e.g., Envoy xDS) can hit per-connection config size limits or cause high CPU on config reload. Evaluate whether the implementation uses incremental xDS (Delta xDS) to mitigate this.
+- **Listener wildcard vs. explicit:** Wildcard listeners are more scalable (one listener, many routes) but lose the ability to enforce per-hostname TLS certificates at the listener level—use `BackendTLSPolicy` or per-route cert references instead.
+- **Namespace sharding:** Split HTTPRoutes across namespaces by team or domain tier so a single noisy namespace doesn't block reconciliation for others; use `AllowedRoutes` namespace selectors to maintain security boundaries.
+- **Hostname collision monitoring:** At scale, accidental hostname conflicts surface more frequently; implement an admission webhook or policy (e.g., Kyverno) that rejects an HTTPRoute whose hostname is already claimed in a `Accepted: True` route in another namespace.
+- Benchmark your chosen controller at 2–3× projected scale before go-live; published conformance tests do not cover performance characteristics.

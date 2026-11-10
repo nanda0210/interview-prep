@@ -6084,3 +6084,82 @@ Image supply chain attacks (e.g., SolarWinds, compromised base images) are a top
 
 **Structural fixes:**
 - Created a dedicated Karpenter
+
+
+---
+
+## 🗓️ Added 2026-11-10 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-10 21:11 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes network egress control — ensuring pods cannot exfiltrate data to unauthorized external endpoints while minimizing operational friction?
+
+**Model Answer:**
+
+A layered egress control strategy combines multiple enforcement points rather than relying on any single mechanism:
+
+- **NetworkPolicy (Calico or VPC CNI network policy):** Enforce default-deny egress at namespace level via admission webhook; teams must explicitly declare allowed external CIDRs or FQDN-based rules (Calico DNS policy).
+- **AWS Security Groups for Pods (SGP):** Assign pod-level SGs that enforce AWS-native outbound rules; use this for coarse-grained control (e.g., allow only VPC endpoints and specific partner IPs), keeping tight alignment with your security group change-control process.
+- **Centralized NAT / proxy egress:** Route all external traffic through a managed HTTP forward proxy (e.g., Squid on EC2 or AWS Network Firewall) so FQDN allowlisting is enforced at a choke point, capturing all protocols that NetworkPolicy misses (e.g., DNS-over-TLS, raw TCP).
+- **AWS Network Firewall domain lists:** Deploy stateful domain-based rules on the VPC egress route to catch traffic bypassing the proxy; alert on violations via CloudWatch/SIEM.
+- **Policy-as-code for drift prevention:** OPA/Gatekeeper constraints reject Deployment specs that omit required egress NetworkPolicy labels; Kyverno generates a default-deny NetworkPolicy in every new namespace.
+- **Observability:** VPC Flow Logs + AWS VPC CNI metadata enrichment labels flows with pod identity; feed into Athena or OpenSearch for anomaly detection on new destination IPs.
+- **Trade-off awareness:** SGP per-pod granularity comes at the cost of ENI scaling limits; for high-pod-density nodes, prefer NetworkPolicy + proxy over SGP to avoid hitting the branch ENI ceiling.
+
+---
+
+### Q: A production EKS cluster's Kubernetes control plane upgrade to a new minor version is blocked because several ValidatingWebhookConfigurations have `failurePolicy: Fail` and their backends are unresponsive during the maintenance window. How do you diagnose and recover safely?
+
+**Model Answer:**
+
+The root cause is that the API server cannot mutate or validate resources it needs to reconcile during upgrade (e.g., node objects, leases) because webhooks with `failurePolicy: Fail` are timing out and blocking requests.
+
+**Diagnosis:**
+- Pull API server audit logs filtered on `responseStatus.code=500` or `timeout`; identify which webhook configurations are involved.
+- Run `kubectl get validatingwebhookconfigurations -o json | jq '.items[] | select(.webhooks[].failurePolicy=="Fail") | .metadata.name'` to enumerate all risky webhooks.
+- Check webhook service/endpoint health: `kubectl get endpoints -n <ns> <svc>` and confirm pod readiness.
+
+**Recovery steps:**
+1. **Patch non-critical webhooks to `failurePolicy: Ignore`** temporarily using `kubectl patch` or a maintenance-mode script tracked in Git — scope to only those webhooks whose backends are unhealthy.
+2. **Scale up webhook backend Deployments** if they have zero replicas; ensure PodDisruptionBudgets allow at least one replica during control plane drain.
+3. **Add `namespaceSelector` or `objectSelector` exclusions** for `kube-system` namespace on all webhooks — this is a prerequisite that should have been enforced pre-upgrade via policy.
+4. After upgrade completes, restore `failurePolicy: Fail` and validate webhook backends are healthy with synthetic admission test requests.
+
+**Prevention:** Enforce via OPA/Gatekeeper that all webhooks scoping `kube-system` resources must have `failurePolicy: Ignore`; add a pre-upgrade runbook gate that checks all webhook endpoint health before triggering the EKS managed upgrade API call.
+
+---
+
+### Q: Describe a situation where EKS workloads using Amazon SQS via IRSA began experiencing sustained message processing failures during an AWS regional brownout, and how you architected a resilient recovery strategy.
+
+**Model Answer:**
+
+**Situation:** During an us-east-1 partial SQS control-plane brownout, pods with correctly configured IRSA were failing `ReceiveMessage` calls intermittently — SQS data-plane operations were degraded, and IRSA token refreshes to STS were also experiencing elevated latency, compounding the issue.
+
+**Root cause analysis:**
+- STS regional endpoint (`sts.us-east-1.amazonaws.com`) was intermittently slow, causing IRSA token refreshes to time out; SDK credential providers were not falling back gracefully.
+- Application SQS clients lacked adequate retry configuration (exponential backoff with jitter), so they fast-failed rather than absorbing the brownout.
+- No dead-letter queue (DLQ) alarm threshold was set, so message accumulation went undetected for 18 minutes.
+
+**Architectural remediation:**
+- **STS regional endpoint pinning:** Configure the AWS SDK to use regional STS endpoints and enable `AWS_STS_REGIONAL_ENDPOINTS=regional`; regional endpoints are more isolated than the global endpoint.
+- **SDK retry tuning:** Set adaptive retry mode in all AWS SDKs (available in SDK v2+), which uses a client-side token bucket to avoid thundering-herd retries during brownouts.
+- **SQS consumer circuit breaker:** Implement a circuit breaker (e.g., via resilience4j or a custom Go implementation) that backs off consumer polling when error rates exceed threshold, reducing load on a degraded SQS endpoint.
+- **Multi-region message fan-out:** For critical queues, replicate messages to a standby SQS queue in us-west-2 via EventBridge Pipes; consumers fail over via Route 53 health-check-driven parameter store flag read at startup.
+- **DLQ + CloudWatch alarm:** Set DLQ `ApproximateNumberOfMessagesVisible > 0` alarm with 1-minute period to detect processing failures within the first polling cycle.
+- **Behavioral:** Added this scenario to the game day runbook and chaos engineering suite using AWS Fault Injection Simulator to inject STS latency periodically.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes container resource `requests` to `limits` ratio policies — preventing both resource starvation and node-level CPU throttling at scale?
+
+**Model Answer:**
+
+The core tension is between over-provisioning (limits >> requests inflates scheduling headroom costs) and over-constraining (limits ≈ requests causes CPU throttling and OOMKills for bursty workloads). A principled strategy addresses both:
+
+- **Ratio policy via admission control:** Use Gatekeeper ConstraintTemplate or Kyverno ClusterPolicy to enforce that `limits/requests` ratio for CPU stays within a configurable band (e.g., CPU limit ≤ 4× request; memory limit ≤ 1.5× request for stateless services). Namespaces serving ML batch jobs get a looser policy via label-based exclusion.
+- **LimitRange as a safety net:** Define namespace-level `LimitRange` objects that set default requests/limits and cap max limits, catching workloads that omit resource specs entirely — enforced via GitOps with Flux/ArgoCD.
+- **VPA in recommendation mode:** Run VPA controllers in `Off` mode cluster-wide to gather right-sizing data without automatic mutation; export VPA recommendations to a Grafana dashboard and weekly Slack digest so teams can self-service tune.
+- **CPU throttling observability:** Deploy cAdvisor metrics (`container_cpu_throttled_seconds_total`) with a recording rule and alert at >25% throttle ratio sustained over 5 minutes; this surfaces limits that are too tight before they cause latency SLO breaches.
+- **QoS class awareness:** Educate teams that setting equal requests and limits creates `Guaranteed` QoS (eviction-safe) versus `Burstable`; for latency-sensitive services prefer Guaranteed with right-sized values derived from VPA recommendations.
+- **Chargeback alignment:** Tag workload cost allocation using Kubecost; teams with high `limit/request` ratios pay for the unused reserved headroom, creating financial incentive to right-size.
+- **Continuous enforcement review:** Quarterly policy review cycle adjust
