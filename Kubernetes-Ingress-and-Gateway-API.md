@@ -1960,3 +1960,46 @@ A single Gateway listener with a wildcard hostname (e.g., `*.example.com`) combi
 - **Namespace sharding:** Split HTTPRoutes across namespaces by team or domain tier so a single noisy namespace doesn't block reconciliation for others; use `AllowedRoutes` namespace selectors to maintain security boundaries.
 - **Hostname collision monitoring:** At scale, accidental hostname conflicts surface more frequently; implement an admission webhook or policy (e.g., Kyverno) that rejects an HTTPRoute whose hostname is already claimed in a `Accepted: True` route in another namespace.
 - Benchmark your chosen controller at 2–3× projected scale before go-live; published conformance tests do not cover performance characteristics.
+
+
+---
+
+## 🗓️ Added 2026-11-11 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-11 21:44 -->
+
+### Q: How does Gateway API's `HTTPRoute` `timeouts` field interact with backend-level `BackendLBPolicy` or infrastructure timeouts, and what happens when multiple timeout boundaries conflict?
+
+**Model Answer:**
+
+`HTTPRoute` `timeouts` (request and backendRequest) are enforced at the data-plane proxy level and control how long the proxy waits for a complete request and a backend response respectively. These are independent of OS-level TCP keepalive or infrastructure LB idle timeouts (e.g., AWS NLB default 350 s, GCP LB 600 s). Conflicts produce the **minimum effective timeout** because whichever boundary fires first wins—a common trap is setting `backendRequest: 30s` in HTTPRoute while the upstream infra LB has a 20 s idle timeout, so users see unexpected 504s that look like backend failures but are actually infra cuts. When `BackendLBPolicy` or vendor extensions add their own connection-pool or read timeouts, the effective timeout for a request is `min(httpRoute.timeouts.backendRequest, backendLBPolicy.connectionTimeout, infraLBIdleTimeout)`. Debugging steps: compare the precise failure timestamp against each timeout value, check for `504` vs `499` (client abort) status codes, and use access logs with upstream response time fields. Best practice is to document and align all three layers—HTTPRoute, vendor policy, and cloud LB—in a runbook, enforcing them via policy hierarchy so application teams cannot accidentally set values exceeding the infra ceiling.
+
+---
+
+### Q: What is `ReferenceGrant` in Gateway API, why was it introduced, and what security model does it enforce?
+
+**Model Answer:**
+
+`ReferenceGrant` is a Gateway API resource that explicitly permits cross-namespace references—for example, an `HTTPRoute` in namespace `team-a` referencing a `Service` or `Secret` in namespace `platform`. Before it existed, any route could reference resources in any namespace if the RBAC on the route object itself allowed it, creating a confused-deputy risk. The model works by requiring the **owner of the target namespace** to create a `ReferenceGrant` that names the allowed source kind, source namespace, and target resource kind (and optionally name). Without a matching `ReferenceGrant`, the controller must set the route condition to `ResolvedRefs: False` with reason `RefNotPermitted` and treat the backend as unavailable. This enforces a **bilateral consent** model: the route author and the target namespace owner both must agree. Operationally, a common failure is a platform team rotating a TLS `Secret` into a new namespace without updating `ReferenceGrant`, silently breaking certificate resolution. Audit `ReferenceGrant` objects as part of your security review; they are namespace-scoped and should follow least-privilege—grant by specific resource name rather than wildcard where possible.
+
+---
+
+### Q: How do you design a Gateway API architecture for a cluster shared by hundreds of teams where each team needs isolated ingress, independent upgrade cadence, and cost attribution per team?
+
+**Model Answer:**
+
+- **GatewayClass-per-tier:** Define distinct GatewayClasses (e.g., `standard`, `premium`, `internal`) owned by the platform team; teams select the class appropriate for their SLA, enabling independent controller versions per class.
+- **Dedicated Gateway-per-team vs. shared Gateway:** For strict isolation and cost attribution, provision a `Gateway` per team (or per business unit) in a platform-managed namespace; the cloud LB resource created maps 1:1 to a billable object you can tag with team metadata via the `Infrastructure` field.
+- **Namespace-scoped HTTPRoutes with AllowedRoutes:** Configure each `Gateway` listener with `namespaces.from: Selector` using a label matching the owning team's namespaces, preventing other teams from attaching routes.
+- **Cost attribution:** Use `Infrastructure.labels/annotations` on the `Gateway` to propagate cloud provider tags (AWS cost allocation tags, GCP labels) so finance dashboards can aggregate by team.
+- **Self-service with guardrails:** Expose Gateway provisioning via an internal platform API or a Helm chart that stamps `ReferenceGrant`, `Gateway`, and baseline `HTTPRoute` templates; keep raw `GatewayClass` creation restricted to platform RBAC.
+- **Upgrade cadence:** Each `GatewayClass` controller can be upgraded independently via separate Deployments; teams opt into a new class when ready, allowing a controlled migration path without forcing simultaneous upgrades.
+- **Pitfall:** Hundreds of Gateways means hundreds of cloud LBs—cost can spiral; evaluate whether a shared Gateway with strong `AllowedRoutes` namespace isolation meets the security requirement before defaulting to dedicated LBs.
+
+---
+
+### Q: A security audit flags that your Ingress controller is exposing internal Kubernetes API server metadata through response headers (e.g., `Server: nginx/1.x`, `X-Powered-By`). How do you systematically identify and suppress information-disclosure headers at the Gateway layer, and how do you prevent regression?
+
+**Model Answer:**
+
+First, enumerate all headers returned by the data plane using `curl -I` and a tool like `nuclei` or `nikto` against representative routes; catalogue both upstream-injected headers (from app backends) and proxy-injected headers (from the controller itself). For **controller-injected headers** (e.g., `Server`, `X-Powered-By`), suppress them at the controller configuration level—NGINX Ingress uses `server-tokens: "false"` and `hide-headers` in the ConfigMap; Envoy-based controllers use `suppress_envoy_headers` or a Lua/WASM filter. For **backend-injected headers**, use `HTTPRoute` response header modifiers (`ResponseHeaderModifier` filter with `remove`) to strip them before they reach the client. Apply this as a **platform-level policy** using a `Gateway`-scoped filter or a shared `HTTPRoute` parent so individual teams cannot accidentally re-expose them. To prevent regression: add a step in your CI pipeline (or a dedicated conformance test suite) that sends a request through a staging Gateway and asserts the absence of flagged headers using `pytest`/`k6`/`chainsaw`; fail the pipeline if any flagged header is present. Also configure OPA/Kyverno policies to reject `HTTPRoute` resources that explicitly add headers on the blocklist. Document the approved header policy in your platform runbook and review it during quarterly security audits.

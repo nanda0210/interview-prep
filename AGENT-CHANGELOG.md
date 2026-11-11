@@ -1057,3 +1057,21 @@ _Committed & pushed: yes_
 - A platform team wants to serve thousands of unique hostnames through a single Gateway. What are the scalability limits and design patterns you would apply?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-11 21:44:24
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8083 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes stateful workload (StatefulSet) upgrade safety — ensuring zero data loss and controlled rollouts for databases and quorum-based systems running on EKS?
+- A production EKS cluster's Kubernetes control plane begins logging sustained `etcd cluster is unavailable` errors during a large-scale Secret and ConfigMap reconciliation storm triggered by an external secrets operator. How do you diagnose and resolve this?
+- Describe a situation where an EKS cluster's AWS Load Balancer Controller–managed Application Load Balancers began accumulating stale target group registrations, causing intermittent 502 errors after frequent pod churn from Karpenter consolidation. How did you identify and resolve the systemic issue?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes cost attribution and chargeback at scale — ensuring per-team, per-service AWS spend is accurately measured, reported, and enforced with guardrails across a large multi-tenant EKS cluster?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6496 chars)
+- How does Gateway API's `HTTPRoute` `timeouts` field interact with backend-level `BackendLBPolicy` or infrastructure timeouts, and what happens when multiple timeout boundaries conflict?
+- What is `ReferenceGrant` in Gateway API, why was it introduced, and what security model does it enforce?
+- How do you design a Gateway API architecture for a cluster shared by hundreds of teams where each team needs isolated ingress, independent upgrade cadence, and cost attribution per team?
+- A security audit flags that your Ingress controller is exposing internal Kubernetes API server metadata through response headers (e.g., `Server: nginx/1.x`, `X-Powered-By`). How do you systematically identify and suppress information-disclosure headers at the Gateway layer, and how do you prevent regression?
+
+_Committed & pushed: yes_

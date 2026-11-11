@@ -6163,3 +6163,57 @@ The core tension is between over-provisioning (limits >> requests inflates sched
 - **QoS class awareness:** Educate teams that setting equal requests and limits creates `Guaranteed` QoS (eviction-safe) versus `Burstable`; for latency-sensitive services prefer Guaranteed with right-sized values derived from VPA recommendations.
 - **Chargeback alignment:** Tag workload cost allocation using Kubecost; teams with high `limit/request` ratios pay for the unused reserved headroom, creating financial incentive to right-size.
 - **Continuous enforcement review:** Quarterly policy review cycle adjust
+
+
+---
+
+## 🗓️ Added 2026-11-11 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-11 21:43 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes stateful workload (StatefulSet) upgrade safety — ensuring zero data loss and controlled rollouts for databases and quorum-based systems running on EKS?
+
+**Key points an interviewer wants to hear:**
+
+- **Partition-based rolling updates**: Set `spec.updateStrategy.rollingUpdate.partition` to the total replica count before an upgrade, then decrement it one pod at a time, validating quorum health (e.g., Patroni primary promotion, Kafka ISR, etcd member health) between each step rather than relying on Kubernetes' default automated rollout.
+- **PodDisruptionBudgets tuned to quorum math**: For a 3-node quorum system, set `minAvailable: 2`; for 5-node, `minAvailable: 3` — ensuring Kubernetes node lifecycle operations (Karpenter consolidation, node drains) cannot simultaneously remove enough replicas to lose quorum.
+- **Pre-upgrade snapshot gates via admission or CI**: Use a Validating Webhook or a pre-upgrade Job that asserts a successful, recent EBS/EFS snapshot or application-level backup exists before any image tag change is merged, enforcing backup-before-upgrade as a hard policy gate.
+- **Persistent Volume migration hygiene**: Pin `volumeClaimTemplates` storage class to one with `WaitForFirstConsumer` and topology-aware scheduling; use `allowVolumeExpansion: true` and test PV expansion in staging before production to avoid pods stuck in `ContainerCreating` due to AZ mismatch after node replacement.
+- **Readiness gates tied to application-level health**: Replace generic TCP readiness probes with application-specific ones (e.g., Postgres `pg_isready`, Kafka `kafka-broker-api-versions`) so a pod is only declared Ready — and traffic routed to it — after the stateful application has fully joined the cluster or completed WAL replay.
+- **Observability checkpoints**: Instrument CloudWatch alarms or Prometheus rules on replication lag, ISR count, or raft term changes; wire these alarms into the deployment pipeline as a blocking check so automated rollouts pause on detected replication divergence.
+- **Behavioral framing**: "On a Cassandra migration we reduced partition from 6 to 0 over six hours with a human approval gate at each decrement, using a nodetool status check as the gate condition — this surfaced a compaction backlog on node 4 that would have caused data inconsistency if the rollout had continued automatically."
+
+---
+
+### Q: A production EKS cluster's Kubernetes control plane begins logging sustained `etcd cluster is unavailable` errors during a large-scale Secret and ConfigMap reconciliation storm triggered by an external secrets operator. How do you diagnose and resolve this?
+
+**Key points an interviewer wants to hear:**
+
+- **Immediate triage**: Check EKS control plane logs (CloudWatch log group `/aws/eks/<cluster>/cluster`, log stream `etcd`) for `mvcc: database space exceeded`, `request timed out`, or `leader changed` signals; distinguish between etcd storage exhaustion, leader instability, and pure write amplification causing latency to exceed the 5-second etcd election timeout.
+- **Write amplification root cause**: External Secrets Operator (ESO) or Sealed Secrets with aggressive `refreshInterval` values (e.g., 1 second) generates one `Secret` PATCH per secret per interval per pod; with hundreds of secrets, this saturates the etcd write path; query API server audit logs filtering on `resource=secrets`, `verb=patch/update` to quantify RPS per service account.
+- **Immediate mitigation**: Increase ESO `refreshInterval` to 1–5 minutes; deploy a `ResourceQuota` on `secrets` count per namespace; apply `--max-requests-inflight` and `--max-mutating-requests-inflight` awareness by checking current utilization via `apiserver_current_inflight_requests` metric; consider temporarily pausing ESO's `ExternalSecret` CRD reconciliation by scaling the operator to zero replicas.
+- **etcd compaction and defragmentation**: EKS manages etcd automatically, but you can trigger relief by reducing the object churn rate — fewer writes means compaction keeps pace; request AWS support if `etcd_db_total_size_in_bytes` is approaching the 8 GiB limit.
+- **Structural fix**: Move non-sensitive configuration to ConfigMaps with longer TTLs; use ESO's `Secret Store` caching mode; implement a Validating Webhook that rejects `ExternalSecret` resources with `refreshInterval < 60s` in production namespaces.
+- **Prevention**: Alert on `etcd_object_counts` by resource type (Prometheus metric or CloudWatch); set a budget of maximum secrets per namespace enforced by OPA/Gatekeeper; run load tests simulating operator reconciliation storms in staging before deploying new operator versions.
+
+---
+
+### Q: Describe a situation where an EKS cluster's AWS Load Balancer Controller–managed Application Load Balancers began accumulating stale target group registrations, causing intermittent 502 errors after frequent pod churn from Karpenter consolidation. How did you identify and resolve the systemic issue?
+
+**Key points an interviewer wants to hear:**
+
+- **Symptom pattern**: 502s were intermittent and correlated with Karpenter consolidation windows (every 10–30 minutes); ALB access logs showed `502 Target.DeregistrationInProgress` and `Target.FailedHealthChecks` for IPs that no longer existed in the VPC, confirming stale target registrations.
+- **Root cause**: The ALB Controller's target deregistration path depends on pod `Terminating` lifecycle events propagating before the ALB stops sending traffic; Karpenter's aggressive node termination (especially with `terminationGracePeriodSeconds` < ALB connection draining timeout) meant pods were killed before ALB finished draining; in `IP` target mode, each pod IP is registered directly, so high pod churn created a lag between Kubernetes state and ALB target group state.
+- **Diagnosis steps**: Cross-referenced ALB Controller logs (`kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller`) for `TargetGroup deregistration` timing; compared pod termination timestamps from API server audit logs against ALB CloudTrail `DeregisterTargets` API calls; confirmed draining timeout was 300 seconds but Karpenter's `terminationGracePeriodSeconds` was 30 seconds.
+- **Immediate fix**: Set ALB annotation `alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=30` to match the pod termination window, reducing the stale registration window; added a `preStop` hook with a `sleep 10` to allow the ALB to route traffic away before the pod's SIGTERM handler began.
+- **Systemic fix**: Implemented Karpenter `NodePool` with `terminationGracePeriodSeconds: 120` aligned to the application's actual shutdown time plus connection draining buffer; enabled ALB `slow_start.duration_seconds` for gradual ramp-up on new pod registrations to avoid 502s on new pod registration too.
+- **Monitoring**: Added CloudWatch alarm on ALB `HTTPCode_Target_5XX_Count` with 1-minute evaluation; Prometheus alert on `aws_alb_target_response_time_p99 > 2s` during Karpenter consolidation windows as an early warning.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes cost attribution and chargeback at scale — ensuring per-team, per-service AWS spend is accurately measured, reported, and enforced with guardrails across a large multi-tenant EKS cluster?
+
+**Key points an interviewer wants to hear:**
+
+- **Labeling taxonomy as the foundation**: Mandate Kubernetes labels (`team`, `service`, `env`, `cost-center`) on all workload resources via a Validating Webhook (OPA/Gatekeeper `ConstraintTemplate`) that rejects Deployments, StatefulSets, and Jobs missing required labels; propagate these labels to pods so cost tools can correlate pod-hour spend to business owners.
+- **Node-level cost attribution with Kubecost or OpenCost**: Deploy Kubecost or the CNCF OpenCost project, which integrates with AWS Pricing API and
