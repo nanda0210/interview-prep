@@ -2003,3 +2003,69 @@ A single Gateway listener with a wildcard hostname (e.g., `*.example.com`) combi
 **Model Answer:**
 
 First, enumerate all headers returned by the data plane using `curl -I` and a tool like `nuclei` or `nikto` against representative routes; catalogue both upstream-injected headers (from app backends) and proxy-injected headers (from the controller itself). For **controller-injected headers** (e.g., `Server`, `X-Powered-By`), suppress them at the controller configuration level—NGINX Ingress uses `server-tokens: "false"` and `hide-headers` in the ConfigMap; Envoy-based controllers use `suppress_envoy_headers` or a Lua/WASM filter. For **backend-injected headers**, use `HTTPRoute` response header modifiers (`ResponseHeaderModifier` filter with `remove`) to strip them before they reach the client. Apply this as a **platform-level policy** using a `Gateway`-scoped filter or a shared `HTTPRoute` parent so individual teams cannot accidentally re-expose them. To prevent regression: add a step in your CI pipeline (or a dedicated conformance test suite) that sends a request through a staging Gateway and asserts the absence of flagged headers using `pytest`/`k6`/`chainsaw`; fail the pipeline if any flagged header is present. Also configure OPA/Kyverno policies to reject `HTTPRoute` resources that explicitly add headers on the blocklist. Document the approved header policy in your platform runbook and review it during quarterly security audits.
+
+
+---
+
+## 🗓️ Added 2026-11-12 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-12 21:43 -->
+
+### Q: How do you implement cross-cluster or multi-cluster traffic routing with Gateway API, and what are the current standardization gaps?
+
+**Model Answer:**
+
+Gateway API itself is single-cluster scoped—a `Gateway` and its `HTTPRoute` resources live in one cluster and reference backends via `Service` objects in that same cluster. Multi-cluster routing today is achieved through several patterns:
+
+- **External DNS + multiple Gateways**: each cluster exposes its own Gateway; a global load balancer (e.g., AWS Global Accelerator, GCP GCLB) distributes across cluster IPs, with external-dns syncing hostnames.
+- **`ServiceImport` / MCS API**: the [Kubernetes Multi-Cluster Services API](https://github.com/kubernetes-sigs/mcs-api) introduces `ServiceImport` as a backend target; some Gateway API implementations (e.g., GKE Gateway) allow `backendRef` to point at a `ServiceImport`, enabling cross-cluster weighted routing natively.
+- **Service mesh federation**: GAMMA-aware meshes (Istio, Linkerd) can federate services and then expose them through a Gateway in a hub cluster.
+
+**Current standardization gaps**: `ServiceImport` integration is not in the core Gateway API spec and varies by implementation. There is no standard resource for expressing cluster-level health, failover policies, or geo-affinity. When evaluating implementations, check whether multi-cluster `backendRef` support is conformance-tested or vendor-specific, and design failure modes (split-brain, stale `ServiceImport`) explicitly into your runbooks.
+
+---
+
+### Q: What is the purpose of the `Gateway` `infrastructure.parametersRef` field (or `GatewayClass` `parametersRef`), and how do the two differ in scope and use?
+
+**Model Answer:**
+
+- **`GatewayClass.spec.parametersRef`** points to a cluster-scoped (or namespaced) configuration object—often a vendor CRD—that sets *class-wide* defaults for every `Gateway` instantiated from that class (e.g., default CPU limits for the data plane, logging configuration, cloud load-balancer tier).
+- **`Gateway.spec.infrastructure.parametersRef`** (introduced in Gateway API v1.1 as part of the Infrastructure API) overrides or supplements those defaults for a *specific* `Gateway` instance, allowing per-Gateway customization (e.g., a larger instance size for a high-traffic gateway) without creating a whole new `GatewayClass`.
+
+The layering is intentional: platform teams set safe, secure defaults at the `GatewayClass` level and may choose to allow or disallow per-`Gateway` overrides via RBAC on the referenced parameter resource. A common pitfall is granting application teams write access to the parameter CRD, which can bypass cost controls or security baselines—always use admission webhooks or policy engines (OPA/Kyverno) to validate parameter values regardless of which level they are set.
+
+---
+
+### Q: Describe a production incident where an Ingress or Gateway controller upgrade caused a routing regression, and walk through how you would detect, mitigate, and prevent it.
+
+**Model Answer (behavioral + technical):**
+
+**Detection**: Routing regressions after controller upgrades typically surface as elevated 404/502 rates on specific paths, changed header behavior, or broken regex matches. A good detection posture includes:
+- Synthetic monitors (e.g., Blackbox Exporter probes) covering critical routes, running continuously.
+- Pre/post upgrade comparison of controller logs and status conditions on `HTTPRoute`/`Ingress` objects.
+- Alerting on `RouteAccepted` and `ResolvedRefs` condition flips.
+
+**Mitigation**: Roll back the controller Deployment to the previous image (`kubectl rollout undo`); because `HTTPRoute`/`Ingress` resources are declarative, traffic typically recovers as soon as the old controller pod reconciles. If rollback is not possible, patch the affected route to use a known-good configuration or failover to a secondary controller.
+
+**Prevention**:
+- Run the controller upgrade in a staging cluster with production-representative routes and execute the Gateway API conformance test suite before promoting.
+- Use a canary deployment strategy for the controller itself: deploy the new version as a second Deployment watching a separate `GatewayClass`, migrate one non-critical `Gateway` to it, validate, then shift remaining gateways.
+- Pin controller versions in GitOps manifests and require a PR + CI gate that runs conformance tests before merging version bumps.
+- Review the controller's changelog for any breaking changes to `ImplementationSpecific` behaviors or deprecated annotations.
+
+---
+
+### Q: How does Gateway API's `HTTPRoute` `filters` field differ between `rule`-level filters and `backendRef`-level filters, and what mistakes do engineers commonly make when combining them?
+
+**Model Answer:**
+
+Gateway API allows filters at two scopes within an `HTTPRoute` rule:
+
+- **Rule-level filters** (`spec.rules[].filters`) apply to *all* requests that match the rule, regardless of which backend they are forwarded to. Typical use cases: request header modification, URL rewriting, redirects, and request mirroring.
+- **BackendRef-level filters** (`spec.rules[].backendRefs[].filters`) apply only to traffic destined for that *specific backend*, after the rule matches and backend selection occurs. Useful for backend-specific header injection (e.g., adding a `X-Backend-Version` header only when routing to the canary).
+
+**Common mistakes**:
+1. **Applying a `URLRewrite` at the rule level and also at the backendRef level**: the spec does not define a clear merge order for conflicting rewrites, and many implementations simply reject this or apply only one—behavior is implementation-defined.
+2. **Placing a `RequestRedirect` filter at the rule level alongside a `backendRef`**: a redirect terminates forwarding, so the backend is never reached. Some engineers add both expecting a conditional redirect, which is not how the model works.
+3. **Assuming backendRef filters are supported by all implementations**: backendRef-scoped filters are a relatively new addition and conformance support varies; always check the implementation's conformance report before relying on them in production.
+4. **Ordering assumptions**: rule-level filters are applied before backendRef filters, but engineers sometimes write header mutation at both levels and are surprised by duplicate or overwritten header values.

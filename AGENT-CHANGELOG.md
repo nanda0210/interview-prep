@@ -1075,3 +1075,21 @@ _Committed & pushed: yes_
 - A security audit flags that your Ingress controller is exposing internal Kubernetes API server metadata through response headers (e.g., `Server: nginx/1.x`, `X-Powered-By`). How do you systematically identify and suppress information-disclosure headers at the Gateway layer, and how do you prevent regression?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-12 21:43:50
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8063 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes pod preemption and priority class hygiene — ensuring critical workloads always get resources without enabling priority abuse across teams?
+- A production EKS cluster's AWS VPC CNI (amazon-vpc-cni) is exhausting ENI and secondary IP capacity on nodes during a traffic surge, causing new pods to remain in `ContainerCreating` with "failed to assign an IP address" errors. How do you diagnose and remediate this in real time, and what architectural changes prevent recurrence?
+- Describe a situation where an EKS cluster's Horizontal Pod Autoscaler was scaling correctly based on CPU metrics, but a downstream service experienced cascading failures during scale-out events. Walk through your investigation and the architectural safeguards you put in place.
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes Secret encryption at rest and in transit — ensuring Secrets are never stored unencrypted in etcd, never logged, and rotated safely without workload disruption?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6457 chars)
+- How do you implement cross-cluster or multi-cluster traffic routing with Gateway API, and what are the current standardization gaps?
+- What is the purpose of the `Gateway` `infrastructure.parametersRef` field (or `GatewayClass` `parametersRef`), and how do the two differ in scope and use?
+- Describe a production incident where an Ingress or Gateway controller upgrade caused a routing regression, and walk through how you would detect, mitigate, and prevent it.
+- How does Gateway API's `HTTPRoute` `filters` field differ between `rule`-level filters and `backendRef`-level filters, and what mistakes do engineers commonly make when combining them?
+
+_Committed & pushed: yes_

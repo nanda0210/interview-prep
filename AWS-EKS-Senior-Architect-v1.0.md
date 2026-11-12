@@ -6217,3 +6217,84 @@ The core tension is between over-provisioning (limits >> requests inflates sched
 
 - **Labeling taxonomy as the foundation**: Mandate Kubernetes labels (`team`, `service`, `env`, `cost-center`) on all workload resources via a Validating Webhook (OPA/Gatekeeper `ConstraintTemplate`) that rejects Deployments, StatefulSets, and Jobs missing required labels; propagate these labels to pods so cost tools can correlate pod-hour spend to business owners.
 - **Node-level cost attribution with Kubecost or OpenCost**: Deploy Kubecost or the CNCF OpenCost project, which integrates with AWS Pricing API and
+
+
+---
+
+## 🗓️ Added 2026-11-12 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-12 21:43 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes pod preemption and priority class hygiene — ensuring critical workloads always get resources without enabling priority abuse across teams?
+
+**Model Answer:**
+
+- Define a small, governed set of `PriorityClass` objects (e.g., `system-critical`, `high`, `medium`, `low-batch`) managed via GitOps; never allow teams to create their own PriorityClasses by enforcing RBAC that restricts `priorityclasses` create/update to platform admins only.
+- Use an OPA/Gatekeeper or Kyverno policy to allowlist which PriorityClass values each namespace may assign — a batch team cannot claim `system-critical` even if the object exists cluster-wide.
+- Set a cluster-wide default PriorityClass so unspecified workloads land at a known, non-zero baseline rather than 0, preventing accidental preemption of batch jobs by default pods.
+- Reserve the `system-node-critical` and `system-cluster-critical` built-in classes exclusively for DaemonSets and control-plane add-ons; audit weekly for any non-platform pods claiming these.
+- Instrument scheduling events: alert on `kubectl get events --field-selector reason=Preempting` spikes; correlate preemption victims against their priority class to detect misconfiguration quickly.
+- Document the trade-off: overly broad use of high-priority classes defeats the purpose and can starve node-critical DaemonSets, so policy gates are the enforcement backstop, not team trust.
+
+---
+
+### Q: A production EKS cluster's AWS VPC CNI (amazon-vpc-cni) is exhausting ENI and secondary IP capacity on nodes during a traffic surge, causing new pods to remain in `ContainerCreating` with "failed to assign an IP address" errors. How do you diagnose and remediate this in real time, and what architectural changes prevent recurrence?
+
+**Model Answer:**
+
+**Immediate diagnosis:**
+- Check `kubectl describe node <node>` for `vpc.amazonaws.com/pod-count` and compare against the instance type's ENI × IPs-per-ENI limit (documented in the VPC CNI GitHub).
+- Inspect `ipamd` logs: `kubectl logs -n kube-system -l k8s-app=aws-node -c aws-node` for `InsufficientCidrBlocks`, `no free IP` or `AssignPrivateIpAddresses throttled` errors.
+- Verify the VPC subnet still has available IPs: `aws ec2 describe-subnets --subnet-ids <id>` — subnet exhaustion is a separate but similar failure mode.
+
+**Immediate remediation:**
+- If the node limit is the bottleneck, Karpenter or Cluster Autoscaler should already be adding nodes; if not, check for Karpenter budget limits or CA scale-down lock preventing new nodes.
+- Temporarily increase `WARM_IP_TARGET` / `MINIMUM_IP_TARGET` environment variables on `aws-node` DaemonSet to allow ipamd to pre-warm more IPs, but recognize this increases IP consumption per node.
+- As a fast path, cordon and drain overloaded nodes to redistribute scheduling pressure to new nodes that join with fresh ENI capacity.
+
+**Architectural prevention:**
+- Enable **prefix delegation** (`ENABLE_PREFIX_DELEGATION=true`) on Nitro-based instances, multiplying available pod IPs per ENI from ~15 to ~256 without increasing ENI count.
+- Right-size node instance types; memory/CPU-optimized instances with high ENI limits (e.g., `m6i.4xlarge`) better match dense pod packing requirements.
+- Use multiple, properly sized subnets per AZ with `/22` or larger CIDR blocks, and monitor free IP count via CloudWatch VPC metrics with alarms at 20% remaining.
+- Consider **custom networking** to separate pod IPs onto secondary subnets, decoupling pod IP space from the primary node subnet.
+
+---
+
+### Q: Describe a situation where an EKS cluster's Horizontal Pod Autoscaler was scaling correctly based on CPU metrics, but a downstream service experienced cascading failures during scale-out events. Walk through your investigation and the architectural safeguards you put in place.
+
+**Model Answer:**
+
+In a previous role, HPA was correctly scaling a stateless API service from 5 to 40 replicas under load, but the downstream PostgreSQL RDS proxy was rejecting connections during the ramp-up, causing 503s that fed back into the load signal and triggered further scaling — a classic autoscaling death spiral.
+
+**Investigation:**
+- Correlated HPA scale events (`kubectl describe hpa`) timestamps with RDS Proxy `DatabaseConnectionRequests` and `ClientConnectionsReceived` CloudWatch metrics — connection count spiked 8× in under 90 seconds.
+- Identified that each new pod opened its connection pool eagerly (pool min-size = 10), so 35 new pods simultaneously established ~350 new connections, overwhelming the proxy's `MaxConnectionsPercent` setting.
+- Application logs confirmed `connection pool exhausted` errors starting 15 seconds after each scale event.
+
+**Architectural safeguards implemented:**
+1. **HPA scale-up stabilization**: Set `behavior.scaleUp.stabilizationWindowSeconds=120` and limited `policies` to add a maximum of 4 pods per 60 seconds, slowing the ramp rate without affecting scale-down agility.
+2. **Lazy connection pool initialization**: Changed the application to open connections on first request, not at startup, reducing the connection surge per new pod.
+3. **RDS Proxy connection limits**: Tuned `MaxConnectionsPercent` with headroom and enabled connection pinning awareness in the app.
+4. **KEDA `ScaledObject` cooldown**: Migrated to KEDA with a custom scale-up cooldown and a stabilization window tied to p99 latency rather than raw CPU, giving a more accurate load signal.
+5. **Circuit breaker at the client**: Added Resilience4j circuit breaker so upstream callers shed load rather than compounding retry storms during the brief instability window.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes Secret encryption at rest and in transit — ensuring Secrets are never stored unencrypted in etcd, never logged, and rotated safely without workload disruption?
+
+**Model Answer:**
+
+**Encryption at rest:**
+- Enable EKS envelope encryption for Kubernetes Secrets using an AWS KMS Customer Managed Key (CMK) at cluster creation; this wraps the etcd data encryption key with KMS so Secrets are never stored in plaintext in etcd.
+- Apply a KMS key policy that restricts `kms:Decrypt` to the EKS control plane IAM role only, and enable KMS CloudTrail logging to audit every Secret decryption event.
+- For brownfield clusters, enable encryption post-creation via `aws eks associate-encryption-config`, then run `kubectl get secrets -A -o json | kubectl replace -f -` to force re-encryption of all existing Secrets under the new CMK.
+
+**Prevention of Secret exposure in logs and manifests:**
+- Enforce via Kyverno policy that no `env` or `envFrom` fields reference Secret values directly in logged admission requests; require all Secret consumption to go through volume mounts or the Secrets Store CSI Driver.
+- Configure API server audit policy to `omit` `requestObject` and `responseObject` for `secrets` resource verbs, preventing Secret values from appearing in CloudWatch Logs audit trails.
+- Block `kubectl get secret -o yaml` in production namespaces by restricting `get` verb on `secrets` to break-glass roles only, enforced via RBAC and audited with Falco rules.
+
+**Safe rotation without workload disruption:**
+- Use the **Secrets Store CSI Driver with AWS Secrets Manager** as the authoritative store; set a `rotationPollInterval` on `SecretProviderClass` so the CSI driver picks up new secret versions automatically without pod restarts.
+- For Kubernetes-native Secrets, use External Secrets Operator (ESO) to sync from Secrets Manager; ESO will update the Secret object, and workloads consuming it via volume mounts receive the new value on the next kubelet sync cycle (no restart required), while env-var-based workloads require a rolling restart — which is another reason to enforce volume-mount consumption.
+- Implement a rotation runbook that includes: (1) pre-rotate validation in
