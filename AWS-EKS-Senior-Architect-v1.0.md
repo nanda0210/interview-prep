@@ -6298,3 +6298,71 @@ In a previous role, HPA was correctly scaling a stateless API service from 5 to 
 - Use the **Secrets Store CSI Driver with AWS Secrets Manager** as the authoritative store; set a `rotationPollInterval` on `SecretProviderClass` so the CSI driver picks up new secret versions automatically without pod restarts.
 - For Kubernetes-native Secrets, use External Secrets Operator (ESO) to sync from Secrets Manager; ESO will update the Secret object, and workloads consuming it via volume mounts receive the new value on the next kubelet sync cycle (no restart required), while env-var-based workloads require a rolling restart — which is another reason to enforce volume-mount consumption.
 - Implement a rotation runbook that includes: (1) pre-rotate validation in
+
+
+---
+
+## 🗓️ Added 2026-11-13 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-13 21:10 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes HorizontalPodAutoscaler (HPA) safety — ensuring autoscaling decisions don't destabilize production services during rapid demand spikes or scale-down events?
+
+**Key points an interviewer wants to hear:**
+
+- **Stabilization windows**: Configure `scaleDown.stabilizationWindowSeconds` (default 300 s) and `scaleUp.stabilizationWindowSeconds` to prevent thrashing; tune per workload SLO, not globally.
+- **Scaling policies**: Use `selectPolicy: Max` for scale-up (fastest growth wins) and `selectPolicy: Min` for scale-down (most conservative wins); set `periodSeconds` and `percent`/`pods` limits to cap the rate of change per evaluation cycle.
+- **Custom and external metrics**: Prefer application-level metrics (queue depth via KEDA, RPS via Prometheus Adapter) over raw CPU to get leading indicators; raw CPU is a lagging signal and causes late, overshooting scale-ups.
+- **Floor and ceiling guardrails**: Enforce `minReplicas` ≥ 2 (or ≥ AZ count) and `maxReplicas` via OPA/Kyverno policies so no team accidentally sets `minReplicas: 0` on a critical service.
+- **PDB coordination**: HPA scale-down is subject to PodDisruptionBudget; ensure `maxUnavailable` and `minAvailable` on the PDB are consistent with the HPA's minimum so evictions don't breach availability targets.
+- **Conflict prevention**: Prohibit simultaneous HPA and VPA in `Auto`/`InPlaceOrRecreate` mode on the same target — use VPA in `Off` or `Initial` mode for right-sizing recommendations, then feed results into HPA resource requests via GitOps.
+- **Observability**: Alert on `kube_horizontalpodautoscaler_status_condition{condition="ScalingLimited"}` to detect when HPA is capped by `maxReplicas` or Cluster Autoscaler node headroom, surfacing capacity planning gaps before they become incidents.
+
+---
+
+### Q: A production EKS cluster's AWS VPC CNI is reporting `ipamd` errors — specifically `InsufficientFreeAddressesInSubnet` — causing new pods to remain in `ContainerCreating` indefinitely. How do you diagnose and resolve this?
+
+**Diagnosis steps:**
+
+1. **Confirm the signal**: `kubectl describe pod <pod>` shows `failed to assign an IP address`; `kubectl logs -n kube-system aws-node-<node>` shows `InsufficientFreeAddressesInSubnet` from `ipamd`.
+2. **Check subnet exhaustion**: In the AWS Console or via `aws ec2 describe-subnets`, inspect `AvailableIpAddressCount` for each AZ's pod subnet — confirm which subnets are at or near exhaustion.
+3. **Review ENI and IP demand**: `kubectl get node -o json | jq` to correlate node count × (max ENIs × secondary IPs per ENI) against subnet CIDR size; check whether WARM_IP_TARGET / MINIMUM_IP_TARGET tuning is over-pre-allocating.
+
+**Resolution path:**
+
+- **Short-term**: Reduce `WARM_IP_TARGET` and `MINIMUM_IP_TARGET` environment variables in the `aws-node` DaemonSet to lower idle IP pre-allocation; restart `ipamd` pods to reclaim unused addresses.
+- **Custom networking**: Enable VPC CNI custom networking (`AWS_VPC_K8S_CNI_CUSTOM_NETWORK_CFG=true`) to redirect pod IPs to dedicated, larger secondary subnets while nodes keep their primary ENIs in the original subnet — avoids exhausting node subnets.
+- **Prefix delegation**: Enable `ENABLE_PREFIX_DELEGATION=true` (requires Nitro instances) to assign /28 prefixes per ENI, multiplying available IPs by 16× without adding subnets.
+- **Long-term**: Right-size subnets at VPC design time (minimum /20 per AZ for pods), use separate pod subnets from node subnets, and add CloudWatch alarms on `AvailableIpAddressCount < threshold` to get ahead of exhaustion.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes Service Account token security — including short-lived token rotation, least-privilege IRSA scoping, and preventing token misuse across namespaces?
+
+**Key architectural points:**
+
+- **Projected service account tokens (PSAP)**: Ensure all pods mount tokens via `serviceAccountToken` volume projection with an explicit `expirationSeconds` (≤ 3600 s); disable legacy auto-mount globally using `automountServiceAccountToken: false` at the namespace's default ServiceAccount, then opt in per workload.
+- **IRSA least-privilege scoping**: Each microservice gets its own dedicated IAM role with an OIDC trust policy scoped to `system:serviceaccount:<namespace>:<serviceaccount>` — never share roles across namespaces or teams; audit with AWS IAM Access Analyzer.
+- **Namespace isolation enforcement**: Use Kyverno or OPA Gatekeeper policies to block ServiceAccount objects from being created without an explicit IRSA annotation, and to prevent cross-namespace role bindings that could allow token projection into unrelated pods.
+- **Token audience restriction**: Set explicit `audiences` in projected token volumes matching only the intended AWS STS audience (`sts.amazonaws.com`) or in-cluster service; this prevents a token stolen from one context from being replayed against a different service.
+- **Audit and detection**: Enable Kubernetes audit logging for `create/get` on `serviceaccounts/token`; ship to CloudWatch Logs Insights and alert on tokens requested by unexpected principals or at unusual rates (potential exfiltration).
+- **Secret zero elimination**: Prohibit long-lived IAM access keys in pods via SCP and Kyverno — IRSA short-lived tokens should be the only credential path; run AWS Config rule `iam-no-inline-policy` and periodic IAM credential reports.
+- **Rotation validation**: Use `kubectl auth can-i` and AWS CloudTrail to periodically validate that service accounts can only assume their intended roles and that token refresh flows are functioning before expiry windows close.
+
+---
+
+### Q: Describe a situation where an EKS cluster's Karpenter-managed nodes began launching in incorrect Availability Zones, causing StatefulSet pods to be unable to reattach their EBS-backed PersistentVolumes and remain in a `Pending` state.
+
+**Situation:**
+After a Karpenter NodePool topology change (removing an explicit AZ constraint), new nodes began launching in the lowest-cost AZ regardless of where existing PVCs had been provisioned. StatefulSet pods with `volumeClaimTemplates` backed by `gp3` EBS volumes could not reschedule because EBS volumes are AZ-scoped, leaving pods `Pending` with `volume node affinity conflict`.
+
+**Diagnosis:**
+- `kubectl describe pod <pod>` showed `node(s) had volume node affinity conflict` — the scheduler couldn't find a node in `us-east-1a` where the PVC resided.
+- `kubectl get pv <pv> -o yaml` confirmed `nodeAffinity.required` pinned the volume to `us-east-1a`.
+- Karpenter logs showed the new NodePool lacked `topology.kubernetes.io/zone` requirements, so Karpenter launched nodes wherever spot capacity was cheapest.
+
+**Resolution:**
+- **Immediate**: Cordoned and drained the misplaced nodes; Karpenter re-launched replacements after adding an explicit `karpenter.sh/capacity-type` and `topology.kubernetes.io/zone` requirement matching the zones where PVCs existed.
+- **StatefulSet AZ pinning**: Added `volumeBindingMode: WaitForFirstConsumer` (already default for `gp3` StorageClass) — confirmed it was not being overridden; added pod `topologySpreadConstraints` to pin StatefulSet replicas per AZ.
+- **NodePool hardening**: Defined per-AZ NodePools for stateful workloads with explicit zone requirements; used a separate NodePool without zone constraints only for stateless workloads.
+- **Preventive guardrails

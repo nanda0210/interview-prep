@@ -2069,3 +2069,32 @@ Gateway API allows filters at two scopes within an `HTTPRoute` rule:
 2. **Placing a `RequestRedirect` filter at the rule level alongside a `backendRef`**: a redirect terminates forwarding, so the backend is never reached. Some engineers add both expecting a conditional redirect, which is not how the model works.
 3. **Assuming backendRef filters are supported by all implementations**: backendRef-scoped filters are a relatively new addition and conformance support varies; always check the implementation's conformance report before relying on them in production.
 4. **Ordering assumptions**: rule-level filters are applied before backendRef filters, but engineers sometimes write header mutation at both levels and are surprised by duplicate or overwritten header values.
+
+
+---
+
+## 🗓️ Added 2026-11-13 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-13 21:11 -->
+
+### Q: How does Gateway API's `HTTPRoute` `parentRef` hostname binding interact with wildcard listener hostnames on a Gateway, and what are the precedence and security implications?
+
+A Gateway listener may specify a wildcard hostname (e.g., `*.example.com`), and an HTTPRoute's `parentRef` may further restrict binding to a specific hostname. The effective hostname set is the **intersection** of listener and route hostnames; a route claiming `api.example.com` under a `*.example.com` listener is valid, but a route claiming `other.io` is rejected. More-specific hostnames take precedence over wildcards during request matching, so `api.example.com` wins over `*.example.com` for exact matches. Security-wise, this means a tenant can only "narrow" the hostname space the listener exposes—they cannot expand beyond what the Gateway owner granted. A misconfiguration risk arises when a listener has an empty hostname (matches all), inadvertently permitting any HTTPRoute in an allowed namespace to claim arbitrary hostnames; platform teams should always set explicit hostnames on listeners in multi-tenant clusters. Conformance requires controllers to surface `Accepted: False / HostnameConflict` when intersection is empty, so checking route status is the first debug step.
+
+---
+
+### Q: What is `HTTPRoute` backend weight normalization, and what happens when all backend weights are set to zero?
+
+Weights in an HTTPRoute `backendRef` are relative, not percentage-based; the controller normalizes them by summing all weights in a rule and distributing traffic proportionally. For example, weights of 1 and 3 yield a 25%/75% split regardless of their absolute values. When **all** backends in a rule have `weight: 0`, the specified behavior in the Gateway API spec is to return a `500` to the client (effectively dropping all traffic for that rule), because there is no valid destination. This is a common foot-gun during canary cleanup when engineers zero-out the old backend but forget to remove it. Best practice is to remove zero-weight backendRefs entirely rather than leaving them in place, and to validate route configs in CI using `kubectl apply --dry-run=server` or policy tooling like OPA/Kyverno. Controllers must reflect this via a degraded or warning condition on the route status.
+
+---
+
+### Q: How do you handle Ingress or HTTPRoute changes that must be coordinated with DNS TTL expiration to avoid user-facing downtime during a hostname migration?
+
+Hostname migrations require treating DNS TTL as a hard constraint on the switchover timeline. The recommended sequence is: (1) lower the DNS TTL (e.g., to 60 s) well before the migration window; (2) stand up the new Ingress/HTTPRoute and backend in parallel, verify health; (3) update the DNS record to point to the new address and wait at least one full old-TTL period before tearing down the original path; (4) restore DNS TTL afterward. In Gateway API terms, if the hostname moves between Gateway classes or controllers, two separate Gateways with two separate IPs must coexist during the TTL drain window, since a single HTTPRoute cannot simultaneously bind to two Gateways with different addresses. Additional risks include TLS certificate provisioning lag (cert-manager must issue before DNS flips) and external-dns reconcile delay if automation manages the record. A behavioral test using `curl --resolve` against both old and new endpoints lets you validate the new path without touching DNS. Post-migration, monitor 4xx/5xx rates and DNS query logs for the old address to confirm client cutover is complete.
+
+---
+
+### Q: Describe a situation where you would choose to keep multiple Ingress controllers running in the same cluster rather than consolidating to one, and what operational guardrails are necessary.
+
+Multiple controllers are justified when different traffic classes have genuinely incompatible requirements—for example, an NGINX controller optimized for HTTP/1.1 workloads alongside a Envoy-based controller for gRPC and HTTP/2, or a PCI-scoped controller running in a hardened namespace with strict audit logging separate from general-purpose traffic. Another driver is organizational: different business units may have SLA or change-management policies that make a shared controller a governance problem. Operationally, the critical guardrail is **IngressClass isolation**—each controller must watch only its own `IngressClassName` (or `GatewayClass`), and a default class must be explicitly designated or left unset to prevent wild-card adoption of unclassified resources. Network policies and RBAC should restrict each controller's service account to the namespaces it owns. Cost and complexity grow with each additional controller (separate node pools, IP allocations, certificate stores, upgrade schedules), so the decision should be revisited annually. In Gateway API the model is cleaner because GatewayClass is first-class, but you still need to audit that no two controllers share a `controllerName` string, which causes split-brain reconciliation.

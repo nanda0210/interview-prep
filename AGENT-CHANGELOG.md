@@ -1093,3 +1093,21 @@ _Committed & pushed: yes_
 - How does Gateway API's `HTTPRoute` `filters` field differ between `rule`-level filters and `backendRef`-level filters, and what mistakes do engineers commonly make when combining them?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-13 21:11:11
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7585 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes HorizontalPodAutoscaler (HPA) safety — ensuring autoscaling decisions don't destabilize production services during rapid demand spikes or scale-down events?
+- A production EKS cluster's AWS VPC CNI is reporting `ipamd` errors — specifically `InsufficientFreeAddressesInSubnet` — causing new pods to remain in `ContainerCreating` indefinitely. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes Service Account token security — including short-lived token rotation, least-privilege IRSA scoping, and preventing token misuse across namespaces?
+- Describe a situation where an EKS cluster's Karpenter-managed nodes began launching in incorrect Availability Zones, causing StatefulSet pods to be unable to reattach their EBS-backed PersistentVolumes and remain in a `Pending` state.
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (5135 chars)
+- How does Gateway API's `HTTPRoute` `parentRef` hostname binding interact with wildcard listener hostnames on a Gateway, and what are the precedence and security implications?
+- What is `HTTPRoute` backend weight normalization, and what happens when all backend weights are set to zero?
+- How do you handle Ingress or HTTPRoute changes that must be coordinated with DNS TTL expiration to avoid user-facing downtime during a hostname migration?
+- Describe a situation where you would choose to keep multiple Ingress controllers running in the same cluster rather than consolidating to one, and what operational guardrails are necessary.
+
+_Committed & pushed: yes_
