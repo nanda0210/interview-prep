@@ -6366,3 +6366,70 @@ After a Karpenter NodePool topology change (removing an explicit AZ constraint),
 - **StatefulSet AZ pinning**: Added `volumeBindingMode: WaitForFirstConsumer` (already default for `gp3` StorageClass) — confirmed it was not being overridden; added pod `topologySpreadConstraints` to pin StatefulSet replicas per AZ.
 - **NodePool hardening**: Defined per-AZ NodePools for stateful workloads with explicit zone requirements; used a separate NodePool without zone constraints only for stateless workloads.
 - **Preventive guardrails
+
+
+---
+
+## 🗓️ Added 2026-11-14 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-14 19:41 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes topology spread constraints to achieve true multi-AZ resilience without sacrificing scheduling throughput?
+
+**Model Answer:**
+
+Topology spread constraints are the primary mechanism, but naive configurations cause scheduling failures at scale. The strategy covers several layers:
+
+- **Baseline policy via admission:** Use OPA/Gatekeeper or Kyverno to inject or validate `topologySpreadConstraints` at the namespace or workload tier level, enforcing a minimum `maxSkew` (typically 1 or 2) across `topology.kubernetes.io/zone` for all Deployment and StatefulSet pods with `replicas > 1`.
+- **WhenUnsatisfiable tuning:** Use `DoNotSchedule` only for critical, latency-sensitive workloads; use `ScheduleAnyway` for batch or best-effort tiers to avoid scheduling deadlock when AZ node capacity is temporarily asymmetric.
+- **Karpenter integration:** Ensure Karpenter NodePools span all target AZs with equal weight; a topology spread constraint requesting zone balance is useless if the provisioner only targets one or two AZs. Set `consolidationPolicy: WhenEmpty` carefully to avoid Karpenter consolidating nodes into fewer AZs.
+- **Label hygiene:** Validate that all nodes carry the standard `topology.kubernetes.io/zone` label; custom AMIs or bootstrap scripts that strip well-known labels silently break zone-awareness.
+- **Scheduling throughput:** At >1,000 pods/min scheduling rates, complex spread constraints add measurable kube-scheduler latency. Mitigate by keeping constraint selectors narrow (`labelSelector` scoped to the specific workload) rather than broad cluster-wide matchers.
+- **Canary validation:** Run periodic synthetic pod scheduling tests per namespace to assert AZ distribution via `kubectl get pods -o wide` aggregation, feeding results into an SLO dashboard alongside AZ-level error budgets.
+
+---
+
+### Q: A production EKS cluster's AWS Node Termination Handler (NTH) is correctly deployed, but Spot Instance interruptions are still causing abrupt pod terminations without graceful drain. How do you diagnose and resolve this?
+
+**Model Answer:**
+
+The most common root cause is a mismatch between NTH's operating mode and the node lifecycle event path:
+
+1. **Mode mismatch:** NTH supports two modes — IMDS (instance metadata polling) and Queue (SQS-based EventBridge events). If NTH is running in IMDS mode but nodes are launched by Karpenter (which uses `aws-node-termination-handler` queue-mode events natively via its own interruption handling), NTH may not receive the event in time or at all. Confirm which mode is active via NTH's `--enable-sqs-termination` flag and pod logs.
+- **Karpenter native interruption:** Karpenter ≥0.19 has built-in Spot interruption handling via its own SQS queue; deploying NTH alongside it in queue mode causes duplicate drain attempts and race conditions. Remove NTH entirely if Karpenter is the node provisioner.
+2. **IAM permissions:** Verify the NTH DaemonSet's service account has `sqs:ReceiveMessage`, `sqs:DeleteMessage`, and `ec2:DescribeInstances` permissions; missing permissions cause silent queue-read failures.
+3. **SQS queue subscription:** Confirm the EventBridge rule targets the correct SQS queue ARN and that the queue policy allows `events.amazonaws.com` as a principal. Missing queue policy is a frequent misconfiguration.
+4. **cordon-and-drain timing:** The Spot interruption notice is 2 minutes. Validate that workload `terminationGracePeriodSeconds` + application SIGTERM handling completes within ~90 seconds to leave buffer for node drain and AWS deregistration.
+5. **PodDisruptionBudget conflicts:** A PDB with `minAvailable` equal to current replicas blocks drain indefinitely. NTH will log `eviction failed due to PDB` — resolve by either relaxing PDBs or enabling NTH's `--ignore-daemon-sets-on-node-drain` and `--force-drain-timeout` flags appropriately.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes network policy at scale across hundreds of namespaces using a GitOps-driven, auditable approach?
+
+**Model Answer:**
+
+At hundreds-of-namespaces scale, hand-crafted NetworkPolicy per team becomes unmanageable. The architecture layers policy generation, enforcement, and audit:
+
+- **Policy-as-code templates:** Store parameterized NetworkPolicy templates in a central GitOps repository (Flux or ArgoCD). Namespace onboarding automation (a Helm chart or Crossplane Composition) renders namespace-specific policies from templates, ensuring every namespace gets a default-deny-all ingress/egress baseline plus whitelisted egress to CoreDNS and AWS metadata.
+- **Cilium as the enforcement engine:** Replace the default VPC CNI network policy enforcement with Cilium in `chaining` or `flannel` mode (or full Cilium CNI) to gain L7 policy, `CiliumNetworkPolicy` CRDs for DNS-aware egress, and Hubble for real-time flow visibility — capabilities absent from vanilla VPC CNI NetworkPolicy.
+- **Policy validation in CI:** Use `netpol-validator` or `kube-policy-advisor` in pull-request pipelines to syntax-check policies and simulate traffic matrices before merge.
+- **OPA/Kyverno guardrails:** Enforce that every namespace contains at least one default-deny NetworkPolicy via a Kyverno ClusterPolicy `validate` rule; block namespace creation if the GitOps onboarding PR hasn't applied the base policy set.
+- **Audit and drift detection:** Run periodic `kubectl get networkpolicy -A` exports compared against GitOps desired state; alert on out-of-band policies or missing baselines. Hubble's flow audit log feeds a SIEM for compliance evidence.
+- **Egress FQDN control:** Use `CiliumNetworkPolicy` DNS egress rules (`toFQDNs`) for SaaS dependencies rather than IP-range-based rules, which drift as providers change IPs; this removes manual IP-list maintenance from team backlogs.
+
+---
+
+### Q: Describe a situation where EKS workloads began experiencing intermittent `context deadline exceeded` errors when calling AWS service APIs, but all AWS service health dashboards showed green. How did you identify and resolve the root cause?
+
+**Model Answer:**
+
+This scenario typically points to a data-plane or VPC-level issue invisible to AWS service health dashboards:
+
+**Investigation steps:**
+
+1. **Correlate timing:** Cross-referenced the error timestamps with node-level metrics — the spikes correlated precisely with Cluster Autoscaler scale-out events, suggesting a network path disruption during node provisioning.
+2. **NAT Gateway bottleneck:** Checked VPC NAT Gateway CloudWatch metrics (`ConnectionAttemptCount`, `PacketsDropCount`, `ErrorPortAllocation`). Found `ErrorPortAllocation` spiking during scale-out as hundreds of new pods simultaneously initiated HTTPS connections to AWS endpoints, exhausting NAT Gateway port allocation (65,535 concurrent connections per NAT Gateway per destination IP).
+3. **Resolution — VPC Endpoints:** Deployed AWS PrivateLink VPC Interface Endpoints for the affected services (S3, STS, ECR, Secrets Manager, CloudWatch). This eliminated NAT Gateway traversal for intra-AWS API calls, removed the port exhaustion vector, and reduced per-call latency by ~15ms.
+4. **Resolution — endpoint expansion:** For services without PrivateLink support, added a second NAT Gateway in each AZ and distributed pod egress across them via route table segmentation, horizontally scaling port capacity.
+5. **SDK retry tuning:** Identified that some SDKs used aggressive exponential backoff with `MaxAttempts=1`, amplifying the user-visible error rate. Increased `MaxAttempts` to 3 with jitter as a short-term mitigation while endpoints were provisioned.
+6. **Preventive monitoring:** Added CloudWatch alarms on `ErrorPortAllocation > 0` per NAT Gateway and built a runbook linking the alarm to the VPC Endpoint expansion playbook, ensuring future scale events are handled proactively.

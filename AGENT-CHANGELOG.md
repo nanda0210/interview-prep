@@ -1111,3 +1111,21 @@ _Committed & pushed: yes_
 - Describe a situation where you would choose to keep multiple Ingress controllers running in the same cluster rather than consolidating to one, and what operational guardrails are necessary.
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-14 19:42:09
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8022 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes topology spread constraints to achieve true multi-AZ resilience without sacrificing scheduling throughput?
+- A production EKS cluster's AWS Node Termination Handler (NTH) is correctly deployed, but Spot Instance interruptions are still causing abrupt pod terminations without graceful drain. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes network policy at scale across hundreds of namespaces using a GitOps-driven, auditable approach?
+- Describe a situation where EKS workloads began experiencing intermittent `context deadline exceeded` errors when calling AWS service APIs, but all AWS service health dashboards showed green. How did you identify and resolve the root cause?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (5564 chars)
+- How does Gateway API's `HTTPRoute` interact with the `Accepted` and `ResolvedRefs` condition types, and what does each tell you during troubleshooting?
+- What is the difference between deploying an Ingress controller as a `DaemonSet` versus a `Deployment`, and what Gateway API or traffic-routing behaviors change as a result?
+- A team has an HTTPRoute that worked correctly with one Gateway API implementation but fails silently after migrating to a different controller. How do you systematically diagnose and resolve implementation portability issues?
+- How do you manage and rotate TLS certificates for Gateway listeners at scale across hundreds of Gateways or namespaces, and what failure modes must you plan for?
+
+_Committed & pushed: yes_
