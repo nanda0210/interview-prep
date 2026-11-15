@@ -6433,3 +6433,62 @@ This scenario typically points to a data-plane or VPC-level issue invisible to A
 4. **Resolution — endpoint expansion:** For services without PrivateLink support, added a second NAT Gateway in each AZ and distributed pod egress across them via route table segmentation, horizontally scaling port capacity.
 5. **SDK retry tuning:** Identified that some SDKs used aggressive exponential backoff with `MaxAttempts=1`, amplifying the user-visible error rate. Increased `MaxAttempts` to 3 with jitter as a short-term mitigation while endpoints were provisioned.
 6. **Preventive monitoring:** Added CloudWatch alarms on `ErrorPortAllocation > 0` per NAT Gateway and built a runbook linking the alarm to the VPC Endpoint expansion playbook, ensuring future scale events are handled proactively.
+
+
+---
+
+## 🗓️ Added 2026-11-15 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-15 20:07 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes node-level kernel and OS parameter tuning (sysctl) safely across heterogeneous node groups?
+
+**Key points an interviewer wants to hear:**
+
+- **Safe vs. unsafe sysctls**: Kubernetes classifies sysctls as *safe* (namespaced, no cross-pod blast radius — e.g., `net.ipv4.tcp_keepalive_time`) and *unsafe* (node-scoped — e.g., `vm.max_map_count`). Safe sysctls can be set via `pod.spec.securityContext.sysctls`; unsafe ones require the kubelet `--allowed-unsafe-sysctls` flag on each node group.
+- **Node group customization**: Use EKS managed node group launch templates or Karpenter `EC2NodeClass` `userData` to inject `kubelet` configuration overrides and `sysctl` commands via a bootstrap script or AL2/Bottlerocket settings, keeping node-class-specific tuning scoped to the correct node pools.
+- **Admission control enforcement**: Deploy an OPA/Gatekeeper or Kyverno policy that whitelists only the approved sysctl keys per namespace tier (e.g., only Elasticsearch workloads in `data-plane` namespace may request `vm.max_map_count`), preventing arbitrary unsafe tuning from propagating cluster-wide.
+- **Bottlerocket preference**: For security-sensitive clusters, prefer Bottlerocket nodes; its toml-based settings API (`settings.kernel.sysctl`) lets you version-control OS parameters in a GitOps pipeline with explicit audit trails rather than raw `userData` scripts.
+- **Testing pipeline**: Gate sysctl changes behind a canary node group promotion pipeline — apply, run node conformance + application smoke tests, then roll forward — to avoid silent kernel regression across a fleet.
+- **Observability**: Emit node-level metrics (via `node_exporter` or CloudWatch Agent) and correlate sysctl tuning changes with application latency/throughput dashboards so rollback decisions are data-driven.
+
+---
+
+### Q: A production EKS cluster's AWS Application Load Balancer (ALB) suddenly starts returning `502 Bad Gateway` responses for a subset of paths during a high-traffic event. Pod health checks are passing. How do you systematically diagnose and resolve this?
+
+**Diagnosis approach:**
+
+1. **Isolate the scope**: Determine whether 502s are path-specific, target-group-specific, or AZ-specific by querying ALB access logs in S3 (field: `elb_status_code`, `target_status_code`, `target_processing_time`). A `target_status_code` of `-` means the ALB couldn't establish a TCP connection; a `502` with a valid target code means the backend sent a malformed HTTP response.
+2. **Target group registration lag**: During scale-out events, new pod IPs may be registered in the target group but not yet passing health checks — ALB continues to route to them. Verify with `aws elbv2 describe-target-health`; look for `initial` or `unhealthy` states co-incident with the event window.
+3. **Keep-alive mismatch**: A common EKS 502 root cause — the application closes the connection slightly before ALB's idle timeout. ALB sends a request on what it thinks is a live connection, gets a TCP RST, and returns 502. Fix by setting the application server's keep-alive timeout to 5–10 seconds *above* the ALB idle timeout (default 60 s).
+4. **Pod `readinessGate` / deregistration timing**: If `aws-load-balancer-controller` target-group binding is used, ensure pods have `readinessGate: target-health.elbv2.k8s.aws/v1beta1` so the pod is not marked Ready until the target is healthy, preventing premature traffic.
+5. **Response size / header limits**: Check if 502s correlate with specific large responses; ALB has a 1 MB response header limit. Review application logs for oversized headers (e.g., JWT or cookie bloat).
+6. **Resolution**: Tune server keep-alive timeouts, add readiness gates, and if traffic surge caused target registration lag, pre-warm targets or switch to IP mode with a faster health check interval (`HealthCheckIntervalSeconds: 10`, `HealthyThresholdCount: 2`).
+
+---
+
+### Q: How do you design an EKS multi-account, multi-region disaster recovery (DR) strategy that meets an RTO of 15 minutes and RPO of 5 minutes for stateful Kubernetes workloads?
+
+**Key architectural decisions:**
+
+- **Control plane**: EKS control plane is regional and AWS-managed; DR means pre-provisioning a *warm standby* cluster in the DR region (not cold, given 15-minute RTO). Use Terraform/CDK with identical cluster configurations stored in Git; apply continuously via GitOps so the standby cluster stays config-synchronized.
+- **Stateful data replication**: For EBS-backed workloads, use **AWS Backup cross-region copy** with 5-minute snapshot schedules and EBS fast snapshot restore in the DR region. For RDS/Aurora, use Global Database (sub-second replication, <1 min RPO). For self-managed stores (Kafka, Cassandra), deploy **Velero** with Restic/Kopia to S3 Cross-Region Replication for PVC-level backups.
+- **GitOps state synchronization**: Run ArgoCD or Flux in both regions watching the same Git repo. The standby cluster runs in `Suspended` sync mode; on failover, resume sync to rapidly converge application state without manual manifest re-application.
+- **Traffic failover**: Use Route 53 health checks with latency or failover routing. ALB/NLB endpoints in the DR region are pre-warmed (idle, scaled to minimum). During failover, update Route 53 weighted records (automated via Lambda triggered by CloudWatch alarm or AWS FIS experiment runbook).
+- **IAM and secrets**: IRSA OIDC providers must be pre-configured in the DR account. Secrets Manager cross-region replication ensures secrets are available without manual intervention.
+- **DR drill automation**: Implement quarterly automated failover drills using AWS Resilience Hub to validate RTO/RPO against defined thresholds, with runbook automation in SSM to execute the failover sequence, generate a report, and fail back automatically.
+- **Tradeoff**: Warm standby costs ~40–60% of production; evaluate active-active with weighted routing if cost is a concern, though it increases operational complexity for stateful workloads.
+
+---
+
+### Q: Describe a situation where Karpenter-provisioned nodes using custom AMIs began failing to join the EKS cluster intermittently, with no errors visible in EC2 instance launch logs. How did you diagnose and resolve it?
+
+**Situation**: After migrating from EKS-optimized Amazon Linux 2 AMIs to a hardened custom AMI built via EC2 Image Builder, approximately 15% of Karpenter-launched nodes failed to register with the cluster, causing pending pods and Karpenter to continuously launch replacement nodes — compounding the problem.
+
+**Diagnosis steps**:
+1. **EC2 System Log**: Retrieved instance console output via `aws ec2 get-console-output` for a failing instance. This showed `bootstrap.sh` completing successfully but `kubelet` failing with `x509: certificate signed by unknown authority` — indicating the node couldn't validate the EKS API server certificate.
+2. **CA bundle mismatch**: The custom AMI's `/etc/eks/ca.crt` was baked in at build time from a cluster that had since rotated its certificate authority. Karpenter injects the cluster CA via `userData`, but the bootstrap script was using a pre-baked CA path instead of the injected one.
+3. **UserData inspection**: Decoded the base64 `userData` from a Karpenter-launched instance (via EC2 `describe-instances`) and confirmed the `--b64-cluster-ca` argument was correctly injected but the bootstrap script's pre-baked CA was taking precedence due to a conditional in the custom AMI's `bootstrap.sh` override.
+4. **IMDSv2 investigation**: Separately confirmed that IMDSv2 was enforced (`HttpTokens: required`) and the bootstrap script was updated to use it — ruling out metadata service issues.
+
+**Resolution**:

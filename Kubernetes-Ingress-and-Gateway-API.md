@@ -2127,3 +2127,97 @@ Start by comparing the `SupportedFeatures` list in the new GatewayClass's confor
 ### Q: How do you manage and rotate TLS certificates for Gateway listeners at scale across hundreds of Gateways or namespaces, and what failure modes must you plan for?
 
 At scale, use cert-manager with `Certificate` resources or a Vault PKI secrets engine integrated via the cert-manager Vault issuer, with `Gateway` or `Listener` annotations/`SecretObjectReference` pointing to auto-renewed Secrets. cert-manager's `gateway` experimental integration can watch `Gateway` TLS configuration and automatically create `Certificate` objects, reducing manual toil. Critical failure modes include: certificate renewal racing with Secret propagation (the controller may serve the old cert briefly during rotation, so ensure `renewBefore` gives adequate lead time), Secret deletion while a Gateway listener still references it (causing TLS handshake failures with no visible 5xx in access logs—only in TLS error counters), and cross-namespace Secret references requiring `ReferenceGrant` objects that must themselves be lifecycle-managed. Use `kubectl get certificaterequests` and cert-manager's `ReadyToExpire` metric to build alerting well before expiry. For hundreds of namespaces, enforce a policy via OPA/Kyverno that every Gateway TLS listener must reference a cert-manager-managed Secret, preventing manually managed certificates that expire without warning. Test rotation in staging by artificially shortening `duration` and observing zero-downtime renewal end-to-end.
+
+
+---
+
+## 🗓️ Added 2026-11-15 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-15 20:08 -->
+
+### Q: How does Gateway API's `HTTPRoute` handle header-based and query-parameter-based routing, and what precedence rules apply when both are present in the same rule alongside path matches?
+
+**Model Answer:**
+
+`HTTPRoute` rules support three match types within a single `matches` entry: `path`, `headers`, and `queryParams`. All specified match criteria within one `matches` object are **AND-ed** together — a request must satisfy every condition to match that rule. Multiple `matches` entries within the same rule are **OR-ed**.
+
+**Precedence when multiple rules could match:**
+- Gateway API specifies that the most specific match wins, evaluated in this order: path match type/length first (Exact > longest PathPrefix > RegularExpression), then header match count, then query parameter match count.
+- If two rules are equally specific, the one appearing **earlier** in the `rules` list takes priority (implementation MUST respect this order per the spec).
+
+**Common production pitfalls:**
+- Teams assume query-param matches add specificity over a sibling rule with no query-param match, but a longer path prefix in the sibling will still win.
+- Header matches on `Host` are redundant with the route's `hostnames` field and can produce unexpected behavior with some implementations.
+- `RegularExpression` path matches are intentionally ranked lowest among path match types to encourage explicit routing.
+
+**Debugging tip:** Use the `RouteParentStatus` conditions and implementation-specific logs to confirm which rule is actually selected; Gateway API does not surface "rule selected" in a standard status field.
+
+---
+
+### Q: What are the differences between Gateway API's `TCPRoute`, `TLSRoute`, and `UDPRoute` resources, and when would you choose each over an `HTTPRoute` with TLS termination?
+
+**Model Answer:**
+
+| Resource | Layer | TLS handling | Typical use case |
+|---|---|---|---|
+| `TCPRoute` | L4 | None (raw TCP) | Databases, LDAP, proprietary protocols |
+| `TLSRoute` | L4 | Passthrough (SNI-based) | mTLS end-to-end, opaque TLS streams |
+| `UDPRoute` | L4 | None | DNS, QUIC (before HTTP/3 abstraction), game servers |
+| `HTTPRoute` + termination | L7 | Terminated at Gateway | Web traffic needing header inspection or rewriting |
+
+**Key design trade-offs:**
+- `TLSRoute` lets the Gateway use SNI to route without decrypting, preserving end-to-end encryption but losing the ability to inspect or modify HTTP headers.
+- `TCPRoute` is purely connection-based; the Gateway can't distinguish between tenants sharing the same port unless each gets a dedicated listener port.
+- `UDPRoute` support is the least mature across implementations and often requires explicit experimental feature gates.
+- Choose `HTTPRoute` with TLS termination whenever you need WAF, header routing, or observability at the HTTP level; choose `TLSRoute` when regulatory or security requirements prohibit termination at the edge.
+
+**Operational note:** Mixing `TCPRoute`/`TLSRoute` with `HTTPRoute` on the same Gateway requires separate listeners with distinct `protocol` values (`TCP`, `TLS`, `HTTPS`) — a common misconfiguration is reusing the same port with different protocol values, which the controller will reject via listener conflict conditions.
+
+---
+
+### Q: A team reports that an `HTTPRoute` with a `RequestMirror` filter is causing unexpected load on a shadow backend in production. How does request mirroring work in Gateway API, and what operational guardrails should you put in place?
+
+**Model Answer:**
+
+`RequestMirror` is a Gateway API filter that sends a **copy** of each matched request to a secondary backend while still returning the response from the **primary** backend to the client. The mirror is fire-and-forget: the primary response is never delayed waiting for the mirror backend, and mirror responses are silently discarded.
+
+**Why unexpected load occurs:**
+- Mirroring is a 1:1 copy by default — 100% of matching traffic hits the shadow backend at full request rate.
+- If the `HTTPRoute` rule has no path or header match constraints, every request to that hostname is mirrored.
+- Some implementations buffer the full request body before mirroring, which amplifies memory pressure under large payloads.
+
+**Operational guardrails:**
+1. **Scope the mirror rule tightly** — use header or path matches to limit mirroring to a subset of traffic (e.g., a sampled `X-Mirror: true` header added upstream).
+2. **Right-size the shadow backend** — it must handle the same RPS as production for the matched scope; use HPA with a conservative buffer.
+3. **Monitor shadow backend independently** — set up separate dashboards/alerts so shadow saturation doesn't get conflated with production incidents.
+4. **Set resource quotas** on the shadow namespace to prevent runaway cost.
+5. **Time-box mirror configurations** — treat `RequestMirror` filters as temporary (use GitOps TTL annotations or automated PR expiry).
+
+**Interviewer signal:** Candidates should recognize that `RequestMirror` percentage-based sampling (a proposed extension in some implementations) is not in the core spec and requires vendor-specific annotation or `ExtensionRef`.
+
+---
+
+### Q: How would you approach migrating a large fleet of Kubernetes `Ingress` resources to Gateway API `HTTPRoute` resources incrementally, and what rollback strategy would you implement?
+
+**Model Answer:**
+
+**Migration strategy — phased approach:**
+
+1. **Inventory and classify** — Script a scan of all `Ingress` resources to categorize by: annotations used (rewrite, auth, rate-limit), TLS config, path types, and namespace ownership. Annotations are the primary risk surface since they have no direct Gateway API equivalent and require policy attachment objects.
+
+2. **Deploy Gateway API CRDs and a compatible controller** in parallel with the existing Ingress controller (many controllers support both simultaneously, e.g., Envoy Gateway, Istio).
+
+3. **Translate in shadow mode** — Use tooling like `ingress2gateway` (sig-network project) to generate draft `Gateway` + `HTTPRoute` YAML. Review each output for annotation-to-policy mapping gaps.
+
+4. **Canary per-namespace** — Stand up a new `Gateway` with a test hostname (e.g., `team-a-gw.internal`), migrate one team's routes, validate with synthetic traffic, then cut DNS over with a low TTL.
+
+5. **Parallel-run with traffic splitting** — Where supported, use weighted DNS (Route53/Cloud DNS) to send a percentage of real traffic to the new Gateway while keeping the Ingress controller live.
+
+6. **Decommission** — Once all namespaces are migrated and stable for a soak period, remove old `Ingress` objects and eventually the Ingress controller.
+
+**Rollback strategy:**
+- Keep original `Ingress` objects in Git (don't delete until full cutover confirmation).
+- Maintain the Ingress controller running throughout migration; rollback = revert DNS record, zero-downtime because old controller never stopped serving.
+- Use feature flags in the GitOps pipeline to toggle between Ingress and HTTPRoute manifests per namespace.
+
+**Key risk:** Custom annotations that map to `ExtensionRef` or vendor `Policy` objects have no guaranteed equivalent — these require manual re-implementation and are the most common blockers in real migrations.

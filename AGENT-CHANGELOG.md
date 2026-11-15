@@ -1129,3 +1129,21 @@ _Committed & pushed: yes_
 - How do you manage and rotate TLS certificates for Gateway listeners at scale across hundreds of Gateways or namespaces, and what failure modes must you plan for?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-15 20:08:42
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7844 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes node-level kernel and OS parameter tuning (sysctl) safely across heterogeneous node groups?
+- A production EKS cluster's AWS Application Load Balancer (ALB) suddenly starts returning `502 Bad Gateway` responses for a subset of paths during a high-traffic event. Pod health checks are passing. How do you systematically diagnose and resolve this?
+- How do you design an EKS multi-account, multi-region disaster recovery (DR) strategy that meets an RTO of 15 minutes and RPO of 5 minutes for stateful Kubernetes workloads?
+- Describe a situation where Karpenter-provisioned nodes using custom AMIs began failing to join the EKS cluster intermittently, with no errors visible in EC2 instance launch logs. How did you diagnose and resolve it?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (7334 chars)
+- How does Gateway API's `HTTPRoute` handle header-based and query-parameter-based routing, and what precedence rules apply when both are present in the same rule alongside path matches?
+- What are the differences between Gateway API's `TCPRoute`, `TLSRoute`, and `UDPRoute` resources, and when would you choose each over an `HTTPRoute` with TLS termination?
+- A team reports that an `HTTPRoute` with a `RequestMirror` filter is causing unexpected load on a shadow backend in production. How does request mirroring work in Gateway API, and what operational guardrails should you put in place?
+- How would you approach migrating a large fleet of Kubernetes `Ingress` resources to Gateway API `HTTPRoute` resources incrementally, and what rollback strategy would you implement?
+
+_Committed & pushed: yes_
