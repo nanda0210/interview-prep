@@ -2221,3 +2221,32 @@ At scale, use cert-manager with `Certificate` resources or a Vault PKI secrets e
 - Use feature flags in the GitOps pipeline to toggle between Ingress and HTTPRoute manifests per namespace.
 
 **Key risk:** Custom annotations that map to `ExtensionRef` or vendor `Policy` objects have no guaranteed equivalent — these require manual re-implementation and are the most common blockers in real migrations.
+
+
+---
+
+## 🗓️ Added 2026-11-16 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-16 23:39 -->
+
+### Q: How does Gateway API's `HTTPRoute` `URLRewrite` filter interact with `PathPrefix` matches, and what subtle rewriting bugs arise when strip-prefix logic is applied to nested paths?
+
+When a `URLRewrite` filter uses `replacePrefixMatch`, the controller strips the matched prefix and substitutes the configured replacement, so a request to `/api/v1/users` with a match prefix `/api/v1` and replacement `/` becomes `/users`. The most common bug is a double-slash: if the replacement ends with `/` and the remaining path starts with `/`, many implementations produce `//users`, which backends may reject or misroute. A second pitfall is that `replacePrefixMatch` is only valid when the rule's path match type is `PathPrefix`; pairing it with `Exact` or `RegularExpression` is a spec violation that some controllers silently ignore and others reject entirely. Ordering matters too: if multiple rules share overlapping prefixes, the most-specific match wins, but after rewriting, the backend receives a path that may no longer be meaningful without careful coordination. Always validate rewritten paths end-to-end with synthetic traffic, check for double-slash normalization in your controller's release notes, and add integration tests that assert the exact `X-Forwarded-Prefix` or similar header the backend receives.
+
+---
+
+### Q: What is the difference between `GatewayClass` status conditions `Accepted` and `SupportedVersion`, and how do you operationally monitor GatewayClass health in a production cluster?
+
+`Accepted` indicates the controller has claimed the `GatewayClass` and considers its configuration valid; it becomes `False` if the `controllerName` doesn't match any running controller or if `parametersRef` points to an invalid or inaccessible object. `SupportedVersion` (added in Gateway API v1.1) signals whether the installed CRD bundle version is compatible with the controller's supported API version range, allowing controllers to flag version skew before it causes silent misbehavior. Operationally, you should alert on `Accepted=False` and `SupportedVersion=False` using a Prometheus rule against the `gatewayapi_gatewayclass_status` metric exposed by most controllers, or via a `kubectl` watch in your CI pipeline. During upgrades, check `SupportedVersion` before and after bumping CRDs to catch cases where the controller binary lags behind the installed CRD schema. Document a runbook that maps each condition combination to a remediation path, since a `GatewayClass` that is `Accepted=True` but `SupportedVersion=False` may appear healthy while silently ignoring new fields.
+
+---
+
+### Q: A platform team needs to expose WebSocket and long-lived HTTP/2 streaming APIs through the same Gateway listener as standard REST APIs. What Gateway API or Ingress configuration concerns apply, and what failure modes are unique to persistent connections?
+
+WebSocket and HTTP/2 server-push or streaming connections are persistent, so the Gateway or Ingress controller must not close idle connections before the application timeout; configure `proxy_read_timeout` (NGINX) or the equivalent backend protocol timeout to exceed the application's longest expected stream lifetime. For WebSocket, the upgrade handshake (`Connection: Upgrade`, `Upgrade: websocket`) must be preserved; many controllers handle this automatically for HTTP/1.1 but require explicit annotation or policy in Gateway API (e.g., `BackendProtocol` hints). HTTP/2 streaming through a Gateway that terminates TLS and re-originates HTTP/1.1 to the backend silently degrades streaming to half-duplex; ensure the Gateway supports h2 or gRPC backend protocols if full-duplex is required. Load balancing is a concern: a least-connections or IP-hash strategy is preferable over round-robin for long-lived connections to avoid backend imbalance as new short-lived requests continuously route to a single pod. Pod disruptions during rolling deployments must drain persistent connections gracefully using `preStop` hooks and `terminationGracePeriodSeconds` tuned to your longest expected stream duration; Ingress-level connection draining alone is insufficient because the controller may drain its side while the backend pod disappears mid-stream.
+
+---
+
+### Q: How do you evaluate and choose between multiple actively maintained Gateway API implementations (e.g., Envoy Gateway, Istio, Cilium, Contour) for a new cluster, and what technical criteria are most decisive?
+
+Start with **conformance coverage**: run the official Gateway API conformance test suite against each candidate and compare which profiles (`HTTPRoute`, `TLSRoute`, `GRPCRoute`, extended features) each passes; a controller that fails core conformance tests will cause subtle production bugs as you use more API surface. Evaluate **data-plane architecture**—sidecar-less (Cilium eBPF, Envoy Gateway standalone) versus service-mesh-integrated (Istio)—against your latency budget, because a full sidecar mesh adds per-hop overhead that matters for high-throughput services. Check **policy extension model**: does the implementation use `ExtensionRef` filters, proprietary CRDs, or proper `PolicyAttachment`? Proprietary extensions create lock-in that negates the portability benefit of Gateway API. Assess **operational maturity**: multi-tenancy support (RBAC on `Gateway` objects), observability out of the box (Prometheus metrics, tracing integration), and upgrade safety (CRD migration tooling). Consider **organizational fit**: if your platform team already operates Istio for mTLS mesh policies, adding a second data plane (e.g., Envoy Gateway) doubles operational complexity without clear benefit. Finally, run a **load test** against your P99 latency and connections-per-second targets because data-plane performance varies significantly between eBPF-native and userspace proxy approaches at high concurrency.

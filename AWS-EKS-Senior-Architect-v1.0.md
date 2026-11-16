@@ -6492,3 +6492,88 @@ This scenario typically points to a data-plane or VPC-level issue invisible to A
 4. **IMDSv2 investigation**: Separately confirmed that IMDSv2 was enforced (`HttpTokens: required`) and the bootstrap script was updated to use it — ruling out metadata service issues.
 
 **Resolution**:
+
+
+---
+
+## 🗓️ Added 2026-11-16 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-16 23:38 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes pod identity migration from IRSA to EKS Pod Identity — covering rollout, compatibility, and security posture improvements?
+
+**Model Answer:**
+
+EKS Pod Identity (introduced in late 2023) simplifies the IRSA model by removing the OIDC federation dependency and instead using an in-cluster agent (`eks-pod-identity-agent` DaemonSet) that vends credentials via a localhost endpoint, similar to EC2 instance metadata.
+
+**Migration strategy:**
+
+- **Phased rollout:** Install the `eks-pod-identity-agent` add-on first; it is non-disruptive and coexists with IRSA. Migrate non-critical workloads first, then critical ones, keeping IRSA trust policies intact until fully cut over.
+- **IAM association model:** Replace OIDC trust policies with `aws eks create-pod-identity-association`, scoping to `namespace/serviceaccount` pairs — this removes the per-cluster OIDC thumbprint rotation burden.
+- **Security posture improvements:** Pod Identity tokens are audience-scoped to `pods.eks.amazonaws.com`, have a 1-hour TTL with automatic rotation by the agent, and are never mounted as projected volumes, reducing exposure from compromised node filesystems.
+- **Compatibility gates:** Pod Identity requires EKS 1.24+ and the agent add-on; it does not yet support Windows nodes or Fargate (as of 2024), so those workloads must retain IRSA. Enforce via OPA/Kyverno policies that gate Pod Identity use to supported node types.
+- **Drift prevention:** Use GitOps to manage `PodIdentityAssociation` resources via the AWS Controllers for Kubernetes (ACK) or Terraform, ensuring IAM associations are version-controlled alongside workload manifests.
+- **Observability:** CloudTrail records `AssumeRoleForPodIdentity` calls; alert on unexpected role assumption or spikes indicating misconfigured service accounts.
+
+The key interview point is articulating *why* Pod Identity improves on IRSA (no OIDC thumbprint management, simpler trust policies, shorter-lived credentials) while being clear on current feature gaps.
+
+---
+
+### Q: A production EKS cluster running Fargate workloads is experiencing unpredictable pod evictions under moderate load. Describe how you would diagnose and resolve this.
+
+**Model Answer:**
+
+Fargate pods are evicted when they exceed the vCPU/memory limits of their allocated Fargate profile size, since each pod runs on a dedicated micro-VM with no node-level buffer. The root cause is almost always resource over-commitment or profile misconfiguration.
+
+**Diagnosis steps:**
+
+1. **Examine eviction events:** `kubectl describe pod <pod>` — Fargate evictions show `OOMKilled` or `Evicted` with reason `The node was low on resource: memory` referencing the underlying Fargate node, not a shared node.
+2. **Check actual consumption vs. requests:** Fargate allocates the pod's vCPU/memory based on the *sum of all container requests + 256 MiB overhead*; if requests are under-set, the allocated Fargate size is too small for actual usage. Use CloudWatch Container Insights or `kubectl top pod` to compare.
+3. **Fargate profile sizing tiers:** Fargate silently rounds up to the nearest valid vCPU/memory combination (e.g., 0.25 vCPU/0.5 GB → 0.5 vCPU/1 GB). If the actual workload exceeds even the rounded-up tier, eviction occurs.
+4. **Init container resource accounting:** Init container requests count toward the pod's allocation ceiling; oversized init containers can inflate the allocated tier but undersized ones can trigger eviction if the runtime spike exceeds limits.
+
+**Resolution:**
+
+- Tune container `requests` to accurately reflect P95 consumption; Fargate uses requests (not limits) for sizing.
+- Use VPA in recommendation mode to gather right-sizing data, then bake correct requests into manifests.
+- For bursty workloads, set `requests` closer to peak usage since Fargate has no node-level headroom to absorb spikes.
+- If the workload is inherently bursty beyond Fargate's sizing model, evaluate migrating to managed node groups with Karpenter, which provides more flexible bin-packing.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes control plane audit log–driven threat detection — integrating with AWS security services at scale across hundreds of clusters?
+
+**Model Answer:**
+
+EKS control plane audit logs, when enabled via the EKS logging configuration, stream to CloudWatch Logs and capture every API server request with user identity, resource, verb, and response code — forming the backbone of Kubernetes threat detection.
+
+**Architecture:**
+
+- **Enable audit logs cluster-wide:** Use Terraform/CDK to enforce `enabledTypes: [audit, authenticator]` on every cluster at provisioning time; enforce via AWS Config custom rule or SCP that flags clusters with audit logging disabled.
+- **Route to centralized SIEM:** Use CloudWatch Logs subscription filters to stream audit logs to a central Kinesis Data Firehose, then to S3 + OpenSearch or a third-party SIEM (Splunk, Datadog). Normalize across clusters using cluster name as a log field.
+- **Amazon GuardDuty EKS Protection:** Enable GuardDuty EKS Audit Log Monitoring, which provides managed threat intelligence over audit logs (e.g., detecting `EKS:AnonymousAccessGranted`, `Kubernetes:SuccessfulAnonymousAccess`, privilege escalation patterns) without custom rule authoring.
+- **Custom detection rules:** Layer custom CloudWatch Metric Filters or SIEM rules for: `exec` into privileged pods, `create` of `ClusterRoleBinding` to `cluster-admin`, mass `secret get` operations, and service account token creation outside CI/CD pipelines.
+- **Response automation:** Use EventBridge rules triggered by GuardDuty findings to invoke Lambda functions that quarantine compromised service accounts (patch RBAC, revoke IRSA associations) or cordon affected nodes.
+- **Retention and compliance:** Enforce 90-day hot retention in CloudWatch + 1-year cold in S3 Glacier via lifecycle policies; tag logs with cluster owner for compliance reporting.
+
+The key differentiator is combining GuardDuty's managed ML-based detection with custom rules for environment-specific threat patterns, with automated remediation loops rather than purely alerting.
+
+---
+
+### Q: Describe a situation where an EKS cluster's AWS EBS CSI Driver–managed volumes began experiencing "volume attachment timeout" failures during rapid scale-out events, and how you resolved it.
+
+**Model Answer:**
+
+**Situation:** During a Black Friday scale-out event, EBS CSI Driver pods were logging `WaitForAttach: attachment timeout` errors. New pods requiring EBS volumes remained in `ContainerCreating` for 5–10 minutes before eventually succeeding or failing, causing SLA breaches.
+
+**Diagnosis:**
+
+1. **EC2 API rate limiting:** Checked CloudTrail for `AttachVolume` and `DescribeVolumes` calls; found `RequestLimitExceeded` errors — the EBS CSI controller was issuing hundreds of attach calls simultaneously as Karpenter launched a large node batch.
+2. **Controller replica count:** The EBS CSI controller was running as a single replica (`Deployment` with `replicas: 1`), serializing all attachment operations through one goroutine pool.
+3. **Node availability zone mismatch:** Some pods were scheduled to nodes in a different AZ than their EBS volume's AZ (volumes are AZ-scoped), causing attachment to fail entirely and triggering fallback retries that consumed API quota.
+4. **`VolumeAttachLimit` per node:** Some instance types (e.g., `m5.large`) have a default limit of 25 EBS volumes; nodes were approaching this limit, causing queuing at the driver level.
+
+**Resolution:**
+
+- **Scale EBS CSI controller:** Increased controller replicas to 3 with pod anti-affinity across AZs to increase parallelism and provide HA.
+- **AZ-pinned scheduling:** Enforced `volumeBindingMode: WaitForFirstConsumer` on StorageClasses (already set, but a legacy StatefulSet was using an old `Immediate`-binding class)

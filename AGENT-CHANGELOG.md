@@ -1147,3 +1147,21 @@ _Committed & pushed: yes_
 - How would you approach migrating a large fleet of Kubernetes `Ingress` resources to Gateway API `HTTPRoute` resources incrementally, and what rollback strategy would you implement?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-16 23:39:27
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8064 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes pod identity migration from IRSA to EKS Pod Identity — covering rollout, compatibility, and security posture improvements?
+- A production EKS cluster running Fargate workloads is experiencing unpredictable pod evictions under moderate load. Describe how you would diagnose and resolve this.
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes control plane audit log–driven threat detection — integrating with AWS security services at scale across hundreds of clusters?
+- Describe a situation where an EKS cluster's AWS EBS CSI Driver–managed volumes began experiencing "volume attachment timeout" failures during rapid scale-out events, and how you resolved it.
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (5948 chars)
+- How does Gateway API's `HTTPRoute` `URLRewrite` filter interact with `PathPrefix` matches, and what subtle rewriting bugs arise when strip-prefix logic is applied to nested paths?
+- What is the difference between `GatewayClass` status conditions `Accepted` and `SupportedVersion`, and how do you operationally monitor GatewayClass health in a production cluster?
+- A platform team needs to expose WebSocket and long-lived HTTP/2 streaming APIs through the same Gateway listener as standard REST APIs. What Gateway API or Ingress configuration concerns apply, and what failure modes are unique to persistent connections?
+- How do you evaluate and choose between multiple actively maintained Gateway API implementations (e.g., Envoy Gateway, Istio, Cilium, Contour) for a new cluster, and what technical criteria are most decisive?
+
+_Committed & pushed: yes_
