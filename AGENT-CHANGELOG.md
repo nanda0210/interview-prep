@@ -1165,3 +1165,21 @@ _Committed & pushed: yes_
 - How do you evaluate and choose between multiple actively maintained Gateway API implementations (e.g., Envoy Gateway, Istio, Cilium, Contour) for a new cluster, and what technical criteria are most decisive?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-17 22:47:13
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8098 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes pod networking performance — ensuring consistent, low-latency, high-throughput pod-to-pod communication at scale using AWS VPC CNI and related tooling?
+- A production EKS cluster's AWS Secrets Manager and SSM Parameter Store integration via the Secrets Store CSI Driver is functioning correctly, but you observe that secret rotation events are not being reflected in running pods — secrets remain stale until pod restart. How do you diagnose and resolve this?
+- Describe a situation where an EKS cluster's Kubernetes control plane began logging high rates of `watch chan buffer full` and `watch event chan is full` warnings, correlating with delayed reconciliation in controllers. Walk through your diagnosis and remediation.
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes cluster upgrade safety — ensuring zero application downtime and zero SLO breaches across control plane and data plane upgrades for hundreds of services?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (5693 chars)
+- How does Gateway API's `HTTPRoute` `ResponseHeaderModifier` filter differ from `RequestHeaderModifier`, and what security or correctness pitfalls arise when using both on the same route?
+- What happens to in-flight requests when an `HTTPRoute` rule is updated or deleted, and how do Gateway API implementations typically handle this at the data-plane level?
+- A team has configured an `HTTPRoute` with both a `RequestMirror` and a `URLRewrite` filter on the same rule. Describe the order of filter execution and what the mirrored request looks like.
+- How do you handle the scenario where a Gateway listener is configured for HTTP (port 80) and you want to enforce an HTTP→HTTPS redirect for all routes without requiring each application team to configure it themselves?
+
+_Committed & pushed: yes_

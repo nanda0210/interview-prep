@@ -6577,3 +6577,60 @@ The key differentiator is combining GuardDuty's managed ML-based detection with 
 
 - **Scale EBS CSI controller:** Increased controller replicas to 3 with pod anti-affinity across AZs to increase parallelism and provide HA.
 - **AZ-pinned scheduling:** Enforced `volumeBindingMode: WaitForFirstConsumer` on StorageClasses (already set, but a legacy StatefulSet was using an old `Immediate`-binding class)
+
+
+---
+
+## 🗓️ Added 2026-11-17 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-17 22:46 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes pod networking performance — ensuring consistent, low-latency, high-throughput pod-to-pod communication at scale using AWS VPC CNI and related tooling?
+
+**Key points an interviewer wants to hear:**
+
+- **CNI tuning:** Enable `ENABLE_PREFIX_DELEGATION=true` and `WARM_PREFIX_TARGET` to reduce ENI thrashing and improve IP allocation speed; set `MINIMUM_IP_TARGET` and `WARM_IP_TARGET` per node class based on workload density profiling.
+- **Instance selection:** Choose network-optimized instance families (e.g., `c6gn`, `m6i`, `r6i`) with sufficient network bandwidth and ENI limits; use Karpenter `NodePool` requirements to enforce these constraints and avoid "noisy neighbor" ENI contention.
+- **Pod bandwidth QoS:** Annotate pods with `kubernetes.io/ingress-bandwidth` and `kubernetes.io/egress-bandwidth` via the bandwidth CNI plugin chained to the VPC CNI, enforcing per-pod traffic shaping for latency-sensitive workloads.
+- **Topology awareness:** Combine `topologySpreadConstraints` with `podAffinity` to co-locate communicating pods within the same AZ, eliminating cross-AZ latency and cost; use `Service` `trafficDistribution: PreferClose` (Kubernetes 1.31+) or topology-aware routing.
+- **Observability:** Deploy VPC Flow Logs with per-ENI granularity, instrument pods with eBPF-based tooling (e.g., Cilium Hubble or Pixie) for real-time pod-to-pod latency histograms, and alert on p99 RTT thresholds via CloudWatch or Prometheus.
+- **Policy enforcement:** Use OPA/Gatekeeper or Kyverno to mandate bandwidth annotations on latency-sensitive namespaces and block scheduling on instance types below a minimum network baseline, enforced at admission time.
+
+---
+
+### Q: A production EKS cluster's AWS Secrets Manager and SSM Parameter Store integration via the Secrets Store CSI Driver is functioning correctly, but you observe that secret rotation events are not being reflected in running pods — secrets remain stale until pod restart. How do you diagnose and resolve this?
+
+**Key points an interviewer wants to hear:**
+
+- **Root cause — rotation poll interval:** The Secrets Store CSI Driver's `--rotation-poll-interval` defaults to 2 minutes but can be misconfigured or disabled; verify the `secrets-store-csi-driver` DaemonSet args and confirm the value matches your rotation frequency requirement.
+- **SecretProviderClass sync:** Confirm `syncSecret.enabled=true` in the Helm chart values; without this, Kubernetes `Secret` objects synced from the provider are not updated on rotation, so pods consuming the `Secret` via `envFrom` or `env.valueFrom` see the old value.
+- **Environment variable limitation:** Pods consuming secrets as environment variables (`env:`) never see rotated values without a restart — this is a Kubernetes-level constraint. The fix is to mount secrets as files and implement application-side inotify/file-watch logic (e.g., using Viper, AWS SDK's auto-refresh, or a sidecar watcher) to reload on change.
+- **Mounted volume refresh:** With file-based mounts, the CSI Driver does update the volume on each rotation poll cycle; verify by `exec`-ing into a pod and `cat`-ing the mounted file after a rotation event — if stale, check the DaemonSet logs for provider errors (e.g., IRSA permission denied on `GetSecretValue`).
+- **Rollout strategy:** For secrets that cannot be reloaded in-process, deploy a controller such as Reloader (Stakater) that watches the synced Kubernetes `Secret` and triggers rolling restarts of affected `Deployment`/`StatefulSet` resources on change.
+- **Alerting:** Create a CloudWatch alarm or Prometheus alert that fires when the age of the mounted secret value (tracked via a custom metric or log scrape) exceeds `rotation_period + 2 × poll_interval`, providing an SLO-aligned freshness guarantee.
+
+---
+
+### Q: Describe a situation where an EKS cluster's Kubernetes control plane began logging high rates of `watch chan buffer full` and `watch event chan is full` warnings, correlating with delayed reconciliation in controllers. Walk through your diagnosis and remediation.
+
+**Key points an interviewer wants to hear:**
+
+- **Symptom pattern:** Controllers (e.g., ArgoCD application-controller, Flux, custom operators) reported reconciliation loops taking 10–30× longer than baseline; `kubectl get events` showed stale state, and `kube-apiserver` logs contained `watch chan buffer full` for specific resource types.
+- **Root cause — watch buffer overflow:** The API server's per-watcher channel buffer (default 100 events) was overflowing because a controller was processing watch events too slowly relative to the event production rate — typically caused by a CPU-starved controller pod or a burst of resource churn (e.g., mass Karpenter node churn or a GitOps sync storm).
+- **Diagnosis steps:** Correlated `apiserver_watch_events_dropped_total` metric spikes with controller pod CPU throttling metrics (`container_cpu_throttled_seconds_total`); confirmed the specific resource type (e.g., `pods`, `nodes`) via the `resource` label on the dropped events metric.
+- **Short-term remediation:** Increased controller pod CPU `requests`/`limits` to eliminate throttling; tuned ArgoCD `--status-processors` and `--operation-processors` to reduce per-event processing time; added `priorityClassName: system-cluster-critical` to critical controllers.
+- **Structural fix:** Partitioned high-churn resource watches using `labelSelector`-scoped informers to reduce per-controller event volume; enabled `APIServerCaching` and ensured controllers used the informer cache (not direct API calls) for reads, reducing watch re-establishment load.
+- **Prevention:** Added `apiserver_watch_events_dropped_total > 0` as a P2 alert; established controller pod resource budgets enforced via LimitRange and reviewed during capacity planning, with load testing of watch throughput before deploying new operators.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes cluster upgrade safety — ensuring zero application downtime and zero SLO breaches across control plane and data plane upgrades for hundreds of services?
+
+**Key points an interviewer wants to hear:**
+
+- **Upgrade sequencing:** Always upgrade the EKS control plane first, then managed node groups or Karpenter node pools; enforce a maximum version skew of N-2 between the control plane and nodes per the Kubernetes support policy, tracked via a compliance check in CI.
+- **Pre-upgrade validation gate:** Run `kube-no-trouble` (kubent), `pluto`, and AWS EKS upgrade insights API to enumerate deprecated/removed API usage across all deployed manifests, Helm charts, and CRDs; block the upgrade pipeline if any findings exist above a severity threshold.
+- **PodDisruptionBudget enforcement:** Mandate PDBs for all Deployments and StatefulSets with `minAvailable ≥ 1` or `maxUnavailable: 0` via an OPA/Gatekeeper policy; validate PDB coverage in the pre-upgrade gate by diffing all workload resources against PDB selectors.
+- **Data plane rolling strategy:** For managed node groups, use `updateConfig.maxUnavailable: 1` and validate readiness probes are correctly configured to prevent traffic routing to unready pods during node drain; for Karpenter, pin node pool AMI version using `amiSelectorTerms` with a tested AMI ID and roll forward by expiring existing nodes with `kubectl annotate node … karpenter.sh/do-not-disrupt=false`.
+- **Canary upgrade pattern:** Upgrade a non-production cluster (staging) 48 hours ahead of production; run a full synthetic traffic suite and monitor SLI dashboards; require explicit sign-off from service owners via a change management gate before the production pipeline proceeds.
+- **Rollback strategy:** EKS control plane downgrades are not supported; mitigate by maintaining a parallel "blue" node group on the previous version until the upgraded "green" group passes a 24-hour burn-in window; keep Velero backups of all C
