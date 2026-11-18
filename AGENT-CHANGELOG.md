@@ -1183,3 +1183,21 @@ _Committed & pushed: yes_
 - How do you handle the scenario where a Gateway listener is configured for HTTP (port 80) and you want to enforce an HTTP→HTTPS redirect for all routes without requiring each application team to configure it themselves?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-18 22:29:12
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8586 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes custom resource definition (CRD) lifecycle safety — ensuring CRD schema evolution, version migration, and removal do not break running operators or dependent workloads at scale?
+- A production EKS cluster's AWS Fargate-scheduled pods are intermittently failing to start with `Pending` status and the event message `no Fargate profile matched`, even though the pods appear to satisfy existing profile selectors. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes observability pipeline resilience — ensuring metrics, logs, and traces remain available during node failures, control plane disruptions, and high-cardinality load spikes without data loss or alert blindness?
+- Describe a situation where an EKS cluster's AWS Load Balancer Controller–managed ALB began routing a disproportionate share of traffic to newly launched pods immediately after a deployment rollout, causing error spikes before those pods were fully warmed up. How did you diagnose and fix it?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (7557 chars)
+- How do you implement sticky sessions (session affinity) at the Gateway/Ingress layer, and what are the trade-offs between cookie-based and IP-hash approaches in a Kubernetes context?
+- What is the difference between an Ingress `defaultBackend` and an `HTTPRoute` rule with no match conditions, and what are the security implications of each?
+- A cluster operator notices that HTTPRoute status shows `Accepted: True` but end-users are receiving 503 errors for all routes on a specific Gateway. Walk through your systematic debugging process.
+- How do you handle the operational complexity of managing HTTPRoute precedence and conflict resolution when hundreds of teams deploy routes to a shared Gateway, and what governance mechanisms prevent route conflicts at scale?
+
+_Committed & pushed: yes_

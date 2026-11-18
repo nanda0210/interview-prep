@@ -2279,3 +2279,66 @@ The Gateway API specification defines a deterministic filter execution order wit
 ### Q: How do you handle the scenario where a Gateway listener is configured for HTTP (port 80) and you want to enforce an HTTP→HTTPS redirect for all routes without requiring each application team to configure it themselves?
 
 The correct platform-level approach is to configure a dedicated HTTP listener on port 80 with an `HTTPRoute` owned by the platform team that uses a `RequestRedirect` filter with `statusCode: 301` and `scheme: https`, matching all paths (`/`) with a `PathPrefix` match. Because this route is owned by the platform namespace and attached to the shared Gateway, application teams do not need to manage it. The `AllowedRoutes` on the HTTP listener should be restricted to the platform namespace only (`namespaces.from: Same` or a labeled selector), preventing application teams from accidentally attaching HTTP routes that bypass the redirect. A common mistake is attaching application `HTTPRoutes` directly to the HTTP listener instead of only the HTTPS listener, which silently serves unencrypted traffic. On the HTTPS listener, `AllowedRoutes` can be opened to tenant namespaces with appropriate `ReferenceGrant` controls. This pattern centralizes the redirect policy, satisfies security audits without per-team compliance burden, and is compatible with HSTS headers added at the HTTPS listener level via a `ResponseHeaderModifier` on a catch-all platform route.
+
+
+---
+
+## 🗓️ Added 2026-11-18 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-18 22:29 -->
+
+### Q: How do you implement sticky sessions (session affinity) at the Gateway/Ingress layer, and what are the trade-offs between cookie-based and IP-hash approaches in a Kubernetes context?
+
+**Model Answer:**
+
+Sticky sessions can be implemented at two layers: the kube-proxy Service level (only supports `ClientIP` affinity, which breaks behind NAT/proxies) or at the Ingress/Gateway controller level where more sophisticated strategies are available.
+
+- **Cookie-based affinity** (e.g., NGINX `nginx.ingress.kubernetes.io/affinity: cookie`) inserts a cookie encoding the upstream pod; it survives load balancer IP changes, works through NAT, and is the preferred approach for HTTP workloads.
+- **IP-hash** is unreliable in Kubernetes because clients share egress IPs through corporate proxies or cloud NATs, leading to severe hot spots; avoid it for public-facing traffic.
+- **Gateway API** does not natively specify session affinity in core `HTTPRoute`; implementations expose it via vendor `Policy` CRDs or `BackendLBPolicy` extensions — meaning portability is currently limited.
+- **Trade-offs:** Sticky sessions undermine Kubernetes' horizontal scaling benefits, complicate rolling deployments (old pods must drain stickied sessions), and can mask stateful design problems; prefer externalized session stores (Redis, Memcached) over gateway-level stickiness wherever possible.
+- **Operational concern:** Always set a `maxAge` or `maxUnavailable` drain window so that pod termination doesn't hard-cut active sessions; pair with `preStop` hooks and `terminationGracePeriodSeconds` tuned to your session lifetime.
+
+---
+
+### Q: What is the difference between an Ingress `defaultBackend` and an `HTTPRoute` rule with no match conditions, and what are the security implications of each?
+
+**Model Answer:**
+
+An Ingress `defaultBackend` is a cluster-level (or Ingress-resource-level) catch-all: any request that matches no other Ingress rule is forwarded to this backend, regardless of the hostname or path. An `HTTPRoute` rule with no match conditions (empty `matches` list) catches all requests within the scope of that route's `parentRef` listeners, but its reach is bounded by Gateway `AllowedRoutes` namespace policy and hostname binding.
+
+- **Scope difference:** `defaultBackend` is global to the Ingress class; an empty-match `HTTPRoute` only applies to the specific Gateway listener(s) it attaches to, making it inherently scoped and safer in multi-tenant clusters.
+- **Precedence:** In `HTTPRoute`, a rule with no matches has the lowest precedence; more-specific rules in the same or higher-priority routes win. Ingress `defaultBackend` similarly loses to any matching rule but has no defined tie-breaking when multiple Ingresses omit a path match.
+- **Security risk:** A misconfigured `defaultBackend` can inadvertently expose internal services to all unrouted traffic including host-header attacks. With `HTTPRoute`, an empty-match rule in a team-owned namespace cannot attract traffic from other namespaces unless the Gateway explicitly permits it via `AllowedRoutes`.
+- **Best practice:** Explicitly configure a 404-returning default backend rather than routing catch-all traffic to a real service; in Gateway API, deploy a dedicated `HTTPRoute` pointing to a minimal "default-404" backend and document it as a platform-owned route.
+
+---
+
+### Q: A cluster operator notices that HTTPRoute status shows `Accepted: True` but end-users are receiving 503 errors for all routes on a specific Gateway. Walk through your systematic debugging process.
+
+**Model Answer:**
+
+`Accepted: True` on an `HTTPRoute` means the control plane accepted the configuration, but it says nothing about data-plane health — the two planes can diverge. My debugging process:
+
+1. **Check `ResolvedRefs` condition** on the HTTPRoute: a `False` status here indicates the backend Service or Secret referenced doesn't exist or is in a namespace not covered by a `ReferenceGrant` — the route is accepted but unresolvable.
+2. **Inspect Gateway conditions:** Verify `Programmed: True` on the Gateway itself; `Programmed: False` means the data-plane (Envoy, NGINX, etc.) failed to apply configuration, often due to invalid TLS certs or listener conflicts.
+3. **Check backend pod readiness:** 503s commonly come from Services with zero ready endpoints. Run `kubectl get endpoints <service>` and verify pods pass readiness probes — a misconfigured readiness probe after a rollout is a frequent culprit.
+4. **Examine controller logs:** The Gateway controller (e.g., `envoy-gateway-controller`) logs translation errors that don't always surface in CRD status; look for xDS snapshot errors or rejected Envoy configs.
+5. **Validate data-plane config directly:** For Envoy-based implementations, `kubectl exec` into the proxy and use `curl localhost:19000/config_dump` or `envoy admin` to inspect cluster membership and health check results.
+6. **Network policy and DNS:** Confirm the Gateway pod can reach backend pods on the correct port — a `NetworkPolicy` blocking ingress from the gateway namespace is a common silent failure.
+7. **Probe the Gateway pod directly:** Bypass DNS and cloud load balancer by port-forwarding to the Gateway pod and issuing a test request with the correct `Host` header; this isolates whether the issue is in the cloud LB, DNS, or the proxy itself.
+
+---
+
+### Q: How do you handle the operational complexity of managing HTTPRoute precedence and conflict resolution when hundreds of teams deploy routes to a shared Gateway, and what governance mechanisms prevent route conflicts at scale?
+
+**Model Answer:**
+
+At scale, route conflicts manifest as one team's HTTPRoute silently shadowing another's because of overlapping hostname+path combinations; Gateway API's conflict model defines a winner (oldest resource by creation timestamp for equal-specificity matches) but does not prevent the conflict from occurring.
+
+- **Admission webhooks:** Deploy a validating webhook that checks incoming HTTPRoute hostnames and path prefixes against an in-cluster registry (or by listing existing routes) and rejects submissions that would create conflicts; this shifts conflict detection left to deploy time.
+- **Hostname ownership model:** Assign hostnames to teams via a `HostnameClaim` CRD or annotation convention, enforced by the webhook; no team can claim a hostname already registered to another team — mirrors the `ReferenceGrant` philosophy of explicit cross-namespace trust.
+- **Namespace-per-team with Gateway `AllowedRoutes` selectors:** Restrict each Gateway listener to routes from namespaces with a specific label (e.g., `team: payments`); this prevents teams from accidentally or maliciously routing traffic outside their domain.
+- **Policy as code / GitOps review:** Require HTTPRoute changes to pass through a GitOps pipeline with an OPA/Kyverno policy gate that runs conflict-detection logic as a CI step before merge; treat route configuration as infrastructure code subject to code review.
+- **Observability signals:** Instrument the Gateway controller to emit a metric or alert when it sets a `Conflicted: True` condition on any listener or route; proactively page the platform team rather than waiting for user reports.
+- **Route status monitoring:** Build a periodic reconciliation job that scans all HTTPRoute statuses for non-`Accepted` or non-`ResolvedRefs` conditions and pages owning teams automatically, closing the feedback loop without manual audit.

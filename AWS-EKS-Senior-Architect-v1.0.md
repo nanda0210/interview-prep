@@ -6634,3 +6634,70 @@ The key differentiator is combining GuardDuty's managed ML-based detection with 
 - **Data plane rolling strategy:** For managed node groups, use `updateConfig.maxUnavailable: 1` and validate readiness probes are correctly configured to prevent traffic routing to unready pods during node drain; for Karpenter, pin node pool AMI version using `amiSelectorTerms` with a tested AMI ID and roll forward by expiring existing nodes with `kubectl annotate node … karpenter.sh/do-not-disrupt=false`.
 - **Canary upgrade pattern:** Upgrade a non-production cluster (staging) 48 hours ahead of production; run a full synthetic traffic suite and monitor SLI dashboards; require explicit sign-off from service owners via a change management gate before the production pipeline proceeds.
 - **Rollback strategy:** EKS control plane downgrades are not supported; mitigate by maintaining a parallel "blue" node group on the previous version until the upgraded "green" group passes a 24-hour burn-in window; keep Velero backups of all C
+
+
+---
+
+## 🗓️ Added 2026-11-18 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-18 22:28 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes custom resource definition (CRD) lifecycle safety — ensuring CRD schema evolution, version migration, and removal do not break running operators or dependent workloads at scale?
+
+**Key points an interviewer wants to hear:**
+
+- **Structural schema versioning**: Always define CRDs with `spec.versions[]` supporting multiple served versions simultaneously; use `x-kubernetes-preserve-unknown-fields: false` with strict OpenAPI v3 validation per version to catch breaking schema changes at admission time, not at runtime.
+- **Conversion webhooks for multi-version coexistence**: Deploy a conversion webhook (using controller-runtime's conversion scaffolding) whenever storage version changes, ensuring in-flight objects stored under the old version are transparently upgraded before the old version is removed from `served: true`.
+- **Migration pipeline before deprecation**: Before marking a version `served: false`, run a storage migration job (`kubectl get <crd> --all-namespaces -o json | kubectl apply -f -`) to re-persist all objects under the new storage version; validate via `etcdctl` object count parity and operator controller reconcile-loop metrics.
+- **CRD upgrade GitOps gating**: Treat CRD manifests as a separate, ordered GitOps layer (e.g., ArgoCD App-of-Apps with sync waves) deployed before operator Deployments; use `argocd.argoproj.io/sync-wave: "-10"` to guarantee CRDs are established before any dependent resource is applied.
+- **Operator compatibility matrix enforcement**: Maintain a compatibility table (CRD version × operator version) in the platform wiki; enforce via OPA/Gatekeeper policies that reject operator image tags not certified against the current CRD storage version.
+- **Removal safety gate**: Never remove a CRD until all `status.storedVersions` entries for the deprecated version are cleared, confirmed by a CI pipeline check against the EKS API server's CRD status endpoint, preventing orphaned etcd data.
+- **Canary validation**: Promote CRD schema changes through dev → staging → prod clusters with a mandatory 24-hour soak period in staging, monitoring controller reconcile error rates and webhook rejection counts in CloudWatch before promoting.
+
+---
+
+### Q: A production EKS cluster's AWS Fargate-scheduled pods are intermittently failing to start with `Pending` status and the event message `no Fargate profile matched`, even though the pods appear to satisfy existing profile selectors. How do you diagnose and resolve this?
+
+**Diagnosis steps:**
+
+1. **Profile selector audit**: Retrieve all Fargate profiles via `aws eks list-fargate-profiles` and `describe-fargate-profile`; compare each profile's `selectors` (namespace + label map) against the pod's metadata exactly — Fargate matching is AND-logic on labels and exact namespace, with no wildcard support.
+2. **Label mutation timing**: Check if a mutating admission webhook (e.g., Istio, OPA, or a custom injector) is adding or stripping labels *after* the Fargate scheduler evaluates the pod spec; Fargate profile matching occurs at pod creation on the kube-scheduler path, so post-creation mutations do not retroactively re-match.
+3. **Profile quota and regional limits**: Verify the account has not hit the default limit of 10 Fargate profiles per cluster per region; `aws eks describe-fargate-profile` on recently created profiles may reveal `DEGRADED` status indicating a backend provisioning issue resolvable by deleting and recreating the profile.
+4. **Namespace existence race**: Confirm the target namespace exists *before* pod creation — Fargate profiles reference namespaces by string, and pods created in a namespace that doesn't yet have a matching profile evaluated at scheduling time will permanently stay Pending without re-evaluation.
+
+**Resolution:**
+
+- Align pod labels and namespace precisely to a profile selector; add a dedicated profile if a new label set is needed.
+- If a webhook is stripping labels, add the pod's namespace to the webhook's `namespaceSelector` exclusion list or reorder webhook invocation.
+- For quota issues, consolidate profiles using broader label selectors or request a service quota increase via AWS Support.
+- Add a CI validation step that dry-runs pod specs against profile selectors before deployment, using a custom script or OPA rego rule.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes observability pipeline resilience — ensuring metrics, logs, and traces remain available during node failures, control plane disruptions, and high-cardinality load spikes without data loss or alert blindness?
+
+**Key points an interviewer wants to hear:**
+
+- **Daemonset-based collection with local buffering**: Deploy log collectors (Fluent Bit) and metrics agents (CloudWatch Agent or ADOT Collector) as DaemonSets with host-path or emptyDir buffers and retry/backpressure configured; this decouples collection availability from control plane health and absorbs downstream sink unavailability.
+- **ADOT Collector StatefulSet for traces/metrics aggregation**: Run the OpenTelemetry Collector in a StatefulSet with persistent storage for the file exporter as a crash buffer; use Kubernetes headless service for peer-to-peer load balancing between collector replicas to handle high-cardinality spikes without a single-node bottleneck.
+- **PodDisruptionBudgets and topology spread for collectors**: Enforce `minAvailable: 1` PDBs on aggregator-tier collectors and topology spread constraints across AZs so node group rolling updates never simultaneously evict all aggregator pods.
+- **High-cardinality protection at the pipeline**: Configure Prometheus recording rules and metric relabeling (`metric_relabel_configs`) to drop or aggregate high-cardinality labels (e.g., pod UID, request ID) before remote write; use Amazon Managed Prometheus (AMP) alerting rules for `prometheus_remote_storage_failed_samples_total` to detect pipeline backpressure early.
+- **Control plane log decoupling**: EKS control plane logs (API server, scheduler, controller-manager) are shipped by AWS directly to CloudWatch Logs, independent of data-plane health; ensure CloudWatch Log metric filters and alarms are in place so control plane visibility survives all data-plane failures.
+- **Alert-on-absence strategy**: Instrument a heartbeat metric (a constant-value metric emitted every 30s by each collector pod) and alert in AMP/CloudWatch when that metric is absent for >2 scrape intervals, providing meta-observability of the pipeline itself.
+- **Multi-region sink failover**: Configure Fluent Bit's output with a primary CloudWatch/S3 destination and a secondary S3 cross-region bucket as a fallback, preventing log loss during a regional service disruption.
+
+---
+
+### Q: Describe a situation where an EKS cluster's AWS Load Balancer Controller–managed ALB began routing a disproportionate share of traffic to newly launched pods immediately after a deployment rollout, causing error spikes before those pods were fully warmed up. How did you diagnose and fix it?
+
+**Situation:**
+A Blue/Green deployment via Argo Rollouts on EKS replaced 100% of pods within 90 seconds. Within the first 2 minutes of cutover, ALB target group metrics showed new pod targets receiving full production traffic while `5xx` error rates spiked 15%, then self-resolved. CloudWatch Container Insights showed CPU and JVM heap spiking on new pods during that window.
+
+**Diagnosis:**
+- ALB target group deregistration delay was 300s, but *registration* had no corresponding warm-up delay; new pod IPs were marked `healthy` by the ALB health check (a shallow `/ping` returning 200 immediately) before the JVM application cache and connection pool were initialized.
+- Argo Rollouts `analysis` step passed because it measured error rate over a 60s window that started *after* the spike subsided.
+- `kubectl describe targetgroupbinding` confirmed the Load Balancer Controller registered new pod IPs the moment they passed `readinessProbe`, which was also a shallow HTTP check.
+
+**Fix:**
+1. **Deepened readiness probe**: Changed the readiness probe endpoint to `/readyz` which internally validates cache warm-up and DB connection pool availability, delaying pod readiness by ~45s until the application was genuinely ready.
+2. **Slow-start duration on target group**: Added `alb.ingress.kubernetes.io/target-group-attributes: slow_start.duration_seconds=60`
