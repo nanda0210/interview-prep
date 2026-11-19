@@ -2342,3 +2342,60 @@ At scale, route conflicts manifest as one team's HTTPRoute silently shadowing an
 - **Policy as code / GitOps review:** Require HTTPRoute changes to pass through a GitOps pipeline with an OPA/Kyverno policy gate that runs conflict-detection logic as a CI step before merge; treat route configuration as infrastructure code subject to code review.
 - **Observability signals:** Instrument the Gateway controller to emit a metric or alert when it sets a `Conflicted: True` condition on any listener or route; proactively page the platform team rather than waiting for user reports.
 - **Route status monitoring:** Build a periodic reconciliation job that scans all HTTPRoute statuses for non-`Accepted` or non-`ResolvedRefs` conditions and pages owning teams automatically, closing the feedback loop without manual audit.
+
+
+---
+
+## 🗓️ Added 2026-11-19 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-19 22:34 -->
+
+### Q: How does Gateway API's `HTTPRoute` interact with Kubernetes `NetworkPolicy`, and what traffic flow assumptions can break when you introduce a Gateway controller into the data path?
+
+**Key points an interviewer wants to hear:**
+
+- `NetworkPolicy` operates at L3/L4 (pod IP/port), while `HTTPRoute` operates at L7; they are complementary but independently enforced by different components.
+- When a Gateway controller proxies traffic, the source IP seen by backend pods is **the Gateway pod's IP**, not the original client IP. `NetworkPolicy` selectors based on `podSelector` or `namespaceSelector` must therefore allow ingress **from the Gateway controller pods**, not from arbitrary clients.
+- Teams often break `NetworkPolicy` after introducing a Gateway by forgetting to add an egress rule from the Gateway pod namespace to backend pod namespaces, or by relying on a `namespaceSelector` that no longer matches.
+- `ReferenceGrant` controls the Gateway API permission model across namespaces, but it does not replace `NetworkPolicy`—both must be explicitly configured for defense-in-depth.
+- Transparent client IP preservation (via PROXY protocol or `externalTrafficPolicy: Local`) changes the source IP reaching backends, which can re-break `NetworkPolicy` rules and requires re-validation after any infrastructure change.
+- Best practice: document and test `NetworkPolicy` rules alongside `HTTPRoute` and `ReferenceGrant` changes in the same PR/change set, and use network-policy–aware linting (e.g., `netpol-analyzer`) in CI.
+
+---
+
+### Q: What is the difference between a `Gateway`'s `externalTrafficPolicy: Local` and `Cluster` setting on its backing `Service`, and how does this choice affect source IP preservation, load distribution, and health check behavior?
+
+**Key points an interviewer wants to hear:**
+
+- `externalTrafficPolicy: Cluster` (default) SNATs traffic to a node IP before forwarding to a pod, ensuring even distribution across all nodes but losing the original client IP. `Local` skips SNAT, preserving client IP, but only forwards to pods **on the same node** as the receiving node, causing uneven distribution if Gateway pods are not uniformly spread.
+- With `Local`, nodes without a Gateway pod will fail external health checks from the cloud load balancer, effectively removing them from rotation—this is desired behavior but requires understanding.
+- Uneven pod distribution (e.g., during a rollout or if a node is tainted) under `Local` can cause hotspots or traffic drops if the last Gateway pod on a node is evicted.
+- For accurate access logging, WAF rules, and rate limiting by real IP, `Local` (or PROXY protocol) is usually mandatory; `Cluster` makes those features unreliable.
+- `PodAntiAffinity` or `topologySpreadConstraints` on the Gateway Deployment/DaemonSet should be tuned to match the chosen policy—spreading pods evenly across nodes is critical under `Local`.
+- Some Gateway API implementations expose this as a first-class setting via `GatewayClass` `parametersRef`; always verify the default and codify it in your platform baseline.
+
+---
+
+### Q: A team reports intermittent 503 errors on routes behind a Gateway that only appear under high concurrency. Profiling shows the Gateway data plane is healthy. How do you systematically diagnose and resolve this?
+
+**A structured diagnostic approach:**
+
+1. **Check backend readiness vs. actual capacity**: 503s often mean the Gateway has exhausted its connection pool to backends. Inspect the Gateway's upstream connection limits (e.g., Envoy's `max_connections`, `max_pending_requests` circuit-breaker settings) against observed concurrency.
+2. **Correlate with endpoint churn**: If backends are being added/removed (e.g., HPA scaling), the Gateway may briefly route to endpoints that are not yet ready or just terminated. Verify `readinessProbe` configuration and `terminationGracePeriodSeconds`.
+3. **Inspect `BackendTLSPolicy` / `BackendLBPolicy` circuit-breaker thresholds**: Some Gateway API implementations apply aggressive outlier detection that ejects healthy pods under transient errors, reducing effective pool size and amplifying 503 rate.
+4. **Examine retry budget interaction**: If the HTTPRoute or an attached policy enables retries, high concurrency causes retry amplification (retry storms), exhausting the connection pool faster.
+5. **Check Gateway data-plane worker/thread saturation**: Even if the pod is "healthy," a single Gateway pod with insufficient CPU or worker threads can queue requests and time them out upstream.
+6. **Mitigation options**: Tune circuit-breaker thresholds, increase Gateway replica count, add `podDisruptionBudget` for backend pods, implement load-shedding policies, and use `HTTPRoute` `timeouts` to fail fast rather than queue.
+
+---
+
+### Q: How do you reason about and enforce the boundary between "infrastructure-owned" Gateway resources and "application-owned" HTTPRoute resources using RBAC, and what gaps exist in the current Gateway API security model that you should compensate for?
+
+**Key points an interviewer wants to hear:**
+
+- Gateway API's ownership model maps naturally to Kubernetes RBAC: cluster-admins or a platform team own `GatewayClass` and `Gateway`; application teams own `HTTPRoute`, `GRPCRoute`, etc. in their own namespaces. Create separate `ClusterRole`/`Role` bindings that grant only namespace-scoped route resource verbs to app teams.
+- `ReferenceGrant` is namespace-scoped and must be managed by the **target** namespace owner, preventing app teams from silently accessing Services in other namespaces—but platform teams must audit `ReferenceGrant` creation carefully.
+- **Current gap 1**: There is no native field-level admission on HTTPRoute to prevent app teams from setting policy-conflicting fields (e.g., arbitrary header names). Compensate with `ValidatingAdmissionWebhook` or OPA/Kyverno policies that enforce organizational standards.
+- **Current gap 2**: Gateway API does not natively prevent an app team from claiming a hostname already reserved for another team (hostname squatting). The controller resolves conflicts via precedence rules (oldest resource wins), but there is no proactive reservation mechanism—compensate with a webhook that checks hostname uniqueness across the cluster at admission time.
+- **Current gap 3**: Policy attachment (e.g., `AuthorizationPolicy`, `RateLimitPolicy`) from platform teams can be silently overridden or rendered ineffective if app teams attach conflicting same-level policies. Use `PolicyStatus` conditions and alerting to detect unresolved policy conflicts quickly.
+- Document the ownership contract in your platform developer portal and enforce it through CI linting of manifests before they reach the cluster.

@@ -1201,3 +1201,21 @@ _Committed & pushed: yes_
 - How do you handle the operational complexity of managing HTTPRoute precedence and conflict resolution when hundreds of teams deploy routes to a shared Gateway, and what governance mechanisms prevent route conflicts at scale?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-19 22:34:36
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8095 chars)
+- A production EKS cluster's AWS EFS-backed PersistentVolumes are experiencing severe I/O latency spikes — read/write operations that normally complete in <5 ms are now taking 2–10 seconds — but the EFS filesystem appears healthy in the console. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes multi-tenancy isolation — ensuring strong boundaries between teams sharing a cluster without requiring separate clusters per tenant?
+- Describe a situation where an EKS cluster's Karpenter-managed nodes began accumulating a large number of "Not Ready" nodes that were neither terminated nor replaced, causing scheduling failures for new pods. How did you diagnose and remediate?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes readiness and liveness probe correctness — ensuring probes are neither too aggressive (causing cascading restarts) nor too lenient (masking unhealthy pods)?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6834 chars)
+- How does Gateway API's `HTTPRoute` interact with Kubernetes `NetworkPolicy`, and what traffic flow assumptions can break when you introduce a Gateway controller into the data path?
+- What is the difference between a `Gateway`'s `externalTrafficPolicy: Local` and `Cluster` setting on its backing `Service`, and how does this choice affect source IP preservation, load distribution, and health check behavior?
+- A team reports intermittent 503 errors on routes behind a Gateway that only appear under high concurrency. Profiling shows the Gateway data plane is healthy. How do you systematically diagnose and resolve this?
+- How do you reason about and enforce the boundary between "infrastructure-owned" Gateway resources and "application-owned" HTTPRoute resources using RBAC, and what gaps exist in the current Gateway API security model that you should compensate for?
+
+_Committed & pushed: yes_

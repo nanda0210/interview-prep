@@ -6701,3 +6701,63 @@ A Blue/Green deployment via Argo Rollouts on EKS replaced 100% of pods within 90
 **Fix:**
 1. **Deepened readiness probe**: Changed the readiness probe endpoint to `/readyz` which internally validates cache warm-up and DB connection pool availability, delaying pod readiness by ~45s until the application was genuinely ready.
 2. **Slow-start duration on target group**: Added `alb.ingress.kubernetes.io/target-group-attributes: slow_start.duration_seconds=60`
+
+
+---
+
+## 🗓️ Added 2026-11-19 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-19 22:33 -->
+
+### Q: A production EKS cluster's AWS EFS-backed PersistentVolumes are experiencing severe I/O latency spikes — read/write operations that normally complete in <5 ms are now taking 2–10 seconds — but the EFS filesystem appears healthy in the console. How do you diagnose and resolve this?
+
+**Key diagnostic steps and resolution:**
+
+- **EFS throughput mode mismatch:** The first suspect is Bursting Throughput mode exhaustion. EFS bursting uses a credit bucket; when credits are depleted, throughput drops to the baseline (100 KB/s per GB stored). Check the `BurstCreditBalance` CloudWatch metric — if it's near zero, migrate to Elastic or Provisioned Throughput mode.
+- **NFS client mount options:** Inspect the mount options used by the EFS CSI Driver (typically `nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2`). Suboptimal `rsize`/`wsize` or `soft` mounts can cause latency and silent retries.
+- **EFS CSI Driver and node-level NFS daemon:** Check CSI driver pod logs for mount errors; also inspect `dmesg` and `/proc/mounts` on affected nodes. Stale NFS mounts after node recycling (Karpenter or managed node group refresh) can hold open file handles causing locking delays.
+- **Connection scaling:** EFS scales throughput based on the number of connected clients and mount targets per AZ. Ensure each AZ has its own mount target, and workloads mount via the AZ-local DNS endpoint (using `mountTargetDnsName` per zone) to avoid cross-AZ NFS traffic.
+- **Access Point concurrency:** If multiple pods are sharing a single EFS Access Point writing to the same directory tree, inode-level locking contention can cause latency. Distribute workloads across separate Access Points or separate directory paths.
+- **Resolution path:** Switch to Elastic Throughput, enforce AZ-local mount targets, validate CSI mount options, and add CloudWatch alarms on `PercentIOLimit` (>90% signals saturation). For write-heavy workloads, reconsider EFS vs. EBS or Amazon FSx for Lustre depending on the access pattern.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes multi-tenancy isolation — ensuring strong boundaries between teams sharing a cluster without requiring separate clusters per tenant?
+
+**Architecture and enforcement layers:**
+
+- **Namespace-per-tenant as the baseline unit:** Assign each tenant a dedicated namespace with ResourceQuotas, LimitRanges, and NetworkPolicies (default-deny ingress/egress with explicit allow rules). Use namespace labels to drive policy selectors consistently.
+- **RBAC scoped to namespace:** Create tenant-specific Roles and RoleBindings rather than ClusterRoles. Use IAM identity federation (SSO → IAM → `aws-auth` ConfigMap or EKS Access Entries) to map team identities to Kubernetes groups, preventing privilege escalation across namespaces.
+- **Admission control enforcement:** Deploy OPA/Gatekeeper or Kyverno with policies that (a) prevent pods from running as root or disabling seccomp, (b) enforce image registry allowlists per namespace, and (c) block hostPath, hostNetwork, and hostPID usage.
+- **Network isolation:** Combine Kubernetes NetworkPolicy (Calico or VPC CNI network policy) with Security Group per Pod (SGP) to enforce L3/L4 isolation. For strict tenants, SGP provides AWS-level firewall rules independent of CNI policy enforcement gaps.
+- **Node isolation for noisy-neighbor sensitive tenants:** Use dedicated node groups or Karpenter NodePools with taints/tolerations to schedule sensitive tenants onto dedicated nodes, preventing CPU/memory noisy-neighbor issues without full cluster separation.
+- **Cost and audit separation:** Apply consistent `team=<tenant>` labels; use Kubecost or AWS Cost Allocation Tags to generate per-tenant chargeback. Enable EKS control plane audit logs filtered by namespace for per-tenant compliance evidence.
+- **Trade-off acknowledgment:** Single-cluster multi-tenancy reduces operational overhead and cost but increases blast radius risk. For tenants with strict regulatory separation (PCI vs. non-PCI), separate clusters remain appropriate even with this stack.
+
+---
+
+### Q: Describe a situation where an EKS cluster's Karpenter-managed nodes began accumulating a large number of "Not Ready" nodes that were neither terminated nor replaced, causing scheduling failures for new pods. How did you diagnose and remediate?
+
+**Situation and diagnosis:**
+
+- **Symptom pattern:** Nodes appeared in `kubectl get nodes` as `NotReady` but Karpenter's controller was not terminating them, and new pod scheduling was failing because the scheduler attempted to place pods on the `NotReady` nodes before timing out.
+- **Root cause investigation:** Inspected Karpenter controller logs and found the nodes were in a `deprovisioning` state but blocked because the `node.kubernetes.io/not-ready:NoExecute` taint eviction was waiting on pods with no PodDisruptionBudget (PDB) but with `terminationGracePeriodSeconds: 3600` — an overly long grace period set by an earlier team to handle batch job draining.
+- **Secondary contributor:** The Karpenter `terminationGracePeriod` on the NodePool was not configured, so Karpenter waited indefinitely for pods to drain before terminating the EC2 instance. Meanwhile the EC2 health check had already failed the instances, but Karpenter's reconcile loop held the node object.
+- **Remediation steps:**
+  - Set a `terminationGracePeriod` on the Karpenter NodePool resource (e.g., `10m`) to cap the maximum drain wait time.
+  - Identified the batch pods with excessive grace periods and reduced them to 300s, coordinating with the batch team to verify job checkpointing handled the shorter window.
+  - Added a `kubectl drain --force --ignore-daemonsets --delete-emptydir-data` safety runbook for manual recovery of stuck nodes.
+  - Enabled CloudWatch alarms on Karpenter's `karpenter_nodes_not_ready` metric to alert within 5 minutes when stuck nodes accumulate.
+- **Preventive design:** Enforce maximum `terminationGracePeriodSeconds` via a Kyverno policy (e.g., cap at 600s for non-batch namespaces), and require all long-running batch jobs to use a dedicated NodePool with explicit drain budgets.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes readiness and liveness probe correctness — ensuring probes are neither too aggressive (causing cascading restarts) nor too lenient (masking unhealthy pods)?
+
+**Design principles and enforcement:**
+
+- **Probe semantic separation:** Liveness probes should only detect deadlock or unrecoverable states — not transient load. Readiness probes control traffic inclusion and should reflect the pod's ability to serve requests. Startup probes should absorb slow initialization, removing the pressure to inflate `initialDelaySeconds` on liveness probes.
+- **Conservative default thresholds:** Establish org-wide baseline defaults via a Kyverno or OPA mutating webhook: `initialDelaySeconds: 10`, `periodSeconds: 15`, `failureThreshold: 3`, `timeoutSeconds: 5`. Prevent `failureThreshold: 1` on liveness (triggers restart after a single slow response).
+- **Admission policy enforcement:** Use a validating webhook to reject configurations where `liveness.failureThreshold * liveness.periodSeconds < 30s` (too aggressive), or where no readiness probe is defined for Services with an `Endpoints` selector (masking unhealthy pods silently).
+- **Cascading restart prevention:** Track `kube_pod_container_status_restarts_total` via Prometheus/CloudWatch Container Insights. Alert when restart rate exceeds 2/hour per pod. Correlate restarts with probe type using audit logs and events (`kubectl describe pod`).
+- **Probe endpoint design guidance:** Require application teams to implement a `/healthz` liveness endpoint that returns 200 only if the process is not deadlocked (no dependency checks), and a `/readyz` readiness endpoint that validates downstream dependency connectivity (DB, cache) before returning 200. Document this contract in
