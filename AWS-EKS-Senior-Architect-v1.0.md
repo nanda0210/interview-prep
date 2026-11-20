@@ -6761,3 +6761,67 @@ A Blue/Green deployment via Argo Rollouts on EKS replaced 100% of pods within 90
 - **Admission policy enforcement:** Use a validating webhook to reject configurations where `liveness.failureThreshold * liveness.periodSeconds < 30s` (too aggressive), or where no readiness probe is defined for Services with an `Endpoints` selector (masking unhealthy pods silently).
 - **Cascading restart prevention:** Track `kube_pod_container_status_restarts_total` via Prometheus/CloudWatch Container Insights. Alert when restart rate exceeds 2/hour per pod. Correlate restarts with probe type using audit logs and events (`kubectl describe pod`).
 - **Probe endpoint design guidance:** Require application teams to implement a `/healthz` liveness endpoint that returns 200 only if the process is not deadlocked (no dependency checks), and a `/readyz` readiness endpoint that validates downstream dependency connectivity (DB, cache) before returning 200. Document this contract in
+
+
+---
+
+## 🗓️ Added 2026-11-20 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-20 22:06 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes admission control webhook (MutatingAdmissionWebhook / ValidatingAdmissionWebhook) reliability — ensuring webhooks never become a single point of failure for the control plane?
+
+**Key points an interviewer wants to hear:**
+
+- Deploy all admission webhooks with **`failurePolicy: Fail`** only for security-critical gates (e.g., image signing); use **`failurePolicy: Ignore`** for non-critical mutation webhooks, with compensating controls elsewhere.
+- Run webhook pods with **PodDisruptionBudgets**, anti-affinity across AZs, and a minimum of 3 replicas; use Karpenter node pools with `topologySpreadConstraints` to prevent co-location.
+- Set aggressive but realistic **`timeoutSeconds`** (≤5 s) on every webhook; slow webhooks that exceed the timeout can stall all API server requests in that resource scope.
+- Scope `namespaceSelector` and `objectSelector` as tightly as possible — exclude `kube-system` and infrastructure namespaces from non-essential webhooks to protect bootstrapping paths during outages.
+- Implement **canary webhook rollout**: deploy a new webhook version in shadow mode (log-only MutatingWebhook returning unmodified objects) alongside the existing one, validate behavior in staging before promoting.
+- Alert on `apiserver_admission_webhook_rejection_count` and `apiserver_admission_step_admission_duration_seconds_bucket` histograms in CloudWatch/Prometheus; set SLO burn-rate alerts on webhook latency p99 > 2 s.
+- Periodically inject synthetic API calls via a dedicated test namespace to smoke-test webhook availability as a black-box synthetic monitor.
+- Document and rehearse the **emergency bypass runbook**: temporarily patching `webhookClientConfig` to point to a no-op stub endpoint in a production incident, with compensating audit-log review afterward.
+
+---
+
+### Q: A production EKS cluster's Kubernetes scheduler is reporting high `schedule_attempts_total{result="unschedulable"}` rates, yet `kubectl describe pod` shows only "0/N nodes are available" with no specific constraint details. Walk me through your full diagnosis and resolution process.
+
+**Key points an interviewer wants to hear:**
+
+- Increase scheduler verbosity temporarily (`--v=4`) via EKS managed add-on configuration override, or instrument the **Scheduler Extender / plugin framework logs** to surface per-node predicate failure reasons in structured form.
+- Run `kubectl get events --field-selector reason=FailedScheduling -A` and correlate timestamps with HPA/Karpenter scale-out events to determine whether this is a **transient burst gap** or a structural deficit.
+- Inspect `kubectl describe nodes` for resource pressure: check not just CPU/memory **allocatable vs. requested** but also **extended resources** (e.g., `nvidia.com/gpu`, `vpc.amazonaws.com/pod-eni`) and ephemeral storage limits.
+- Cross-check **taints and tolerations** exhaustively — a recently applied node taint (e.g., during a node group AMI rollout) that lacks a corresponding workload toleration is a common silent culprit.
+- Verify **PodTopologySpread and podAffinity constraints** are satisfiable given current node topology; constraints written assuming ≥3 AZs fail silently if a node group is zone-skewed.
+- Use the **Kubernetes Scheduling Framework's `nominatedNodeName`** field and the preemption pipeline: confirm whether high-priority pods are preempting correctly or whether `PodDisruptionBudget` blocks are preventing preemption from completing.
+- For Karpenter-managed clusters, check that the `NodePool` / `EC2NodeClass` combination can satisfy the pending pod's resource and scheduling constraints; mismatched `instanceCategory` or missing instance family in the allowlist is a frequent root cause.
+- Resolution typically involves one or more of: relaxing topology spread `whenUnsatisfiable` to `ScheduleAnyway`, expanding Karpenter instance family allowlists, correcting taint/toleration mismatches, or adding capacity in the constrained AZ.
+
+---
+
+### Q: Describe a situation where an EKS cluster's service mesh (AWS App Mesh or Istio on EKS) sidecar injection began causing widespread pod scheduling failures and OOMKilled events cluster-wide during a high-traffic event. How did you identify and resolve it?
+
+**Key points an interviewer wants to hear:**
+
+- **Detection**: alerts fired on simultaneous OOMKilled restarts across dozens of unrelated services; `kubectl top pods` showed sidecar containers (`envoy` / `proxyv2`) consistently at memory limits while application containers were stable.
+- **Root cause**: a mesh control plane upgrade had pushed a new sidecar image with higher base memory footprint; the `MutatingWebhook` injected the new proxy with **unchanged resource requests/limits** that were sized for the old image, leading to memory pressure and eventual OOM.
+- During the traffic spike, Karpenter provisioned new nodes; every new pod received the heavier sidecar, pushing nodes past their allocatable memory ceiling and triggering a **cascading eviction wave**.
+- **Immediate mitigation**: patched the injection webhook's `ConfigMap` / `MeshConfig` to increase sidecar memory limits to `256Mi` → `512Mi` and annotated critical namespaces with `sidecar.istio.io/proxyCPU` / `sidecar.istio.io/proxyMemory` overrides to unblock scheduling.
+- **Rolling fix**: performed a rolling restart of affected deployments so pods picked up corrected sidecar resource specs; verified with `kubectl describe pod` that sidecar containers showed updated limits before decommissioning old pods.
+- **Systemic remediation**: introduced a **VPA recommendation job** that runs on a canary namespace post-mesh-upgrade, requiring measured sidecar resource usage to be reflected in the injection webhook defaults before cluster-wide rollout.
+- Added a **pre-upgrade integration test** in CI that deploys a sample pod into a staging cluster after mesh upgrades and asserts sidecar memory request/limit ratios are within defined bounds, blocking promotion if violated.
+- Established separate **PriorityClasses** for sidecar containers vs. application containers so that in future memory pressure scenarios, proxies are evicted before business-critical application processes.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes control plane API server endpoint access security — ensuring private endpoint configurations, `aws-auth` / access entry hygiene, and blast-radius containment are production-grade?
+
+**Key points an interviewer wants to hear:**
+
+- **Endpoint mode**: enforce **private-only** API server endpoints for all production clusters; public endpoint access is permitted only in development clusters with an explicit IP allowlist (`publicAccessCidrs`) restricted to corporate egress IPs and bastion ranges, enforced via AWS Config rule `eks-endpoint-no-public-access`.
+- Use **AWS EKS Access Entries** (the successor to `aws-auth` ConfigMap) managed via Terraform/CDK; treat `aws-auth` as legacy and migrate proactively — the ConfigMap's lack of audit trail and its single-writer model are operational risks at scale.
+- Enforce **least-privilege RBAC bindings** per access entry: CI/CD service roles receive `edit` on specific namespaces, never `cluster-admin`; human break-glass roles are time-bound via IAM Identity Center permission sets with automatic expiry and CloudTrail alerting.
+- Implement **SCPs at the AWS Organization level** preventing `eks:UpdateClusterConfig` from disabling private endpoint or re-enabling public access without MFA and an approved Change Management ticket; this acts as a hard guardrail independent of cluster-level controls.
+- Route all in-cluster API server traffic through **VPC endpoints** (`com.amazonaws.<region>.eks`) to avoid traversal of the public internet even on private-endpoint clusters; validate with VPC Flow Logs that no API server traffic egresses the VPC.
+- Audit `aws-auth` / access entries continuously with a **Kubernetes controller** (or OPA Gatekeeper policy) that alerts when new `cluster-admin` bindings or wildcard group mappings are added outside of the approved GitOps pipeline.
+- Instrument CloudTrail for `eks:DescribeCluster`, `eks:AccessKubernetesApi`, and Kubernetes audit logs for `

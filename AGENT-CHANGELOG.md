@@ -1219,3 +1219,21 @@ _Committed & pushed: yes_
 - How do you reason about and enforce the boundary between "infrastructure-owned" Gateway resources and "application-owned" HTTPRoute resources using RBAC, and what gaps exist in the current Gateway API security model that you should compensate for?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-20 22:07:20
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8390 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes admission control webhook (MutatingAdmissionWebhook / ValidatingAdmissionWebhook) reliability — ensuring webhooks never become a single point of failure for the control plane?
+- A production EKS cluster's Kubernetes scheduler is reporting high `schedule_attempts_total{result="unschedulable"}` rates, yet `kubectl describe pod` shows only "0/N nodes are available" with no specific constraint details. Walk me through your full diagnosis and resolution process.
+- Describe a situation where an EKS cluster's service mesh (AWS App Mesh or Istio on EKS) sidecar injection began causing widespread pod scheduling failures and OOMKilled events cluster-wide during a high-traffic event. How did you identify and resolve it?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes control plane API server endpoint access security — ensuring private endpoint configurations, `aws-auth` / access entry hygiene, and blast-radius containment are production-grade?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (5835 chars)
+- How does Gateway API's `HTTPRoute` `ExtensionRef` filter type work, and what risks does it introduce in a multi-tenant cluster?
+- What is the difference between a Gateway listener's `protocol: HTTPS` and `protocol: TLS`, and when would you use each?
+- A team's HTTPRoute suddenly stops routing traffic after a cluster upgrade, but `kubectl get httproute` shows `Accepted: True` and `ResolvedRefs: True`. How do you systematically debug this?
+- How do you implement and reason about request authentication (JWT validation, mTLS) at the Gateway layer versus pushing it to the application or a sidecar mesh, and what are the trade-offs?
+
+_Committed & pushed: yes_
