@@ -2428,3 +2428,54 @@ At scale, route conflicts manifest as one team's HTTPRoute silently shadowing an
 ### Q: How do you implement and reason about request authentication (JWT validation, mTLS) at the Gateway layer versus pushing it to the application or a sidecar mesh, and what are the trade-offs?
 
 Doing authentication at the Gateway means every request is validated before it hits any backend, which reduces attack surface, centralizes policy, and offloads crypto overhead from application pods. Gateway-level JWT validation (via an extension policy like `HTTPRoute` `ExtensionRef` or an `AuthorizationPolicy` in a mesh-aware gateway) can short-circuit unauthenticated traffic at the edge with minimal latency impact. The trade-offs are: (1) the Gateway becomes a critical policy enforcement point—misconfiguration allows all traffic through or blocks all traffic; (2) claims from a validated JWT must be forwarded as trusted headers to backends, which requires trust between the Gateway and backends (easily broken if backends are exposed through other paths); (3) for internal east-west traffic, a service mesh (GAMMA model) with per-workload mTLS is more appropriate because a north-south Gateway never sees that traffic. mTLS at the Gateway is well-suited for external clients that need mutual authentication, but it conflicts with TLS termination if backends expect plain TCP—so architecture must decide between terminate-and-re-originate (re-encrypt) versus passthrough. The recommended pattern for most platforms: JWT at the Gateway for external AuthN, mTLS at the mesh layer for internal AuthN, and an explicit policy that internal services reject requests lacking the mesh-issued certificate even if they somehow bypassed the Gateway.
+
+
+---
+
+## 🗓️ Added 2026-11-21 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-21 20:46 -->
+
+### Q: How does Gateway API's `HTTPRoute` `parentRef` `port` field affect listener selection, and what happens when it is omitted versus explicitly specified?
+
+**Model Answer:**
+
+When `port` is specified in a `parentRef`, the HTTPRoute binds **only** to the Gateway listener on that exact port; if no listener matches both the port and protocol/hostname constraints, the route's `Accepted` condition is set to `False` with reason `NoMatchingParent`. When `port` is omitted, the route is eligible to attach to **any** listener on the referenced Gateway whose hostname and protocol are compatible, which can cause unintended multi-listener attachment in Gateways with both port 80 and 443 listeners. A common bug is omitting `port` and discovering the route attaches to the HTTP listener when the intent was HTTPS-only, silently serving unencrypted traffic. Best practice in multi-listener Gateways is to always specify both `sectionName` and `port` together—`sectionName` alone is sufficient but `port` adds a redundant safety check that catches listener renaming. When debugging, inspect `httproute.status.parents` to see exactly which parent references were resolved and which were rejected, and cross-reference with the Gateway's `status.listeners[*].attachedRoutes` count.
+
+---
+
+### Q: What is the operational impact of Gateway API's `SupportedFeatures` and conformance profiles, and how do you use them to audit what your implementation actually supports before writing routes?
+
+**Model Answer:**
+
+Gateway API defines a conformance test suite with named **feature gates** (e.g., `HTTPRouteQueryParamMatching`, `HTTPRouteResponseHeaderModification`, `ReferenceGrant`) grouped into profiles (`Core`, `Extended`, `ImplementationSpecific`). Each implementation publishes a conformance report (a structured YAML) that lists which features passed; you should retrieve this report for your controller version and cross-reference it before writing routes that rely on Extended features. Operationally, if you deploy an `HTTPRoute` using a feature the implementation doesn't support, behavior is undefined—the controller may silently ignore the field, apply it incorrectly, or set an obscure status condition. To audit: check the controller's GitHub releases for a `conformance-report.yaml`, or run the upstream conformance suite (`go test ./conformance/...`) against your cluster in a staging environment. When onboarding a new implementation, treat the conformance report as a contract and encode unsupported features as platform guardrails (e.g., OPA/Kyverno policies that reject HTTPRoutes using fields not in the report). Re-run conformance after every controller upgrade because feature support can regress.
+
+---
+
+### Q: A platform team wants to implement custom error responses (e.g., branded 503 pages) at the Gateway layer for backend failures. How do you approach this with Gateway API, and where does the standard currently fall short?
+
+**Model Answer:**
+
+Gateway API's core specification does **not** yet include a standard `ErrorPage` or `CustomResponse` policy type; this is implementation-specific territory. The common approaches are:
+
+- **`ExtensionRef` filter pointing to a controller-specific CRD** (e.g., Envoy Gateway's `HTTPRouteFilter` or Istio's `EnvoyFilter`) that injects a local reply action when the upstream returns 5xx.
+- **Mirror + synthetic backend**: mirror traffic to an error-classification sidecar, though this doesn't intercept the response path.
+- **Implementation-native policy attachment**: Envoy Gateway supports `BackendTrafficPolicy` with `faultInjection` and custom response bodies; Istio uses `EnvoyFilter` with `LOCAL_REPLY` config.
+
+The shortfall is portability—any solution today is implementation-specific and will break on controller migration. The upstream GAMMA/Gateway API working group is tracking a `ResponseOverride` or `CustomErrorResponse` policy (see open GEP), but it is not yet graduated. Operationally, document which error-page mechanism you use as a platform extension, pin the controller version in GitOps, and add conformance tests that assert the branded error page is served when backends return 503. Avoid baking this logic into application pods when the Gateway can intercept it more reliably at scale.
+
+---
+
+### Q: Describe a scenario where Gateway API's status conditions give a false positive (route appears `Accepted` and `ResolvedRefs: True`) yet traffic still fails. How do you systematically diagnose it?
+
+**Model Answer:**
+
+A route can be fully accepted and have all references resolved yet still drop traffic because status conditions only validate **control-plane reconciliation**, not **data-plane programming**. Common false-positive scenarios include:
+
+- **Envoy/data-plane sync lag**: the xDS snapshot hasn't propagated; `Accepted` is set when the controller writes config, not when Envoy confirms it. Check `envoy_cluster_manager_warming_clusters` or equivalent data-plane metrics.
+- **TLS certificate loaded but expired or mismatched CN**: `ResolvedRefs` only verifies the Secret exists and has the right type, not that the cert is valid for the hostname.
+- **Backend pod not ready but Service resolves**: `ResolvedRefs` checks the Service object, not endpoint readiness; if all pods are unready, traffic 503s even though the route is "healthy."
+- **Network policy blocking Gateway-to-pod traffic**: control plane is unaware; routes look fine, pods receive no connections.
+- **Weight-zero backends silently dropping traffic** (all weights sum to non-zero but one backend has zero weight and is the only healthy one after the others crash).
+
+Diagnosis checklist: (1) inspect data-plane logs/metrics directly (Envoy admin `/clusters`, NGINX error log); (2) run `curl` from inside the cluster to bypass DNS/external LB; (3) check endpoint slices for backend pods; (4) verify certificate expiry with `openssl s_client`; (5) look at controller's internal reconcile metrics for xDS send errors. Treat status conditions as a necessary but not sufficient signal.

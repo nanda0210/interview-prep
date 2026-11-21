@@ -1237,3 +1237,21 @@ _Committed & pushed: yes_
 - How do you implement and reason about request authentication (JWT validation, mTLS) at the Gateway layer versus pushing it to the application or a sidecar mesh, and what are the trade-offs?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-21 20:46:57
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8277 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes control plane request throttling and API priority-and-fairness (APF) configuration at scale?
+- A production EKS cluster's AWS VPC CNI is reporting intermittent `pod sandbox creation failed` errors specifically on nodes that were recently recycled by Karpenter. How do you systematically diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes operator lifecycle — ensuring CRD-owning operators are upgraded safely without breaking existing custom resources?
+- Describe a situation where an EKS cluster's Horizontal Pod Autoscaler began oscillating — rapidly scaling up and down repeatedly — causing instability for a latency-sensitive production service. How did you diagnose and stabilize it?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6129 chars)
+- How does Gateway API's `HTTPRoute` `parentRef` `port` field affect listener selection, and what happens when it is omitted versus explicitly specified?
+- What is the operational impact of Gateway API's `SupportedFeatures` and conformance profiles, and how do you use them to audit what your implementation actually supports before writing routes?
+- A platform team wants to implement custom error responses (e.g., branded 503 pages) at the Gateway layer for backend failures. How do you approach this with Gateway API, and where does the standard currently fall short?
+- Describe a scenario where Gateway API's status conditions give a false positive (route appears `Accepted` and `ResolvedRefs: True`) yet traffic still fails. How do you systematically diagnose it?
+
+_Committed & pushed: yes_

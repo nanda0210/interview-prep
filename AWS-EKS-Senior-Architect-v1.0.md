@@ -6825,3 +6825,64 @@ A Blue/Green deployment via Argo Rollouts on EKS replaced 100% of pods within 90
 - Route all in-cluster API server traffic through **VPC endpoints** (`com.amazonaws.<region>.eks`) to avoid traversal of the public internet even on private-endpoint clusters; validate with VPC Flow Logs that no API server traffic egresses the VPC.
 - Audit `aws-auth` / access entries continuously with a **Kubernetes controller** (or OPA Gatekeeper policy) that alerts when new `cluster-admin` bindings or wildcard group mappings are added outside of the approved GitOps pipeline.
 - Instrument CloudTrail for `eks:DescribeCluster`, `eks:AccessKubernetesApi`, and Kubernetes audit logs for `
+
+
+---
+
+## 🗓️ Added 2026-11-21 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-21 20:46 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes control plane request throttling and API priority-and-fairness (APF) configuration at scale?
+
+**Key points an interviewer wants to hear:**
+
+- **Understand APF mechanics**: Kubernetes API Priority and Fairness (enabled by default since 1.20) replaces the old `--max-requests-inflight` flags with `FlowSchema` and `PriorityLevelConfiguration` objects that classify and queue API requests into priority buckets.
+- **Audit before tuning**: Start by analyzing `apiserver_flowcontrol_*` Prometheus metrics (seats occupied, queue depth, rejected requests, dispatch latency) per flow schema to identify which principals or request types are consuming disproportionate capacity.
+- **Segment by workload class**: Define custom `FlowSchema` objects to route operator controllers, CI/CD agents (e.g., Flux, ArgoCD), monitoring scrapers, and user-facing automation into distinct `PriorityLevelConfiguration` tiers with appropriate concurrency shares and queue depths.
+- **Protect the control plane from runaway automation**: Apply lower `NominalConcurrencyShares` and `LimitResponse: Reject` to batch or bulk-list workloads; protect critical system flows (node lifecycle, kubelet, kube-controller-manager) with elevated `Exempt` or high-priority levels.
+- **GitOps-manage APF objects**: Store `FlowSchema` and `PriorityLevelConfiguration` manifests in Git; use OPA/Gatekeeper policies to prevent direct cluster edits and ensure defaults are never accidentally removed.
+- **Throttle clients before the API server does**: Tune client-side QPS/burst limits in controllers and automation tooling (`--kube-api-qps`, `--kube-api-burst`) and enforce `resourcequota` on `requests.cpu` for controllers running as pods.
+- **Alert on sustained starvation**: Set Alertmanager rules on `apiserver_flowcontrol_rejected_requests_total` and `apiserver_flowcontrol_request_wait_duration_seconds_bucket` p99 > threshold to catch priority inversions before they cause cascading failures.
+
+---
+
+### Q: A production EKS cluster's AWS VPC CNI is reporting intermittent `pod sandbox creation failed` errors specifically on nodes that were recently recycled by Karpenter. How do you systematically diagnose and resolve this?
+
+**Key points an interviewer wants to hear:**
+
+- **Correlate timing**: Check whether errors occur exclusively in the first few minutes after node join, suggesting the VPC CNI `ipamd` daemon is still warming up its IP pool before the kubelet begins scheduling pods.
+- **Inspect ipamd warm pool state**: SSH to the node (or use SSM Session Manager) and query `curl localhost:61679/v1/enis` and `/v1/addresses` to verify whether `ipamd` has successfully attached ENIs and pre-allocated secondary IPs before pods were placed.
+- **Check CNI plugin race condition**: Review `aws-node` DaemonSet logs for `add cmd: failed to assign an IP address to container` — this often indicates Karpenter marked the node Ready before `ipamd` finished warming, allowing the scheduler to place pods prematurely.
+- **Tune warm pool parameters**: Increase `WARM_IP_TARGET`, `MINIMUM_IP_TARGET`, and `WARM_ENI_TARGET` environment variables on the `aws-node` DaemonSet to ensure IPs are pre-allocated faster; consider enabling `ENABLE_PREFIX_DELEGATION` to speed up IP availability on larger instance types.
+- **Add a node readiness gate**: Use Karpenter's `startupTaints` or a custom node readiness controller that removes a taint only after `ipamd` reports a healthy IP pool, preventing premature pod scheduling.
+- **Validate instance type ENI limits**: Confirm the selected instance types (from Karpenter `NodePool`) have sufficient ENI and IP-per-ENI capacity for the expected pod density; `m5.large` supports far fewer IPs than `m5.4xlarge`.
+- **Post-fix validation**: Deploy a PodDisruptionBudget-safe rolling replacement of the affected node group and confirm zero `sandbox creation failed` events using a synthetic canary that schedules pods immediately after node join.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes operator lifecycle — ensuring CRD-owning operators are upgraded safely without breaking existing custom resources?
+
+**Key points an interviewer wants to hear:**
+
+- **Version skew policy**: Establish a documented compatibility matrix for each operator (e.g., cert-manager, Strimzi, Prometheus Operator) mapping operator versions to supported CRD API versions and Kubernetes minor versions; treat operator upgrades with the same rigor as control plane upgrades.
+- **CRD conversion webhooks for multi-version support**: For operators that evolve CRD schemas across API versions, implement conversion webhooks that translate stored objects between versions, allowing a gradual rollout without forced CR migrations.
+- **Dry-run CR validation before upgrade**: Before upgrading an operator, run `kubectl apply --dry-run=server` against existing CRs using the new CRD schema to surface validation failures that would otherwise cause reconciliation loops post-upgrade.
+- **Progressive delivery for operator rollout**: Deploy operator upgrades via a phased approach — upgrade in non-production clusters first, validate CR reconciliation health using Golden Signal dashboards, then proceed to production using a GitOps PR-gated pipeline.
+- **Backup CRs before destructive schema changes**: Use Velero or a custom `kubectl get <crd> -A -o yaml` snapshot stored in S3 before any upgrade that modifies stored fields, enabling rollback by re-applying the previous CRD version and CR manifests.
+- **Alert on reconciliation error rates**: Instrument `controller_runtime_reconcile_errors_total` per controller name in Prometheus; set alerts that fire if error rates spike within 5 minutes of an operator upgrade, triggering an automated rollback via Argo Rollouts or Flux's `suspend` mechanism.
+- **Governance via OPA**: Enforce a policy that blocks operator Deployment upgrades in production unless a companion `OperatorUpgradeApproval` custom resource (or equivalent approval annotation) is present, creating a mandatory human-in-the-loop gate.
+
+---
+
+### Q: Describe a situation where an EKS cluster's Horizontal Pod Autoscaler began oscillating — rapidly scaling up and down repeatedly — causing instability for a latency-sensitive production service. How did you diagnose and stabilize it?
+
+**Key points an interviewer wants to hear:**
+
+- **Identified the oscillation pattern**: Observed in Datadog/CloudWatch that replica counts were cycling between min and max every 2–3 minutes; correlated with CPU metric spikes from the custom metrics adapter (KEDA or Prometheus Adapter) reporting stale or bursty metric windows.
+- **Root cause — metric resolution mismatch**: The HPA evaluation period (15s default) was polling a Prometheus-backed custom metric (`requests_per_second`) scraped every 60s, causing the HPA to react to stale burst values and over-scale, then under-scale as the metric normalized.
+- **Secondary cause — missing stabilization windows**: The HPA `scaleDown.stabilizationWindowSeconds` was left at the default 300s but `scaleUp.stabilizationWindowSeconds` was 0, meaning scale-up was near-instantaneous while scale-down was delayed, compounding the oscillation.
+- **Immediate mitigation**: Patched the HPA with explicit stabilization windows (`scaleUp: 60s`, `scaleDown: 300s`) and `policies` with `periodSeconds` and `value` limits to cap the number of replicas changed per evaluation cycle, dampening the oscillation within minutes.
+- **Metric pipeline fix**: Aligned the Prometheus scrape interval and Prometheus Adapter `resyncPeriod` to 15s to match HPA polling frequency; replaced the raw `rate()` metric with a 2-minute average (`avg_over_time`) to smooth burst noise.
+- **Long-term architectural change**: Migrated latency-sensitive autoscaling to KEDA with a Prometheus scaler using a pre-smoothed metric query and introduced a `minReplicas` floor sized to handle p95 baseline load without autoscaling intervention, reducing HPA trigger frequency by 80%.
+- **Behavioral lesson**: Presented a post-incident review establishing a policy
