@@ -6886,3 +6886,61 @@ A Blue/Green deployment via Argo Rollouts on EKS replaced 100% of pods within 90
 - **Metric pipeline fix**: Aligned the Prometheus scrape interval and Prometheus Adapter `resyncPeriod` to 15s to match HPA polling frequency; replaced the raw `rate()` metric with a 2-minute average (`avg_over_time`) to smooth burst noise.
 - **Long-term architectural change**: Migrated latency-sensitive autoscaling to KEDA with a Prometheus scaler using a pre-smoothed metric query and introduced a `minReplicas` floor sized to handle p95 baseline load without autoscaling intervention, reducing HPA trigger frequency by 80%.
 - **Behavioral lesson**: Presented a post-incident review establishing a policy
+
+
+---
+
+## 🗓️ Added 2026-11-22 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-22 20:55 -->
+
+### Q: A production EKS cluster's CoreDNS pods are healthy, but workloads intermittently report DNS resolution failures under high request load. How do you diagnose and resolve this?
+
+**Key points an interviewer wants to hear:**
+
+- **Symptom triage:** Distinguish between NXDOMAIN (name doesn't exist), SERVFAIL (resolver error), and timeout (capacity/network) by capturing `dnspython` or `dig` traces from within the failing pods and correlating with CoreDNS metrics (`coredns_dns_requests_total`, `coredns_dns_responses_total`, error rates).
+- **Conntrack table exhaustion:** The most common EKS root cause is Linux conntrack table saturation on nodes due to UDP/5053 flows. Check `nf_conntrack_count` vs `nf_conntrack_max` on the node and cross-reference with VPC CNI's `ENABLE_PREFIX_DELEGATION` settings and node density.
+- **CoreDNS scaling:** Under high QPS, default CoreDNS replica counts and resource limits are frequently undersized. Scale replicas, set appropriate `requests`/`limits`, and enable the `autopath` plugin to reduce upstream fan-out for search-domain queries (up to 6 DNS lookups per single unqualified name).
+- **NodeLocal DNSCache:** Deploy NodeLocal DNSCache (a DaemonSet running a local DNS cache on each node) to cut CoreDNS load dramatically, reduce average latency, and bypass conntrack entirely for cache hits by using a link-local IP.
+- **ndots tuning:** Set `ndots: 2` (or use FQDN with trailing dot in service names) in pod `dnsConfig` to minimize unnecessary search-domain expansions per lookup.
+- **Topology-aware routing:** Use `topologySpreadConstraints` to distribute CoreDNS pods evenly across AZs and nodes, preventing a single node's failure from concentrating DNS traffic.
+- **Alerting:** Instrument CoreDNS with Prometheus alerts on `coredns_dns_responses_total{rcode="SERVFAIL"}` rate and p99 latency so issues surface before users notice.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes RBAC hygiene at scale — ensuring least-privilege, detecting privilege escalation, and automating remediation across hundreds of namespaces?
+
+**Key points an interviewer wants to hear:**
+
+- **Policy-as-code baseline:** Codify all ClusterRoles, Roles, ClusterRoleBindings, and RoleBindings in Git (GitOps via Flux/ArgoCD). No manual `kubectl apply` to RBAC resources is permitted; PRs require approval and policy lint (e.g., `rbac-lookup`, `kubectl-who-can` in CI).
+- **Least-privilege by default:** Provide teams with a curated library of pre-approved Role templates (read-only, deploy-only, debug-only). Block wildcard verbs (`*`) and wildcard resources (`*`) cluster-wide using an OPA Gatekeeper or Kyverno policy enforced at admission.
+- **Privilege escalation detection:** Use AWS CloudTrail (EKS control-plane audit logs) forwarded to CloudWatch or S3/Athena. Write detection rules for high-risk API calls: `create`/`update` on `roles`, `clusterroles`, `rolebindings`, `clusterrolebindings`, `secrets`, and `serviceaccounts`. Alert via EventBridge → SNS → PagerDuty.
+- **RBAC drift detection:** Run scheduled jobs (CronJob or CodePipeline) using `kubectl auth can-i --list` or `rbac-audit` tooling to compare live cluster state against GitOps source of truth; open automated PRs or trigger rollback on divergence.
+- **Namespace isolation for multi-tenancy:** Assign each tenant a dedicated namespace with a RoleBinding scoped only to that namespace. Use Hierarchical Namespace Controller (HNC) to cascade read-only roles to child namespaces without requiring ClusterRole grants.
+- **Periodic access reviews:** Integrate with AWS IAM Access Analyzer and internal identity governance tooling to quarterly review `aws-auth` ConfigMap (or EKS Access Entries) bindings, flagging stale users and cross-account principals.
+- **Break-glass process:** Maintain a tightly audited emergency ClusterAdmin RoleBinding activated via a Secrets Manager–gated automation with mandatory CloudTrail alerting and auto-revocation after a TTL.
+
+---
+
+### Q: Describe a situation where an EKS cluster's AWS EBS CSI Driver–managed volumes began hitting the per-node volume attachment limit during a scale-out event, causing pods to remain Pending. How did you diagnose and resolve it?
+
+**Key points an interviewer wants to hear:**
+
+- **Root cause:** AWS EC2 instance types have hard per-instance EBS volume attachment limits (e.g., `m5.xlarge` supports up to 25 attachments, nitro instances up to 28, with NVMe namespace limits varying). During rapid Karpenter/CA scale-out, pods requiring PVCs were scheduled onto nodes that had already reached their attachment ceiling; new `VolumeAttachment` objects remained in `Attaching` state indefinitely.
+- **Diagnosis signals:** Observed `FailedAttachVolume` events (`VolumeAttachmentStuck`), EBS CSI controller logs showing `AttachVolume.Attach failed`, and node-level `kubectl describe node` output showing attachment count near the limit. Cross-referenced EC2 `DescribeInstanceTypes` to confirm the per-instance maximum.
+- **Immediate mitigation:** Cordoned saturated nodes and allowed the scheduler to place new pods on fresh nodes with available attachment headroom. Temporarily relaxed Karpenter `consolidation` to prevent saturated nodes from receiving additional pods.
+- **Structural fix:** Switched high-volume-density workloads from one-PVC-per-pod patterns to shared EFS-backed volumes where access mode `ReadWriteMany` was acceptable. For EBS-dependent workloads, introduced `nodeAffinity` rules on PVCs (via StorageClass `volumeBindingMode: WaitForFirstConsumer`) to co-locate volumes with correct node types.
+- **Karpenter node selection:** Added `karpenter.k8s.aws/instance-family` and minimum resource constraints to NodePool specs to prefer instance types with higher attachment limits (e.g., `m5.4xlarge` or `r6i` families) for stateful workloads.
+- **Monitoring:** Deployed a CloudWatch metric alarm on `VolumeAttachmentCount` per instance (derived from EBS CSI metrics and EC2 describe calls) to alert before the ceiling is reached, giving headroom for proactive node provisioning.
+
+---
+
+### Q: Behavioral — You are asked to lead a migration of a large, monolithic EKS cluster shared by 20 teams into a fleet of smaller, team-owned EKS clusters. How do you approach the technical and organizational challenges?
+
+**Key points an interviewer wants to hear:**
+
+- **Discovery and dependency mapping first:** Before writing a single Terraform module, run a thorough audit: inter-namespace service calls, shared ingress controllers, shared RDS/ElastiCache endpoints, cross-team IAM roles, and shared monitoring infrastructure. Use network policy logs and service mesh telemetry to map actual traffic flows, not assumed ones.
+- **Define the target operating model:** Decide between full autonomy (each team owns their cluster, its add-ons, and its upgrade cycle) versus a platform-team–managed fleet using a shared toolchain (Terraform modules, Helm chart library, ArgoCD App-of-Apps). Present trade-offs to leadership — autonomy reduces blast radius but increases operational overhead per team.
+- **Migration sequencing by blast radius:** Migrate stateless, low-traffic workloads first to validate the new cluster bootstrap pipeline and GitOps patterns. Defer teams with complex stateful workloads, high QPS, or tight cross-team dependencies to later phases.
+- **Shared services plane:** Establish a central "platform" cluster or shared AWS services (ALB, Route 53, ECR, ACM, Secrets Manager) that all team clusters consume via VPC peering or AWS PrivateLink, avoiding duplication of expensive shared infrastructure.
+- **Cost governance from day one:** Instrument each new cluster with Kubecost or AWS Cost Explorer tags at cluster level so teams own their cloud spend immediately — a key cultural

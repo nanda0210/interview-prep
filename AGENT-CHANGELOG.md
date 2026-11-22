@@ -1255,3 +1255,21 @@ _Committed & pushed: yes_
 - Describe a scenario where Gateway API's status conditions give a false positive (route appears `Accepted` and `ResolvedRefs: True`) yet traffic still fails. How do you systematically diagnose it?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-22 20:56:14
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7913 chars)
+- A production EKS cluster's CoreDNS pods are healthy, but workloads intermittently report DNS resolution failures under high request load. How do you diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes RBAC hygiene at scale — ensuring least-privilege, detecting privilege escalation, and automating remediation across hundreds of namespaces?
+- Describe a situation where an EKS cluster's AWS EBS CSI Driver–managed volumes began hitting the per-node volume attachment limit during a scale-out event, causing pods to remain Pending. How did you diagnose and resolve it?
+- Behavioral — You are asked to lead a migration of a large, monolithic EKS cluster shared by 20 teams into a fleet of smaller, team-owned EKS clusters. How do you approach the technical and organizational challenges?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6021 chars)
+- How does Gateway API's `HTTPRoute` `backendRef` weight-based routing interact with health checking, and what happens to traffic distribution when one backend becomes unhealthy?
+- What is the difference between `Ingress` `rules[].host` wildcard matching and `HTTPRoute` `hostnames` wildcard matching, and where do they diverge in behavior?
+- A platform team wants to implement request hedging (sending duplicate requests to multiple backends and returning the fastest response) at the Gateway layer. How would you approach this, and what are the trade-offs?
+- Describe how you would design observability (metrics, traces, logs) for Gateway API traffic in a production cluster, covering what the Gateway layer should emit versus what application teams own.
+
+_Committed & pushed: yes_
