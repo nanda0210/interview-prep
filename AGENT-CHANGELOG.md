@@ -1291,3 +1291,21 @@ _Committed & pushed: yes_
 - How does Gateway API's `HTTPRoute` `RequestRedirect` filter differ from `URLRewrite`, and what are the common misconfiguration patterns that result in redirect loops or broken client behavior?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-24 23:45:40
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8051 chars)
+- A production EKS cluster's AWS CloudWatch Container Insights metrics show correct node-level CPU and memory, but workload-level (pod and container) metrics are completely missing. How do you systematically diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes resource quota and LimitRange governance at scale — ensuring teams cannot starve shared infrastructure components, while preserving developer agility?
+- Describe a situation where an EKS cluster's Karpenter-managed spot fleet began consistently choosing instance types that caused GPU workload pod scheduling failures despite correct node selectors. Walk through your diagnosis and resolution.
+- Behavioral — Your organization's VP of Engineering asks you to reduce EKS infrastructure costs by 40% within one quarter without degrading availability SLOs. How do you approach this, and what trade-offs do you communicate upfront?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (7155 chars)
+- How does Gateway API's `BackendTLSPolicy` work, and when should you use it instead of relying on the Gateway to terminate TLS?
+- A team deploys an `HTTPRoute` with a `RequestMirror` filter pointing to a backend in a different namespace. Traffic mirroring silently stops working after a routine change. How do you diagnose and fix this?
+- What are the trade-offs between using Gateway API's `HTTPRoute` path matching with `Exact`, `PathPrefix`, and `RegularExpression` types, and what conformance and portability concerns apply?
+- How do you design observability (metrics, traces, logs) for a Gateway API-based ingress tier, and what are the gaps compared to what a traditional Ingress controller provides out of the box?
+
+_Committed & pushed: yes_

@@ -7026,3 +7026,69 @@ During an Istio upgrade from 1.17 to 1.18 on EKS, the Istiod control plane was u
 
 **Framing and prioritization:**
 - Run `kube-bench` against the EKS control plane (using the EKS-
+
+
+---
+
+## 🗓️ Added 2026-11-24 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-24 23:44 -->
+
+### Q: A production EKS cluster's AWS CloudWatch Container Insights metrics show correct node-level CPU and memory, but workload-level (pod and container) metrics are completely missing. How do you systematically diagnose and resolve this?
+
+**Key diagnostic and resolution steps:**
+
+- **Verify the CloudWatch agent DaemonSet** (`amazon-cloudwatch-observability` or legacy `cloudwatch-agent`) is running on all nodes and not crash-looping — missing pod metrics often trace to a DaemonSet scheduling failure (taints without tolerations, insufficient resources, or node selector mismatch).
+- **Check the agent ConfigMap** (`cwagentconfig`) to confirm `"metrics_collection_interval"` and the `"kubernetes"` stanza with `"enhanced_container_insights": true` are present and syntactically valid; a silent ConfigMap parse error causes the agent to fall back to node-only collection.
+- **Inspect IRSA / node IAM permissions** — the agent needs `CloudWatchAgentServerPolicy` and, if using IRSA, the service account annotation and the OIDC trust relationship must be correct; a permissions gap causes metric PUT calls to fail silently.
+- **Examine agent logs** (`kubectl logs -n amazon-cloudwatch`) for `"ErrorCode: AccessDeniedException"`, `"failed to list pods"`, or cgroup v2 incompatibility messages — EKS 1.29+ on AL2023 uses cgroup v2, and older agent versions cannot parse those paths, dropping pod-level metrics.
+- **Validate Kubernetes RBAC** — the agent's ServiceAccount needs a ClusterRole with `get/list/watch` on `pods`, `nodes`, `namespaces`, and `resourcequotas`; a missing ClusterRoleBinding silently prevents pod discovery.
+- **Resolution path:** upgrade to the latest `amazon-cloudwatch-observability` add-on, reconcile IRSA, patch the ConfigMap, and verify metrics flow in Container Insights within 2–3 minutes; add a Prometheus scrape path as a fallback SLO safety net.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes resource quota and LimitRange governance at scale — ensuring teams cannot starve shared infrastructure components, while preserving developer agility?
+
+**Design pillars:**
+
+- **Namespace-scoped ResourceQuotas per team tier** — define three quota tiers (small / medium / large) codified in Helm chart values or Crossplane compositions; Argo CD applies them at namespace creation so no namespace ever starts quota-free.
+- **LimitRanges as the developer safety net** — set `default` and `defaultRequest` for CPU/memory so pods without explicit requests still get sensible values; set `max` to prevent runaway single-pod allocations without requiring every developer to be a resource expert.
+- **Protect system namespaces explicitly** — `kube-system`, `karpenter`, `monitoring`, and CSI namespaces get a dedicated node group with dedicated taints; ResourceQuotas are not applied there, and PriorityClass `system-cluster-critical` ensures they win preemption contests.
+- **Admission control enforcement** — a Kyverno `ClusterPolicy` enforces that every Deployment/StatefulSet declares non-zero `requests` and `limits`; violations fail open in audit mode for 30 days then flip to enforce, giving teams a migration window.
+- **Quota utilization observability** — scrape `kube_resourcequota` metrics via kube-state-metrics, alert at 80% utilization, and publish a self-service Grafana dashboard per namespace so teams see their headroom without filing tickets.
+- **Quota change workflow** — teams submit a PR to a central GitOps repo; a quota-request GitHub Actions workflow validates the ask against cluster capacity model (Karpenter simulated cost) and auto-approves within defined bands, escalating only outliers to the platform team.
+- **Trade-off awareness:** overly tight quotas increase toil and cause surprise `Forbidden` errors during incidents; tune defaults quarterly using VPA recommendation data to stay accurate without manual overhead.
+
+---
+
+### Q: Describe a situation where an EKS cluster's Karpenter-managed spot fleet began consistently choosing instance types that caused GPU workload pod scheduling failures despite correct node selectors. Walk through your diagnosis and resolution.
+
+**Situation:** A machine-learning team's GPU inference pods remained `Pending` for 20+ minutes despite Karpenter provisioning new nodes rapidly; `kubectl describe pod` showed `0/N nodes are available: N Insufficient nvidia.com/gpu`.
+
+**Diagnosis steps:**
+1. Examined Karpenter `NodePool` spec — `requirements` listed `instance-category: g` but omitted explicit `instance-generation` constraints; Karpenter was selecting `g3` (older NVIDIA M60) instances which the NVIDIA device plugin does not expose as `nvidia.com/gpu` without a custom driver AMI.
+2. Checked `NodeClaim` events — nodes joined the cluster and passed `Ready`, but `kubectl describe node` showed no `nvidia.com/gpu` allocatable capacity, confirming the driver/plugin was not initializing correctly on those AMI + instance combinations.
+3. Reviewed the NVIDIA device plugin DaemonSet tolerations — it tolerated `nvidia.com/gpu=present:NoSchedule`, but the taint was only applied by a node feature discovery (NFD) label webhook that itself had a bug where it was not labeling `g3` instances correctly.
+4. Traced NFD logs — `nfd-worker` was filtering instance metadata incorrectly because a regex in the NFD config excluded "legacy" GPU SKUs.
+
+**Resolution:**
+- Added `instance-generation: ["4","5"]` requirement to the Karpenter `NodePool` to exclude `g3`; Karpenter deprioritizes spot families that cannot fulfill requirements.
+- Fixed the NFD regex and re-labeled existing nodes; GPU capacity became visible within 60 seconds.
+- Added a Kyverno policy that prevents GPU `NodePool` specs from omitting `instance-generation`, preventing recurrence.
+- **Lesson:** Karpenter instance-type flexibility is a strength but requires explicit exclusion of legacy families when driver compatibility is a hard constraint.
+
+---
+
+### Q: Behavioral — Your organization's VP of Engineering asks you to reduce EKS infrastructure costs by 40% within one quarter without degrading availability SLOs. How do you approach this, and what trade-offs do you communicate upfront?
+
+**Approach:**
+
+- **Baseline first** — instrument Kubecost or AWS Cost and Usage Reports with EKS split-cost allocation enabled; within week one, produce a namespace/team/workload cost breakdown to identify the top 10 cost drivers (typically oversized nodes, right-sizing gaps, cross-AZ traffic, idle dev clusters).
+- **Quick wins (weeks 1–4):** convert stateless workloads to Spot via Karpenter weighted node pools (typically 60–70% compute savings on eligible workloads); enable Karpenter consolidation with `consolidationPolicy: WhenUnderutilized`; right-size obvious outliers identified from VPA recommendations.
+- **Medium-term (weeks 5–10):** migrate batch and non-latency-sensitive jobs to Fargate Spot; enforce `requests`/`limits` parity policies to stop bin-packing failures that waste node capacity; topology-aware routing to cut cross-AZ data transfer (often 15–20% of total EKS bills in large clusters).
+- **Dev/staging savings:** implement automated cluster scale-to-zero schedules outside business hours using KEDA or a cron-based Cluster Autoscaler override; this alone can recover 30–40% of non-prod spend.
+- **Trade-offs communicated upfront:**
+  - Spot interruptions increase p99 latency events; workloads need graceful shutdown and must be stateless or use NTH — not all teams are ready.
+  - Consolidation increases scheduling sensitivity; a poorly-set `PodDisruptionBudget` can cause availability incidents during node consolidation cycles.
+  - 40% in one quarter is aggressive; a realistic phased target is 25% in Q1, 40% by end of Q2, with availability SLOs contractually unchanged.
+- **Governance:** publish a weekly cost scorecard per team; make savings visible and gamified rather than top-down mandated to sustain behavioral change.

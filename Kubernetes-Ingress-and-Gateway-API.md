@@ -2578,3 +2578,59 @@ Non-deterministic routing between HTTPRoutes almost always points to a **conflic
 - **Path rewrite double-slash:** `URLRewrite` with `path.replacePrefixMatch` and a backend that also normalizes paths can produce double slashes (`//api/resource`) if the replacement value already includes a leading slash identical to the stripped prefix remainder.
 - **`RequestRedirect` with a `backendRef`:** The spec forbids combining `RequestRedirect` and `backendRef` in the same rule; some implementations silently drop the redirect and proxy anyway, others reject the route. This ambiguity should be caught by validation webhooks but isn't always.
 - **Host rewrite missing port:** When redirecting to a non-standard port, omitting the port in the `hostname` field causes clients to connect to the default port for the scheme, silently routing to the wrong service.
+
+
+---
+
+## 🗓️ Added 2026-11-24 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-24 23:45 -->
+
+### Q: How does Gateway API's `BackendTLSPolicy` work, and when should you use it instead of relying on the Gateway to terminate TLS?
+
+**Answer:**
+`BackendTLSPolicy` is a Gateway API standard policy (in the `gateway.networking.k8s.io` group) that configures the data-plane connection between the Gateway proxy and an upstream backend Service — specifically enabling TLS origination (re-encryption) toward the backend. Without it, most implementations send cleartext HTTP to pods after Gateway termination. Key points:
+
+- **Attachment model:** The policy targets a `Service` object via `targetRef`, and optionally scopes to specific ports; it references a `ConfigMap` containing the backend's CA certificate for server validation.
+- **Use cases:** Backends that require mutual TLS internally, compliance mandates for encryption-in-transit everywhere (zero-trust), or pods that run their own TLS termination (e.g., service meshes, databases with TLS enforced).
+- **Gateway termination vs. re-encryption:** Gateway termination (edge TLS only) is simpler and sufficient for many workloads, but introduces cleartext within the cluster network. `BackendTLSPolicy` closes this gap without pushing TLS management into every application pod.
+- **Debugging pitfall:** If the CA cert in the `ConfigMap` doesn't match the backend's serving cert, the proxy will reject the upstream connection and return 502/503 with no clear error visible to the client; check implementation-specific logs and `PolicyStatus` conditions on the resource.
+- **Conformance note:** Support is marked "extended" in Gateway API conformance, so verify your implementation supports it before designing around it.
+
+---
+
+### Q: A team deploys an `HTTPRoute` with a `RequestMirror` filter pointing to a backend in a different namespace. Traffic mirroring silently stops working after a routine change. How do you diagnose and fix this?
+
+**Answer:**
+Cross-namespace `backendRef` references in `RequestMirror` (and all Gateway API backend references) require a `ReferenceGrant` in the *target* namespace explicitly permitting the route's namespace to reference that Service. The silent failure pattern typically follows one of these causes:
+
+1. **Missing or deleted `ReferenceGrant`:** The `HTTPRoute` will show `ResolvedRefs: False` with reason `RefNotPermitted` in its status — check `kubectl get httproute <name> -o yaml` and inspect `.status.parents[].conditions`.
+2. **`ReferenceGrant` scope mismatch:** The grant specifies `from.namespace` or `to.name` that no longer matches after a rename or namespace change introduced during the "routine change."
+3. **Implementation doesn't propagate mirror failures:** Many implementations treat mirror errors as non-fatal (by design, to avoid impacting primary traffic), so the primary route stays `Accepted` even when the mirror target is unreachable — primary traffic health is a misleading signal here.
+4. **Fix:** Recreate or correct the `ReferenceGrant` in the mirror target's namespace; scope it tightly (`to.name` to the specific Service, `from.namespace` to the route's namespace). Add monitoring on mirror backend error rates separately from primary backend metrics so silent mirror failures surface.
+
+---
+
+### Q: What are the trade-offs between using Gateway API's `HTTPRoute` path matching with `Exact`, `PathPrefix`, and `RegularExpression` types, and what conformance and portability concerns apply?
+
+**Answer:**
+- **`Exact`:** Matches the full path string with no normalization ambiguity; universally supported (Core conformance). Use for well-known fixed endpoints like `/healthz` or `/metrics`.
+- **`PathPrefix`:** Matches the prefix with element boundary awareness (e.g., `/api` does not match `/api2`); Core conformance. The most portable and commonly used type. Watch for interactions with `URLRewrite` path rewriting — stripping the matched prefix is a common follow-on requirement.
+- **`RegularExpression`:** Extended conformance — **not guaranteed across implementations**. The regex dialect (RE2 vs PCRE vs ECMA) varies by data plane; a route that works on Envoy Gateway (RE2) may silently mismatch or error on an NGINX-based implementation. Avoid regex matches if portability across implementations is a goal.
+- **Precedence within a route:** More specific types win — `Exact` beats `PathPrefix` beats `RegularExpression` for the same path. Longer prefixes beat shorter ones for `PathPrefix`. Ties within the same specificity level fall back to the order of rules within the `HTTPRoute`.
+- **Security implication:** `RegularExpression` matches can introduce ReDoS risk if patterns are user-supplied or insufficiently reviewed; treat them as infrastructure-code requiring the same scrutiny as any regex handling untrusted input.
+- **Operational advice:** Prefer `Exact` and `PathPrefix` for all production routes; isolate `RegularExpression` usage to implementation-specific extensions with documented conformance levels and test coverage per implementation.
+
+---
+
+### Q: How do you design observability (metrics, traces, logs) for a Gateway API-based ingress tier, and what are the gaps compared to what a traditional Ingress controller provides out of the box?
+
+**Answer:**
+Traditional Ingress controllers (NGINX, Traefik) ship opinionated access logs and basic Prometheus metrics (request count, latency histograms, upstream status codes) with minimal configuration. Gateway API implementations vary significantly:
+
+- **Metrics:** Most mature implementations (Envoy Gateway, Istio, Contour) expose Prometheus metrics per listener and per backend, but the label cardinality (by `HTTPRoute`, `namespace`, `hostname`) differs. Standardize on labeling conventions early so dashboards remain portable.
+- **Distributed tracing:** Trace context propagation (W3C Trace Context, B3) is implementation-specific. Envoy-based implementations support it natively via configuration; others may require a sidecar or rely on the application. Gateway API has no standard `TracingPolicy` yet — this is a gap.
+- **Access logs:** No standard Gateway API resource controls log format; configure via `GatewayClass` parametersRef or implementation-specific CRDs. This breaks the "infrastructure as code" portability promise for log pipelines.
+- **Policy observability:** Attach `BackendTLSPolicy`, `BackendLBPolicy`, and custom policies may silently have no effect without checking `PolicyStatus` conditions. Build alerting on `PolicyStatus.Ancestors[].conditions` to catch unattached or errored policies.
+- **Golden signals approach:** Instrument at the Gateway layer (request rate, error rate, latency by route) AND at the backend Service level; discrepancies between the two reveal Gateway-layer issues (retries, timeouts, mirroring overhead) that surface only in the delta.
+- **Operational gap vs. Ingress:** Because HTTPRoute objects are owned by application teams, observability must federate across namespaces — build centralized dashboards keyed on `parentRef` Gateway identity, not just namespace, to give the platform team end-to-end visibility.
