@@ -1273,3 +1273,21 @@ _Committed & pushed: yes_
 - Describe how you would design observability (metrics, traces, logs) for Gateway API traffic in a production cluster, covering what the Gateway layer should emit versus what application teams own.
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-24 02:00:39
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7600 chars)
+- A production EKS cluster's AWS VPC CNI is configured with `ENABLE_PREFIX_DELEGATION=true`, but after a recent node fleet expansion you observe that new pods are stuck in `ContainerCreating` with the error `failed to allocate IPv4 address: no available addresses`. Describe how you systematically diagnose and resolve this.
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes node affinity, taint, and toleration governance at scale — ensuring teams cannot accidentally or maliciously schedule sensitive or cost-optimized workloads onto wrong node classes?
+- Describe a situation where an EKS cluster running Istio as a service mesh began exhibiting a cascade of `upstream connect error or disconnect/reset before headers — reset reason: connection failure` errors after a routine Istio control-plane upgrade, even though data-plane proxies appeared healthy.
+- Behavioral — Your organization's security team mandates that all EKS workloads must pass a CIS Kubernetes Benchmark Level 2 audit within 90 days, but the platform team's capacity is limited and 15 development teams own their own namespaces. How do you structure and execute this program?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (8165 chars)
+- How does Gateway API's `HTTPRoute` `timeouts` field behave differently from Ingress controller timeout annotations, and what are the operationally dangerous edge cases?
+- What is the purpose of Gateway API's `infrastructure` field on a `Gateway` resource, and how do you use it to manage cloud provider load balancer properties without resorting to implementation-specific annotations?
+- A team reports that path-based routing between two HTTPRoutes attached to the same Gateway listener is non-deterministic—sometimes `/api/v1` hits the wrong backend. Walk through your diagnosis and how you would resolve it.
+- How does Gateway API's `HTTPRoute` `RequestRedirect` filter differ from `URLRewrite`, and what are the common misconfiguration patterns that result in redirect loops or broken client behavior?
+
+_Committed & pushed: yes_

@@ -6944,3 +6944,85 @@ A Blue/Green deployment via Argo Rollouts on EKS replaced 100% of pods within 90
 - **Migration sequencing by blast radius:** Migrate stateless, low-traffic workloads first to validate the new cluster bootstrap pipeline and GitOps patterns. Defer teams with complex stateful workloads, high QPS, or tight cross-team dependencies to later phases.
 - **Shared services plane:** Establish a central "platform" cluster or shared AWS services (ALB, Route 53, ECR, ACM, Secrets Manager) that all team clusters consume via VPC peering or AWS PrivateLink, avoiding duplication of expensive shared infrastructure.
 - **Cost governance from day one:** Instrument each new cluster with Kubecost or AWS Cost Explorer tags at cluster level so teams own their cloud spend immediately — a key cultural
+
+
+---
+
+## 🗓️ Added 2026-11-24 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-24 01:59 -->
+
+### Q: A production EKS cluster's AWS VPC CNI is configured with `ENABLE_PREFIX_DELEGATION=true`, but after a recent node fleet expansion you observe that new pods are stuck in `ContainerCreating` with the error `failed to allocate IPv4 address: no available addresses`. Describe how you systematically diagnose and resolve this.
+
+**Model Answer:**
+
+**Immediate triage:**
+- SSH/SSM into an affected node and inspect `ipamd` logs: `kubectl logs -n kube-system aws-node-<id> -c aws-node | grep -E "error|prefix|WARN"` — look for prefix allocation failures or EC2 API throttling errors.
+- Check `aws ec2 describe-network-interfaces` for the node's ENIs to confirm whether `/28` prefixes were actually assigned or if the attachment limit was reached.
+
+**Root causes to investigate:**
+1. **Subnet exhaustion for prefix-sized blocks** — prefix delegation carves `/28` blocks (16 IPs each) from the subnet; a subnet with only scattered free IPs may lack enough contiguous space even if total free IPs appear sufficient. Use `aws ec2 get-subnet-cidr-reservations` and check subnet free-IP fragmentation.
+2. **EC2 instance ENI/prefix limits** — each instance type has a maximum number of ENIs and a maximum number of prefixes per ENI. Validate the node's instance type limits against `WARM_PREFIX_TARGET`, `MINIMUM_IP_TARGET`, and `WARM_IP_TARGET` Helm values.
+3. **IAM permissions** — the VPC CNI needs `ec2:AssignIpv6Addresses`, `ec2:AssignPrivateIpAddresses`, and `ec2:CreateNetworkInterface` on the node role; a recent SCPs tightening could block prefix delegation API calls.
+4. **`ipamd` warm-pool not replenishing** — if the EC2 API is throttling `AssignPrivatePrefixes`, ipamd backs off silently; watch the `awscni_add_ip_req_count` and `awscni_assigned_ip_per_cidr` CloudWatch Container Insights metrics.
+
+**Resolution steps:**
+- Add new, larger subnets to the node groups and annotate them with `k8s.amazonaws.com/eniConfig` if using custom networking; this gives ipamd fresh address space for `/28` allocations.
+- Tune `WARM_PREFIX_TARGET=1` and `MINIMUM_IP_TARGET` conservatively to reduce aggressive pre-allocation that exhausts subnets faster.
+- If fragmentation is irreversible short-term, temporarily revert `ENABLE_PREFIX_DELEGATION=false` via a DaemonSet rolling update and migrate nodes to subnets with sufficient space before re-enabling.
+- Long-term, enforce subnet sizing discipline (minimum `/23` per AZ per cluster) in your VPC module and add a CloudWatch alarm on `subnet_available_ip_count` with a threshold of 20% free capacity.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes node affinity, taint, and toleration governance at scale — ensuring teams cannot accidentally or maliciously schedule sensitive or cost-optimized workloads onto wrong node classes?
+
+**Model Answer:**
+
+**Governance model:**
+- Define a **node taxonomy** with well-known labels: `node.company.io/class=spot|on-demand|gpu|arm64|regulated` and `node.company.io/environment=prod|staging`. Apply these via Karpenter `NodePool` labels or managed node group launch templates so labels are injected at bootstrap and cannot be overridden by workloads.
+- Taint dedicated node classes (e.g., GPU nodes, regulated/PCI nodes) with `NoSchedule` taints (`node.company.io/class=regulated:NoSchedule`) so only explicitly tolerated workloads land there.
+
+**Admission enforcement:**
+- Deploy a **Kyverno** (or OPA/Gatekeeper) policy that:
+  - Prevents any pod from adding tolerations to regulated taints unless the pod's ServiceAccount is in an approved namespace allowlist stored in a ConfigMap updated via GitOps.
+  - Requires `nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution` rules on pods targeting specific classes to prevent broad wildcard scheduling.
+- Use a `ClusterPolicy` in `enforce` mode (not `audit`) for regulated taint tolerations; `audit` mode for cost-class constraints with weekly violation reports to team leads.
+
+**Karpenter-side controls:**
+- Each `NodePool` sets `spec.template.spec.taints` and scoped `nodeClassRef`, and uses `spec.limits` for resource caps per pool. Teams reference pools via `nodeSelector` only — direct NodePool manipulation is restricted to platform RBAC roles.
+- Enable Karpenter's `weight`-based NodePool preference to bias spot-tolerating workloads toward spot pools without requiring teams to write complex affinity rules.
+
+**Operational guardrails:**
+- Publish a **self-service NodePool catalog** in an internal developer portal; teams request access to pools via a Backstage workflow that patches the Kyverno allowlist through a PR, enforcing audit trail.
+- Run a weekly `kyverno generate` job to auto-report all pods violating the affinity/taint policy matrix and feed results into a Jira epic per team.
+- Gate CI pipelines with `kyverno apply --policy` dry-run checks on Kubernetes manifests before merge.
+
+---
+
+### Q: Describe a situation where an EKS cluster running Istio as a service mesh began exhibiting a cascade of `upstream connect error or disconnect/reset before headers — reset reason: connection failure` errors after a routine Istio control-plane upgrade, even though data-plane proxies appeared healthy.
+
+**Model Answer:**
+
+**What happened:**
+During an Istio upgrade from 1.17 to 1.18 on EKS, the Istiod control plane was upgraded first, but a large cohort of sidecar proxies was still running the older Envoy version. The mismatch triggered a breaking change in the `EnvoyFilter` API — specifically, the `HTTP_INSPECTOR` filter chain match semantics changed, causing proxies to misparse HTTP/2 upgrade headers for gRPC services, resulting in connection resets.
+
+**Diagnosis steps:**
+1. Cross-referenced `istioctl version` output for pilot vs. all proxies; found ~40% of pods still on 1.17.x proxy.
+2. Enabled Envoy debug logging on affected pods (`kubectl exec -it <pod> -c istio-proxy -- curl -XPOST localhost:15000/logging?connection=debug`) — logs showed `invalid HTTP/1.1 request received on HTTP/2 connection` errors.
+3. Checked `istio-proxy` container image tags in affected deployments — they had not been restarted post-upgrade, so no sidecar re-injection had occurred.
+4. Reviewed the Istio upgrade notes and found the `EnvoyFilter` deprecation notice for `HTTP_INSPECTOR` match in 1.18 release.
+
+**Resolution:**
+- Triggered rolling restarts across all namespaces in dependency order: `kubectl rollout restart deployment -n <ns>` via a scripted topology-aware sequence (databases → stateful services → stateless services).
+- Added a post-upgrade CI gate: `istioctl proxy-status | awk '{print $6}' | sort -u` — fail the pipeline if more than one unique version appears across the mesh.
+- Adopted **Istio's canary upgrade pattern** (run two Istiod revisions simultaneously using `istio.io/rev` labels) for all future upgrades so proxy version drift is controlled, not accidental.
+- Updated the platform runbook: data-plane rollout must complete within 30 minutes of control-plane upgrade, enforced by an alert on the `pilot_xds_push_time` histogram skew across proxy versions.
+
+---
+
+### Q: Behavioral — Your organization's security team mandates that all EKS workloads must pass a CIS Kubernetes Benchmark Level 2 audit within 90 days, but the platform team's capacity is limited and 15 development teams own their own namespaces. How do you structure and execute this program?
+
+**Model Answer:**
+
+**Framing and prioritization:**
+- Run `kube-bench` against the EKS control plane (using the EKS-

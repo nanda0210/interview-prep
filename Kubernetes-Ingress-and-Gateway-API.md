@@ -2508,3 +2508,73 @@ Request hedging is **not part of the core Gateway API spec** as of v1.x; it requ
 ### Q: Describe how you would design observability (metrics, traces, logs) for Gateway API traffic in a production cluster, covering what the Gateway layer should emit versus what application teams own.
 
 The Gateway layer should emit **per-route, per-backend metrics** at minimum: request rate, error rate (4xx/5xx split), latency percentiles (p50/p95/p99), and active connection counts, all labeled with `httproute`, `namespace`, `backend_service`, and `gateway` dimensions. Most implementations expose these via Prometheus endpoints; ensure `ServiceMonitor` or `PodMonitor` resources are created by the platform team so application teams don't need infrastructure access. For distributed tracing, the Gateway should **initiate or propagate trace context** (W3C TraceContext or B3) on every request, injecting `traceparent` headers so application services can join the same trace without generating their own root spans. Access logs should be structured (JSON) and include `x-request-id`, route match details, upstream cluster, and TLS metadata—these are platform-owned and should be shipped to a central log aggregator, not left to application teams. The boundary: the Gateway owns ingress-edge telemetry; application teams own service-internal spans and business-logic logs. A common gap is **missing correlation between Gateway access logs and application traces**—enforce a consistent `x-request-id` or `traceparent` header policy at the Gateway and document it as a contract with application teams. Alert on `ResolvedRefs: False` and `Programmed: False` status conditions via a Kubernetes controller that exports them as Prometheus gauges to catch control-plane failures that don't appear in data-plane metrics.
+
+
+---
+
+## 🗓️ Added 2026-11-24 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-24 02:00 -->
+
+### Q: How does Gateway API's `HTTPRoute` `timeouts` field behave differently from Ingress controller timeout annotations, and what are the operationally dangerous edge cases?
+
+**Model Answer:**
+
+Ingress controllers implement timeouts via implementation-specific annotations (e.g., `nginx.ingress.kubernetes.io/proxy-read-timeout`), making them non-portable and undiscoverable without controller docs. Gateway API's `HTTPRoute` `timeouts` field (GA in v1.1) exposes `request` and `backendRequest` as first-class typed fields with Go duration syntax, enforced portably across conformant implementations.
+
+Key behavioral distinctions and dangerous edge cases:
+
+- **`request` vs `backendRequest`:** `request` measures total time from when the gateway receives the request; `backendRequest` measures only backend response time. If `backendRequest > request`, the `request` deadline fires first—implementations are expected to surface this but many silently ignore the longer value, causing confusing timeouts.
+- **Streaming and WebSocket:** A finite `request` timeout will terminate long-lived connections (SSE, WebSocket, gRPC streaming) mid-stream. Teams migrating from annotations often forget that annotation-based "0 = infinite" semantics don't apply; omitting the field entirely is required for no timeout.
+- **Partial conformance:** `timeouts` is a core extended feature; controllers that don't support it must set `UnsupportedValue` conditions, but some set `Accepted: True` anyway and silently ignore the values—zero enforcement, full operator false confidence.
+- **Interaction with retry budgets:** If an `HTTPRoute` also configures retries (via extension), each retry attempt starts a new `backendRequest` timer but all retries share the parent `request` deadline; misconfigured retry counts × backend latency can exhaust the request timeout with no observable partial error.
+
+Operationally, always verify timeout semantics in the GatewayClass conformance report, test with deliberately slow backends, and document that `timeouts` omission (not zero) means unbounded.
+
+---
+
+### Q: What is the purpose of Gateway API's `infrastructure` field on a `Gateway` resource, and how do you use it to manage cloud provider load balancer properties without resorting to implementation-specific annotations?
+
+**Model Answer:**
+
+The `Gateway.spec.infrastructure` field (introduced in v1.1) provides a standardized mechanism to influence how the underlying infrastructure (typically a cloud load balancer or proxy deployment) is provisioned, through two sub-fields: `labels` and `annotations` that are propagated to generated infrastructure objects, and `parametersRef` for controller-specific structured config.
+
+- **`labels`/`annotations` propagation:** Labels and annotations placed here are copied onto the generated `Service`, cloud load balancer, or other infra objects. This replaces ad-hoc annotation dumping on the `Gateway` metadata itself, keeping intent explicit and avoiding accidental consumption by unrelated controllers.
+- **`parametersRef`:** Points to a controller-specific CRD (e.g., an `AWSGatewayConfig` or `GCPLBPolicy`) that expresses cloud-specific properties (internal vs external LB, subnet selection, SSL policies) in a typed, validatable schema rather than opaque string annotations.
+- **Trade-off:** `infrastructure` standardizes the attachment point but not the payload—each implementation still defines its own parameter schema. Portability is improved at the structural level (you know *where* to look) but not at the semantic level (the values remain implementation-specific).
+- **Operational practice:** Define a `GatewayClass` per environment tier (prod-external, prod-internal) with `parametersRef` pointing to pre-approved configs; application teams select a class rather than specifying infra details themselves, enforcing least privilege and preventing cost surprises from misconfigured LB tiers.
+
+---
+
+### Q: A team reports that path-based routing between two HTTPRoutes attached to the same Gateway listener is non-deterministic—sometimes `/api/v1` hits the wrong backend. Walk through your diagnosis and how you would resolve it.
+
+**Model Answer:**
+
+Non-deterministic routing between HTTPRoutes almost always points to a **conflict** arising from Gateway API's route precedence and merging rules.
+
+**Diagnosis steps:**
+
+1. **Check for overlapping matches:** `kubectl get httproutes -A -o yaml` and compare `spec.rules[].matches` across both routes. If both have a `PathPrefix: /api` match (one expecting `/api/v1` specificity), the tie-breaking rules matter.
+2. **Apply Gateway API precedence rules:** Within an implementation, more-specific matches win (Exact > PathPrefix > RegularExpression; longer prefix > shorter prefix). *Across* HTTPRoutes, the conflict resolution is: oldest creation timestamp wins, then alphabetical namespace/name. Confirm whether both routes' paths are genuinely identical or one is legitimately less specific.
+3. **Check status conditions on both routes:** Look for `RouteConflicted` or `PartiallyInvalid` conditions (spec'd since v1.0); some implementations set these when routes overlap. Absence of these conditions with a buggy implementation is itself a signal.
+4. **Verify sectionName binding:** Confirm both routes target the same listener via `parentRef.sectionName`; if one omits it and there are multiple listeners, it may attach to an unexpected listener.
+5. **Controller-specific merging:** Some implementations merge all attached HTTPRoute rules into a single virtual host config and re-sort; bugs in that merging (especially with identical prefix length) can cause load-balanced selection across conflicting rules rather than deterministic precedence.
+
+**Resolution:** Restructure routes so matches are unambiguous (use Exact for versioned paths, or consolidate conflicting rules into a single HTTPRoute owned by one team). Add conformance tests to CI using the official Gateway API conformance suite to catch regressions.
+
+---
+
+### Q: How does Gateway API's `HTTPRoute` `RequestRedirect` filter differ from `URLRewrite`, and what are the common misconfiguration patterns that result in redirect loops or broken client behavior?
+
+**Model Answer:**
+
+- **`RequestRedirect`** causes the gateway to respond directly to the client with a 3xx status code (default 302, configurable to 301/307/308), instructing it to re-request a different URL. No backend is contacted for the matched rule.
+- **`URLRewrite`** modifies the request URL *in flight* before forwarding to the backend; the client sees no redirect and is unaware the URL changed. Both share the same sub-fields (`hostname`, `path`, `scheme`) but the semantics and failure modes differ sharply.
+
+**Common misconfiguration patterns:**
+
+- **Redirect loop via scheme redirect:** Configuring `RequestRedirect` with `scheme: https` on an HTTPS listener (port 443) means the gateway redirects HTTPS→HTTPS with the same host, creating an infinite loop. The correct pattern is to put the redirect rule only on the HTTP (port 80) listener.
+- **301 caching:** Using `statusCode: 301` for a temporary redirect during a migration; clients and CDNs cache 301s indefinitely. The redirect can't be undone for affected clients without cache-busting. Use 302 or 307 during migrations.
+- **Path rewrite double-slash:** `URLRewrite` with `path.replacePrefixMatch` and a backend that also normalizes paths can produce double slashes (`//api/resource`) if the replacement value already includes a leading slash identical to the stripped prefix remainder.
+- **`RequestRedirect` with a `backendRef`:** The spec forbids combining `RequestRedirect` and `backendRef` in the same rule; some implementations silently drop the redirect and proxy anyway, others reject the route. This ambiguity should be caught by validation webhooks but isn't always.
+- **Host rewrite missing port:** When redirecting to a non-standard port, omitting the port in the `hostname` field causes clients to connect to the default port for the scheme, silently routing to the wrong service.
