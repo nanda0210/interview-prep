@@ -7092,3 +7092,67 @@ During an Istio upgrade from 1.17 to 1.18 on EKS, the Istiod control plane was u
   - Consolidation increases scheduling sensitivity; a poorly-set `PodDisruptionBudget` can cause availability incidents during node consolidation cycles.
   - 40% in one quarter is aggressive; a realistic phased target is 25% in Q1, 40% by end of Q2, with availability SLOs contractually unchanged.
 - **Governance:** publish a weekly cost scorecard per team; make savings visible and gamified rather than top-down mandated to sustain behavioral change.
+
+
+---
+
+## 🗓️ Added 2026-11-25 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-25 23:28 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes VerticalPodAutoscaler (VPA) adoption at scale — ensuring right-sizing without causing availability disruptions across hundreds of deployments?
+
+**Key points an interviewer wants to hear:**
+
+- Deploy VPA in **Recommendation-only mode** (`updateMode: Off`) initially across all namespaces; harvest recommendations via a custom exporter (e.g., scrape `kubectl get vpa -o json`) into Grafana/Prometheus dashboards so teams can act without automated restarts.
+- Gate promotion to `updateMode: Auto` or `Initial` only for workloads that have passed a readiness review: they must have `minReplicas ≥ 2`, a valid PodDisruptionBudget, and liveness/readiness probes — enforced via OPA/Kyverno policy.
+- Configure `resourcePolicy.containerPolicies` with sane `minAllowed`/`maxAllowed` bounds per container to prevent VPA from recommending absurdly large or near-zero values that destabilize scheduling.
+- **Never run VPA + HPA on the same CPU/memory metric simultaneously**; use HPA on custom or external metrics (RPS, queue depth) while VPA handles resource right-sizing to avoid control-loop conflicts.
+- Integrate VPA recommendations into the GitOps pipeline: a weekly automation PR updates `requests`/`limits` in Helm values files with the VPA p50/p90 recommendation, requiring team approval before merge — giving teams ownership without manual toil.
+- Track `LimitRange` and `ResourceQuota` interactions: VPA-updated pods must still fit within namespace quotas; alert when VPA recommendations would exceed quota headroom.
+- Measure success via `requests-to-actual-usage ratio` per namespace monthly; set an org-wide target (e.g., CPU ratio < 2×) and report against it in engineering all-hands.
+
+---
+
+### Q: A production EKS cluster's AWS CloudWatch Container Insights is showing healthy node metrics, but Karpenter is not consolidating or terminating nodes it previously provisioned — nodes remain "Ready" and underutilized for hours. How do you diagnose and resolve this?
+
+**Diagnosis steps:**
+
+1. **Check Karpenter controller logs** (`kubectl logs -n karpenter -l app.kubernetes.io/name=karpenter`) for `consolidation is disabled`, `cannot disrupt`, or `pod has do-not-disrupt annotation` messages — the most common root cause.
+2. **Inspect `NodePool` spec**: verify `disruption.consolidationPolicy` is set to `WhenUnderutilized` (not `WhenEmpty`) and `disruption.consolidateAfter` is not set to `Never` or an excessively long duration.
+3. **Enumerate blocking pods**: Karpenter skips nodes with pods that have `karpenter.sh/do-not-disrupt: "true"` annotations, pods without owning controllers (naked pods), pods with `emptyDir` volumes, or pods blocked by a `PodDisruptionBudget` at `maxUnavailable: 0`.
+4. **Check PDB health**: a misconfigured PDB where `minAvailable` equals the current replica count blocks all evictions — `kubectl get pdb -A` and cross-reference with pod counts.
+5. **Verify RBAC and SQS permissions**: Karpenter requires SQS queue access for interruption handling and EC2 permissions (`ec2:TerminateInstances`) — missing permissions silently prevent termination.
+6. **NodePool `weight` and limits**: if the `NodePool` has a `limits.cpu` or `limits.memory` cap already breached, Karpenter may refuse to re-provision replacement nodes and therefore won't initiate consolidation that requires a replacement.
+
+**Resolution:**
+- Remove or scope `do-not-disrupt` annotations to only genuinely stateful workloads.
+- Fix PDBs to allow at least one pod unavailable (`maxUnavailable: 1` or `minAvailable` < replica count).
+- Attach the correct IAM policy (e.g., `karpenter-controller` policy with `ec2:TerminateInstances`, `sqs:*` on the interruption queue) to the Karpenter IRSA role.
+- Set a reasonable `consolidateAfter` (e.g., `30s` to `5m`) in the `NodePool` disruption block.
+
+---
+
+### Q: Behavioral — Your team has just completed a major EKS platform upgrade and a business-critical service owned by another team is now experiencing elevated error rates. The other team's lead publicly blames the platform team. How do you handle it?
+
+**What interviewers want to hear:**
+
+- **Immediate ownership of the incident response**: regardless of blame, join the incident call, provide all recent change logs (upgrade changesets, component version deltas), and offer platform team resources to help diagnose — de-escalate by acting, not defending.
+- **Separate the incident from the retrospective**: during the outage, focus 100% on restoring service; explicitly say "let's establish root cause after we're stable" to prevent the blame dynamic from slowing remediation.
+- **Transparent communication up the chain**: proactively brief your own manager and the other team's manager with factual status updates — prevents the conflict from escalating politically while you're heads-down.
+- **Post-incident blameless retrospective**: facilitate a joint RCA using a structured format (timeline, contributing factors, contributing system behaviors) — if the upgrade did cause the regression, own it clearly and document what pre-upgrade compatibility testing or canary validation was missed.
+- **Systemic fixes**: propose a cross-team upgrade validation protocol — e.g., a mandatory "platform consumer validation window" where application teams run smoke tests in staging before production cutover, with explicit sign-off.
+- **Relationship repair**: follow up 1:1 with the other team lead after the dust settles; acknowledge the impact on their team and discuss how to build shared confidence in future platform changes — platform credibility is built over time through reliability and collaboration.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes external traffic ingress security — ensuring WAF integration, TLS termination policy, and ingress controller blast-radius containization across hundreds of services?
+
+**Key design decisions:**
+
+- **Dedicated ingress controller tiers by blast radius**: run separate AWS Load Balancer Controller–managed ALBs (or ingress-nginx instances) per security classification — one for public-internet traffic, one for internal/B2B, one for admin — each in its own namespace with its own IRSA role and IAM scope, so a misconfiguration in one tier cannot affect others.
+- **WAF integration**: annotate public ALB Ingresses with `alb.ingress.kubernetes.io/wafv2-acl-arn` pointing to an AWS WAFv2 WebACL with managed rule groups (AWS Core, Known Bad Inputs, SQL injection) plus custom rate-based rules; enforce this annotation via Kyverno policy — any public Ingress without a valid WAF ARN is rejected at admission.
+- **TLS termination policy**: enforce TLS 1.2+ minimum via `alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06`; use ACM certificates with auto-rotation; Kyverno `ClusterPolicy` rejects any Ingress with `http` listeners unless explicitly annotated for redirect-only (`alb.ingress.kubernetes.io/actions.redirect`).
+- **Certificate management at scale**: deploy cert-manager with IRSA-backed Route 53 DNS-01 solver for wildcard and SAN certificates; use `Certificate` CRDs in a dedicated `cert-system` namespace and cross-namespace secret sharing via `ClusterSecretStore` (External Secrets Operator) so application namespaces consume certs without needing cert-manager RBAC.
+- **IngressClass isolation**: define separate `IngressClass` resources (`public`, `internal`, `admin`) with `spec.controller` pointing to controller-tier–specific deployments; Kyverno prevents application teams from using `IngressClass: public` unless their namespace carries a label `traffic-tier: public` approved by the security team.
+- **Observability**: enable ALB access logging to S3 with Athena queries for top offenders; pipe WAF sampled requests to CloudWatch Logs Insights; set alarms on `4xxCount

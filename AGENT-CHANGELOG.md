@@ -1309,3 +1309,21 @@ _Committed & pushed: yes_
 - How do you design observability (metrics, traces, logs) for a Gateway API-based ingress tier, and what are the gaps compared to what a traditional Ingress controller provides out of the box?
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-25 23:28:54
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7996 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes VerticalPodAutoscaler (VPA) adoption at scale — ensuring right-sizing without causing availability disruptions across hundreds of deployments?
+- A production EKS cluster's AWS CloudWatch Container Insights is showing healthy node metrics, but Karpenter is not consolidating or terminating nodes it previously provisioned — nodes remain "Ready" and underutilized for hours. How do you diagnose and resolve this?
+- Behavioral — Your team has just completed a major EKS platform upgrade and a business-critical service owned by another team is now experiencing elevated error rates. The other team's lead publicly blames the platform team. How do you handle it?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes external traffic ingress security — ensuring WAF integration, TLS termination policy, and ingress controller blast-radius containization across hundreds of services?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6466 chars)
+- How does Gateway API's `PolicyAttachment` model work, and what are the pitfalls of policy inheritance and merging across a Gateway, HTTPRoute, and Service hierarchy?
+- A platform team discovers that Gateway API `HTTPRoute` traffic is bypassing their service mesh sidecar proxies for some routes but not others. How do you diagnose and fix this?
+- What is the difference between `Ingress` path type `ImplementationSpecific` and Gateway API's `HTTPRoute` match type handling, and what migration risk does this create?
+- Describe how you would implement and operationalize rate limiting at the Gateway layer for a multi-tenant cluster, covering both architecture choices and Day 2 concerns.
+
+_Committed & pushed: yes_

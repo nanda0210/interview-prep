@@ -2634,3 +2634,59 @@ Traditional Ingress controllers (NGINX, Traefik) ship opinionated access logs an
 - **Policy observability:** Attach `BackendTLSPolicy`, `BackendLBPolicy`, and custom policies may silently have no effect without checking `PolicyStatus` conditions. Build alerting on `PolicyStatus.Ancestors[].conditions` to catch unattached or errored policies.
 - **Golden signals approach:** Instrument at the Gateway layer (request rate, error rate, latency by route) AND at the backend Service level; discrepancies between the two reveal Gateway-layer issues (retries, timeouts, mirroring overhead) that surface only in the delta.
 - **Operational gap vs. Ingress:** Because HTTPRoute objects are owned by application teams, observability must federate across namespaces — build centralized dashboards keyed on `parentRef` Gateway identity, not just namespace, to give the platform team end-to-end visibility.
+
+
+---
+
+## 🗓️ Added 2026-11-25 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-25 23:28 -->
+
+### Q: How does Gateway API's `PolicyAttachment` model work, and what are the pitfalls of policy inheritance and merging across a Gateway, HTTPRoute, and Service hierarchy?
+
+**Answer:**
+`PolicyAttachment` is a meta-pattern where implementation-defined policy resources (e.g., `BackendLBPolicy`, `BackendTLSPolicy`, vendor-specific rate-limit policies) attach to Gateway API objects via `targetRef`. The spec defines two attachment points: **direct attachment** (policy applies only to the named resource) and **inherited attachment** (policy propagates down to child resources). Key pitfalls include:
+
+- **Merge ambiguity:** When both a Gateway-level and an HTTPRoute-level policy conflict on the same field, implementations define merge semantics differently—the spec does not mandate a canonical winner, so portability suffers.
+- **Silent no-ops:** A policy targeting a resource in another namespace without an appropriate `ReferenceGrant` may be silently ignored rather than rejected; teams must inspect policy status conditions explicitly.
+- **Status sprawl:** Policy conditions (`Accepted`, `Conflicted`) live on the policy object itself, not the target, so debugging requires correlating multiple resources.
+- **Override vs. default semantics:** The spec distinguishes "default" (child can override) from "override" (parent wins) policies; implementations that don't surface this clearly lead to unexpected behavior in multi-tenant clusters.
+- Best practice: treat all policies as an explicit contract, audit status conditions in CI, and document which tier (infra vs. app) owns each policy type.
+
+---
+
+### Q: A platform team discovers that Gateway API `HTTPRoute` traffic is bypassing their service mesh sidecar proxies for some routes but not others. How do you diagnose and fix this?
+
+**Answer:**
+This typically occurs when the Gateway's data plane communicates with backend pods directly (via pod IP from `EndpointSlices`) rather than through the cluster IP, bypassing `iptables` rules that redirect traffic into the sidecar. Diagnosis steps:
+
+1. **Verify traffic path:** Check whether the Gateway implementation resolves backends to pod IPs (Envoy, for example, often does) versus kube-proxy virtual IPs; direct pod addressing skips sidecar iptables interception.
+2. **Inspect sidecar injection:** Confirm the backend pods actually have sidecars (`kubectl get pod -o jsonpath='{.spec.containers[*].name}'`); a missed namespace label or annotation opt-out breaks injection.
+3. **Check GAMMA mesh route:** If using GAMMA (`HTTPRoute` with a `Service` as `parentRef`), ensure the mesh's control plane is processing it and that iptables rules intercept inbound traffic on the correct port.
+4. **Port alignment:** A mismatch between the `BackendRef` port and the container port can cause the sidecar to pass traffic through without inspection (some meshes skip unknown ports).
+5. **Fix options:** Use the mesh's gateway integration mode (e.g., Istio's `MESH` mode), configure the Gateway to route via ClusterIP, or annotate pods to ensure sidecar interception covers the correct ports.
+
+---
+
+### Q: What is the difference between `Ingress` path type `ImplementationSpecific` and Gateway API's `HTTPRoute` match type handling, and what migration risk does this create?
+
+**Answer:**
+`Ingress` supports three `pathType` values: `Exact`, `Prefix`, and `ImplementationSpecific`. `ImplementationSpecific` delegates matching semantics entirely to the controller—NGINX may treat it as a regex prefix, Traefik as a plain prefix, GCE as an exact prefix, etc. `HTTPRoute` eliminates this ambiguity by defining `Exact`, `PathPrefix`, and `RegularExpression` with conformance-tested semantics. Migration risk:
+
+- **Behavioral drift:** Routes that relied on `ImplementationSpecific` regex or custom priority rules may silently change behavior when expressed as `PathPrefix` or `RegularExpression` in a different implementation.
+- **Regex portability:** `RegularExpression` in `HTTPRoute` is implementation-defined in syntax (POSIX vs. RE2 vs. PCRE), so a regex that worked in one controller may fail or match differently in another.
+- **Priority reordering:** `Ingress` path priority is implementation-defined; `HTTPRoute` has a spec-defined precedence order (longer matches win, Exact > PathPrefix > RegularExpression), which can reorder previously stable routing tables.
+- **Mitigation:** Audit all `ImplementationSpecific` paths before migration, write integration tests that assert specific match outcomes, and use conformance test suites to validate the target implementation's behavior against your regex patterns.
+
+---
+
+### Q: Describe how you would implement and operationalize rate limiting at the Gateway layer for a multi-tenant cluster, covering both architecture choices and Day 2 concerns.
+
+**Answer:**
+Rate limiting at the Gateway layer requires choosing between **local (per-instance) limiting** and **global (distributed) limiting**, each with different operational profiles:
+
+- **Local rate limiting** (e.g., Envoy's local rate limit filter) is low-latency and requires no external dependency but is inaccurate under horizontal scaling—each Gateway replica enforces its own bucket, so actual throughput is `limit × replica_count`.
+- **Global rate limiting** uses an external service (e.g., Envoy's `ratelimit` gRPC service backed by Redis); it is accurate but adds a synchronous network hop per request and a Redis dependency that becomes a blast-radius component.
+- **Policy expression:** With Gateway API, rate limit configuration is vendor-specific today (no standard resource exists yet); you'll use `ExtensionRef` filters or vendor CRDs (e.g., Istio's `EnvoyFilter`, Cilium's `CiliumNetworkPolicy`), coupling you to the implementation.
+- **Multi-tenancy isolation:** Apply limits per-tenant using request attributes (host, header, JWT claim) rather than per-IP; ensure tenant A's burst cannot exhaust counters shared with tenant B by using per-key namespacing in Redis.
+- **Day 2 concerns:** Monitor rate limit hit rates as a signal distinct from errors; alert on Redis latency spikes that degrade the ratelimit service; plan for graceful degradation (fail open vs. fail closed) when the ratelimit backend is unavailable; and version rate limit configs through GitOps with change review, since a misconfigured limit can silently throttle production traffic.
