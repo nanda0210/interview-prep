@@ -7156,3 +7156,62 @@ During an Istio upgrade from 1.17 to 1.18 on EKS, the Istiod control plane was u
 - **Certificate management at scale**: deploy cert-manager with IRSA-backed Route 53 DNS-01 solver for wildcard and SAN certificates; use `Certificate` CRDs in a dedicated `cert-system` namespace and cross-namespace secret sharing via `ClusterSecretStore` (External Secrets Operator) so application namespaces consume certs without needing cert-manager RBAC.
 - **IngressClass isolation**: define separate `IngressClass` resources (`public`, `internal`, `admin`) with `spec.controller` pointing to controller-tier–specific deployments; Kyverno prevents application teams from using `IngressClass: public` unless their namespace carries a label `traffic-tier: public` approved by the security team.
 - **Observability**: enable ALB access logging to S3 with Athena queries for top offenders; pipe WAF sampled requests to CloudWatch Logs Insights; set alarms on `4xxCount
+
+
+---
+
+## 🗓️ Added 2026-11-26 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-26 23:29 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes PodDisruptionBudget (PDB) correctness at scale — ensuring PDBs are neither too restrictive to block cluster operations nor too permissive to allow availability loss?
+
+**Key design pillars:**
+
+- **Policy-as-code enforcement:** Deploy an OPA/Gatekeeper or Kyverno policy that requires every Deployment/StatefulSet with `replicas > 1` to have an associated PDB; reject workloads without one at admission time, and generate PDBs automatically for lower-priority workloads via a mutating webhook.
+- **Correctness guardrails:** Enforce that `maxUnavailable` is never `0` and `minAvailable` is never equal to the replica count simultaneously — both conditions make the workload eviction-proof and block node drains and Karpenter consolidation indefinitely.
+- **Automated audit loop:** Run a nightly CronJob (or Flux reconciler) that cross-references all PDBs against current replica counts, flagging any where `minAvailable >= currentReplicas`; pipe results to a PagerDuty alert or GitHub issue for the owning team.
+- **Karpenter / cluster-autoscaler alignment:** Configure Karpenter's `expireAfter` and disruption budgets at the `NodePool` level as a second layer; treat cluster-level disruption budgets as coarse guardrails, workload PDBs as fine-grained ones.
+- **Upgrade safety gate:** In the CI/CD pipeline's pre-upgrade stage, run `kubectl drain --dry-run` against a representative node and fail the pipeline if any PDB blocks eviction, forcing teams to fix it before the cluster upgrade proceeds.
+- **Documentation contract:** Publish a golden-path PDB template per workload tier (critical, standard, batch) in the internal developer portal so teams can self-serve without under- or over-specifying budgets.
+
+---
+
+### Q: A production EKS cluster's AWS Network Load Balancer (NLB) managed by the AWS Load Balancer Controller is intermittently dropping connections for a gRPC streaming service during Karpenter-triggered node replacements. How do you diagnose and resolve this?
+
+**Likely root causes and diagnostic steps:**
+
+1. **Target deregistration lag:** NLB keeps targets registered for the full `deregistrationDelay` (default 300 s) but may still route new connections to a draining target; for gRPC streaming, long-lived connections are abruptly reset when the pod is killed before the stream completes.
+2. **Confirm via metrics:** Check `TargetResponseTime`, `UnHealthyHostCount`, and `ActiveFlowCount` in CloudWatch for the NLB target group during node replacement windows; correlate timestamps with Karpenter `NodeClaim` deletion events in CloudTrail.
+3. **Missing preStop hook:** Verify pods have a `preStop` hook that sends a gRPC `GOAWAY` frame (or sleeps long enough for clients to reconnect) before the container receives `SIGTERM`; without it, the server terminates before clients can migrate.
+4. **Fix deregistration timing:** Set `service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: deregistration_delay.timeout_seconds=30` and ensure the pod's `terminationGracePeriodSeconds` is at least equal to that value plus the gRPC drain time.
+5. **Enable connection draining awareness:** Use the annotation `service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: stickiness.enabled=false` and confirm client-side retry/reconnect logic in the gRPC library handles `GOAWAY` gracefully.
+6. **Karpenter disruption budget:** Set a `NodePool` disruption budget limiting concurrent replacements to 1 node at a time for the node group serving this workload, reducing the blast radius per replacement event.
+7. **Validation:** Replay load with `ghz` or a gRPC load generator while triggering a manual node drain in staging; verify zero stream resets after all mitigations are applied.
+
+---
+
+### Q: Behavioral — Your organization has decided to consolidate three independently managed EKS clusters (owned by three separate product teams) into a single shared platform cluster. Each team has different security requirements, release cadences, and SLAs. How do you lead this initiative?
+
+**Approach:**
+
+- **Discovery and stakeholder alignment first:** Run a structured interview with each team's tech lead to capture their blast-radius tolerance, compliance requirements (PCI, SOC 2, etc.), release frequency, and hard dependencies; document these as non-negotiables before proposing any architecture.
+- **Multi-tenancy model selection:** Based on requirements, propose a namespace-per-team model with Hierarchical Namespace Controller (HNC) for teams with similar security posture, and dedicated node pools (via Karpenter `NodePool` label selectors + taints) for the team with stricter isolation needs — avoiding the cost of full cluster separation while preserving runtime isolation.
+- **Governance before migration:** Establish a platform team charter, SLA tiers, and an RFC process for breaking changes; each product team nominates a platform liaison who reviews change proposals before rollout.
+- **Phased migration with escape hatch:** Migrate the lowest-risk team first, run both clusters in parallel for 30 days with traffic mirroring, and define explicit rollback criteria (error rate threshold, latency SLO breach) that automatically trigger reversion.
+- **Shared services design:** Deploy shared ingress (AWS LBC + ALB), observability (ADOT + AMP + Grafana), and secrets management as platform-owned addons; product teams consume them via CRDs and annotations, never modifying platform components directly.
+- **Success metrics:** Track mean-time-to-provision a new namespace, per-team cost visibility via Kubecost labels, and incident rate pre/post consolidation; present a 90-day post-migration report to VP Engineering with concrete cost and operational wins.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes init container and sidecar container security — ensuring they do not introduce privilege escalation, secret leakage, or unexpected network paths?
+
+**Key design pillars:**
+
+- **Admission-time enforcement:** Extend OPA/Gatekeeper or Kyverno policies to cover init containers and (Kubernetes 1.29+) native sidecar containers explicitly — many policy frameworks historically only evaluated `containers[]`, leaving `initContainers[]` as a blind spot for `privileged: true` or `hostPath` mounts.
+- **Image provenance:** Enforce that init container images are pulled from the same approved ECR registry and pass the same Cosign signature and Trivy scan gates as primary containers; block `initContainers` referencing public Docker Hub images via admission policy.
+- **Least-privilege security context:** Require `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, and a non-root `runAsUser` for every init container; init containers that perform bootstrapping (e.g., copying configs) must mount only the specific Secret or ConfigMap volume they need, not the entire `/etc` or service account token path.
+- **Secret leakage prevention:** Audit init containers that consume Secrets and ensure those Secrets are not also mounted into the primary container unless explicitly required; use scoped Kubernetes RBAC so the pod's service account cannot read Secrets beyond its declared needs.
+- **Network path auditing:** For Istio/App Mesh deployments, confirm the `istio-proxy` or `aws-appmesh-envoy` sidecar is injected after init containers complete and that init containers do not bypass mTLS by making external calls before the proxy is running — use `holdApplicationUntilProxyStarts: true` in Istio mesh config to close this window.
+- **Runtime detection:** Configure Falco rules to alert on `execve` syscalls inside init containers post-startup (indicating a container that did not terminate as expected) and on any init container spawning a shell, which signals a compromised bootstrapping image.
+- **Periodic drift detection:** Run `kube-score` or `polaris` in the CI pipeline and as a scheduled cluster audit, explicitly scoring init container security contexts alongside primary containers, with score regressions blocking merges.

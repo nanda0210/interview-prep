@@ -1327,3 +1327,21 @@ _Committed & pushed: yes_
 - Describe how you would implement and operationalize rate limiting at the Gateway layer for a multi-tenant cluster, covering both architecture choices and Day 2 concerns.
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-26 23:29:43
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (8231 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes PodDisruptionBudget (PDB) correctness at scale — ensuring PDBs are neither too restrictive to block cluster operations nor too permissive to allow availability loss?
+- A production EKS cluster's AWS Network Load Balancer (NLB) managed by the AWS Load Balancer Controller is intermittently dropping connections for a gRPC streaming service during Karpenter-triggered node replacements. How do you diagnose and resolve this?
+- Behavioral — Your organization has decided to consolidate three independently managed EKS clusters (owned by three separate product teams) into a single shared platform cluster. Each team has different security requirements, release cadences, and SLAs. How do you lead this initiative?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes init container and sidecar container security — ensuring they do not introduce privilege escalation, secret leakage, or unexpected network paths?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6681 chars)
+- How do you use Gateway API's `HTTPRoute` to implement rate limiting, and what are the architectural options when the implementation doesn't natively support it?
+- A `Gateway` object has been provisioned and its status shows `Programmed: True`, but end-user HTTPS traffic is still failing with TLS handshake errors. Walk through your systematic debugging approach.
+- What is the difference between Gateway API's `ParentReference` `sectionName` and `port` fields, and when does omitting one cause unexpected behavior?
+- Describe the operational and security implications of running multiple `GatewayClass` implementations simultaneously in the same cluster.
+
+_Committed & pushed: yes_

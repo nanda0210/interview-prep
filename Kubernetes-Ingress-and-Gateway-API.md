@@ -2690,3 +2690,67 @@ Rate limiting at the Gateway layer requires choosing between **local (per-instan
 - **Policy expression:** With Gateway API, rate limit configuration is vendor-specific today (no standard resource exists yet); you'll use `ExtensionRef` filters or vendor CRDs (e.g., Istio's `EnvoyFilter`, Cilium's `CiliumNetworkPolicy`), coupling you to the implementation.
 - **Multi-tenancy isolation:** Apply limits per-tenant using request attributes (host, header, JWT claim) rather than per-IP; ensure tenant A's burst cannot exhaust counters shared with tenant B by using per-key namespacing in Redis.
 - **Day 2 concerns:** Monitor rate limit hit rates as a signal distinct from errors; alert on Redis latency spikes that degrade the ratelimit service; plan for graceful degradation (fail open vs. fail closed) when the ratelimit backend is unavailable; and version rate limit configs through GitOps with change review, since a misconfigured limit can silently throttle production traffic.
+
+
+---
+
+## 🗓️ Added 2026-11-26 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-26 23:29 -->
+
+### Q: How do you use Gateway API's `HTTPRoute` to implement rate limiting, and what are the architectural options when the implementation doesn't natively support it?
+
+**Model Answer:**
+
+Gateway API itself has no first-class rate-limiting field in v1; rate limiting is currently expressed through implementation-specific mechanisms. The main architectural options are:
+
+- **ExtensionRef filters** – some implementations (Envoy Gateway, Istio) expose rate-limiting via custom `ExtensionRef` filter resources (e.g., `RateLimitFilter` CRDs), keeping the config close to the route but tying you to a specific implementation.
+- **Policy attachment** – implementations like Envoy Gateway define a `BackendTrafficPolicy` or similar that attaches to a Gateway or HTTPRoute and carries rate-limit rules; this follows the attachment model but requires the implementation to reconcile the policy.
+- **External filter / WASM plugin** – for controllers that support Envoy's external processing or WASM filters, you can offload rate-limit decisions to an external service (e.g., Envoy's `ratelimit` gRPC service), which is implementation-agnostic but adds an additional dependency and latency hop.
+- **Service mesh sidecar** – push rate limiting into the mesh layer (Istio `EnvoyFilter` or Cilium), decoupling it from the Gateway entirely but losing a single control point.
+
+Key trade-offs: `ExtensionRef` approaches are expressive but break portability; policy-attachment approaches align with the Gateway API philosophy but conformance is voluntary. Always test whether the implementation reports policy status conditions so you know the policy is actually applied and not silently ignored.
+
+---
+
+### Q: A `Gateway` object has been provisioned and its status shows `Programmed: True`, but end-user HTTPS traffic is still failing with TLS handshake errors. Walk through your systematic debugging approach.
+
+**Model Answer:**
+
+1. **Verify certificate binding** – check that the listener's `tls.certificateRefs` points to a `Secret` in the correct namespace with correct name and type `kubernetes.io/tls`. Confirm the Secret exists and contains non-expired, PEM-valid `tls.crt` / `tls.key` matching the listener hostname.
+2. **Check ReferenceGrant** – if the Secret lives in a different namespace than the Gateway, a `ReferenceGrant` must allow it; absence causes the controller to silently ignore the ref and may fall back to a self-signed cert without surfacing a clear error.
+3. **Inspect listener-level status conditions** – `Programmed: True` on the Gateway is aggregate; individual listener conditions (`ResolvedRefs`, `Accepted`) may show `False` or `Unknown` with a reason like `InvalidCertificateRef`.
+4. **Test TLS negotiation directly** – `openssl s_client -connect <IP>:443 -servername <host>` reveals what certificate is actually being served; a self-signed cert confirms the controller fell back due to a bad ref.
+5. **SNI mismatch** – confirm the listener `hostname` matches the CN/SAN in the certificate and the client's SNI; mismatches cause handshake failures even when everything else is correct.
+6. **Controller logs** – check the Gateway controller's logs for certificate-loading errors that may not surface in status conditions.
+7. **Infrastructure layer** – verify the underlying `Service` or cloud load balancer listener is configured for TLS (not TCP passthrough) if the implementation offloads TLS to infrastructure.
+
+---
+
+### Q: What is the difference between Gateway API's `ParentReference` `sectionName` and `port` fields, and when does omitting one cause unexpected behavior?
+
+**Model Answer:**
+
+- **`sectionName`** targets a specific named listener on the Gateway by its `name` field; it is the preferred mechanism when a Gateway has multiple listeners because it is unambiguous regardless of port overlap.
+- **`port`** targets any listener(s) on the Gateway matching that port number; if multiple listeners share the same port (e.g., an HTTP listener and an HTTPS listener both on port 443 using different SNI), omitting `sectionName` and relying only on `port` can attach the route to both listeners, potentially exposing it over HTTP when only HTTPS was intended.
+- **Omitting both** causes the route to attempt attachment to all compatible listeners, which is often unintentional for multi-listener Gateways and can produce `Accepted: True` on listeners the team never intended.
+- **Omitting `port` but specifying `sectionName`** is the safest and most readable pattern; the spec recommends it.
+- A common bug: a team adds a second listener for HTTP→HTTPS redirect on port 80 to an existing Gateway, and existing HTTPRoutes with no `sectionName` suddenly bind to it, creating routing conflicts or unintended HTTP exposure. Always audit `parentRef` specificity when adding listeners to a shared Gateway.
+
+---
+
+### Q: Describe the operational and security implications of running multiple `GatewayClass` implementations simultaneously in the same cluster.
+
+**Model Answer:**
+
+**Operational implications:**
+- Each `GatewayClass` runs its own controller (separate Deployment, RBAC, CRDs or webhook versions), increasing the operational surface: separate upgrade cycles, separate bug trackers, and separate conformance levels.
+- Status conditions and supported feature sets differ per implementation; platform teams must document which class supports what (e.g., one may support `HTTPRoute` timeouts, another may not), or routes relying on unsupported features will silently behave incorrectly.
+- Gateway-to-implementation affinity must be enforced: a `Gateway` referencing the wrong `controllerName` will never be programmed, often manifesting as a permanently `Pending` or `Unknown` status with no obvious error.
+
+**Security implications:**
+- RBAC over `GatewayClass` creation should be tightly controlled; a misconfigured class pointing to a privileged controller (e.g., one with cluster-wide `Secret` read access) could be exploited to expose internal traffic.
+- Policy attachment semantics may differ across implementations, meaning a `SecurityPolicy` valid for one class is ignored by another; this creates a risk of believing a security control is enforced when it is not.
+- Admission webhooks from multiple controllers can conflict or overlap, potentially allowing a resource to pass one controller's validation while failing another's at runtime.
+
+**Best practice:** standardize on one `GatewayClass` per trust boundary (e.g., internal vs. external), document conformance gaps, and use OPA/Kyverno policies to prevent teams from referencing unsanctioned classes.
