@@ -7215,3 +7215,73 @@ During an Istio upgrade from 1.17 to 1.18 on EKS, the Istiod control plane was u
 - **Network path auditing:** For Istio/App Mesh deployments, confirm the `istio-proxy` or `aws-appmesh-envoy` sidecar is injected after init containers complete and that init containers do not bypass mTLS by making external calls before the proxy is running — use `holdApplicationUntilProxyStarts: true` in Istio mesh config to close this window.
 - **Runtime detection:** Configure Falco rules to alert on `execve` syscalls inside init containers post-startup (indicating a container that did not terminate as expected) and on any init container spawning a shell, which signals a compromised bootstrapping image.
 - **Periodic drift detection:** Run `kube-score` or `polaris` in the CI pipeline and as a scheduled cluster audit, explicitly scoring init container security contexts alongside primary containers, with score regressions blocking merges.
+
+
+---
+
+## 🗓️ Added 2026-11-27 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-27 23:12 -->
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes graceful shutdown and SIGTERM handling to ensure zero-downtime rolling deployments at scale?
+
+**Model Answer:**
+
+Graceful shutdown failures are a leading cause of dropped connections during rolling deployments. The strategy covers four layers:
+
+- **Application layer:** Enforce that all containers handle SIGTERM by completing in-flight requests before exiting. Use `preStop` lifecycle hooks (typically a `sleep 5–15s`) to delay SIGTERM delivery until the endpoint is removed from kube-proxy and load balancer target groups, closing the race between pod deletion and traffic draining.
+- **Deployment spec:** Set `terminationGracePeriodSeconds` to a value larger than the longest expected request duration plus the `preStop` sleep. Use `minReadySeconds` and `maxUnavailable: 0` / `maxSurge: 1` to ensure new pods are healthy before old ones terminate.
+- **ALB/NLB integration:** Configure `deregistrationDelay` on target groups (via AWS Load Balancer Controller annotations) to match or exceed the pod's grace period, preventing the load balancer from sending traffic to terminating pods.
+- **Policy enforcement:** Use OPA/Gatekeeper or Kyverno policies to reject Deployments missing `preStop` hooks or with `terminationGracePeriodSeconds` below a minimum threshold. Validate in CI pipelines before admission.
+- **Observability:** Track `container_last_termination_reason` in Container Insights; alert on `OOMKilled` and `Error` reasons, which indicate the grace period was insufficient or the app ignored SIGTERM.
+
+---
+
+### Q: A production EKS cluster running Istio as a service mesh begins experiencing a sudden surge in `upstream connect error or disconnect/reset before headers` 503 responses between specific services, but pod health checks and node metrics appear normal. How do you systematically diagnose and resolve this?
+
+**Model Answer:**
+
+This error pattern typically indicates Envoy sidecar–level connection failures rather than application failures. Systematic diagnosis:
+
+1. **Isolate the direction:** Identify whether the 503s originate on the client-side Envoy (outbound cluster) or server-side Envoy (inbound listener) using `kubectl exec` into the affected pod and running `curl -s localhost:15000/stats | grep upstream_cx_destroy_remote_with_active_rq` — a rising counter confirms the server is resetting connections.
+2. **Check Envoy cluster health:** Query `localhost:15000/clusters` on the client pod to verify the upstream endpoints are marked healthy; unhealthy endpoints indicate a failed health check that doesn't match Kubernetes readiness.
+3. **Inspect connection pool exhaustion:** 503s with `overflow` in Envoy stats (`upstream_rq_pending_overflow`) point to Istio `DestinationRule` connection pool limits (e.g., `http1MaxPendingRequests`, `maxRequestsPerConnection`) being too aggressive for the traffic surge — raise limits or add circuit-breaker tuning.
+4. **Check mTLS policy mismatches:** A `PeerAuthentication` set to `STRICT` on the server namespace while the client namespace has no `DestinationRule` forcing TLS causes reset-before-headers; validate with `istioctl authn tls-check`.
+5. **Control plane lag:** If `istiod` is under CPU pressure, Envoy xDS updates lag, leaving stale endpoints; check `istiod` HPA metrics and `pilot_xds_push_time` histogram.
+6. **Resolution path:** Tune DestinationRule connection pools, fix mTLS policy alignment, scale `istiod`, and add `EnvoyFilter` retry policies for idempotent routes as a short-term mitigation.
+
+---
+
+### Q: How do you design an EKS strategy for managing and enforcing workload-level Kubernetes Jobs and CronJobs at scale — ensuring reliability, idempotency, resource governance, and preventing cluster destabilization from job storms?
+
+**Model Answer:**
+
+At scale, unmanaged Jobs and CronJobs are a significant source of cluster instability. The strategy:
+
+- **Resource governance:** Enforce via Kyverno/Gatekeeper that all Jobs set `activeDeadlineSeconds`, `backoffLimit`, and explicit `resources.requests/limits`; reject submissions missing these fields in admission. Apply namespace-level `ResourceQuota` with `count/jobs.batch` to cap total jobs per tenant.
+- **Concurrency and idempotency:** Set `concurrencyPolicy: Forbid` or `Replace` on CronJobs where overlapping runs would cause data corruption. Require application-level idempotency keys and enforce `completions`/`parallelism` ratios via policy to prevent runaway parallel job scaling.
+- **Job storms:** Use `startingDeadlineSeconds` to discard missed CronJob runs rather than allowing backfill storms on cluster restart. Implement a `JobSet` controller (Kubernetes SIG-Apps) or custom operator for large fan-out workloads to throttle pod creation rate.
+- **Cleanup hygiene:** Set `ttlSecondsAfterFinished` on all Jobs (enforced via Mutating Webhook default injection) to prevent accumulation of completed Job objects, which bloat etcd and slow list operations.
+- **Node isolation:** Use dedicated Karpenter `NodePool`s with taints for batch workloads so job storms don't evict latency-sensitive services; set lower PriorityClass for batch jobs (`batch-priority`) below `system-cluster-critical`.
+- **Observability:** Export `kube_job_failed` and `kube_cronjob_next_schedule_deviation` metrics to Prometheus; alert on consecutive failures and missed schedules; use Argo Workflows or AWS Step Functions for complex DAG jobs requiring auditability.
+
+---
+
+### Q: Behavioral — Your organization's platform team owns a shared EKS cluster used by 15 product teams. A major incident occurs because a single team's misconfigured CronJob consumed all available IP addresses in the VPC subnet, causing new pods across all teams to fail scheduling. How do you lead the post-incident response and design systemic safeguards to prevent recurrence?
+
+**Model Answer:**
+
+**Incident response leadership:**
+- Immediately cordon the offending namespace by applying a `ResourceQuota` with `pods: 0` to halt further pod creation from that team while restoring scheduling capacity for others.
+- Coordinate with the VPC/networking team to evaluate subnet expansion (adding a secondary CIDR via VPC CNI custom networking) or reclaiming IP addresses from terminated pods stuck in `Terminating`.
+- Communicate blast-radius impact to all 15 teams within 30 minutes via established incident channel with ETA for resolution.
+
+**Post-incident blameless review:**
+- Conduct a blameless post-mortem within 48 hours; document the contributing factors: absent pod count quotas, no subnet IP utilization alerting, and no peer review gate on CronJob `parallelism` changes.
+
+**Systemic safeguards:**
+- **Quota enforcement:** Retroactively apply `ResourceQuota` with `pods`, `count/jobs.batch`, and `requests.cpu/memory` to all existing namespaces; block namespace creation without quotas via admission policy.
+- **Subnet monitoring:** Create CloudWatch alarms on `aws_vpc_subnet_available_ip_count` falling below a threshold (e.g., 20% free); page the platform team before exhaustion.
+- **Network isolation:** Migrate high-parallelism batch workloads to dedicated node groups in separate subnets so a job storm cannot exhaust shared pod networking capacity.
+- **Change governance:** Require PR review and platform team approval for any `parallelism > 10` or `completions > 100` CronJob/Job changes via a GitOps pipeline policy gate.
+- **Broader lesson:** Treat IP address space as a finite cluster resource with the same governance rigor as CPU and memory; include subnet capacity in quarterly platform capacity reviews.

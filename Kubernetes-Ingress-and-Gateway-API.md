@@ -2754,3 +2754,74 @@ Key trade-offs: `ExtensionRef` approaches are expressive but break portability; 
 - Admission webhooks from multiple controllers can conflict or overlap, potentially allowing a resource to pass one controller's validation while failing another's at runtime.
 
 **Best practice:** standardize on one `GatewayClass` per trust boundary (e.g., internal vs. external), document conformance gaps, and use OPA/Kyverno policies to prevent teams from referencing unsanctioned classes.
+
+
+---
+
+## 🗓️ Added 2026-11-27 (auto-generated · 4 new Q&A)
+
+<!-- agent:2026-11-27 23:12 -->
+
+### Q: How does Gateway API's `HTTPRoute` conflict resolution work when two routes match the same hostname and path with equal specificity, and what operational problems does this create?
+
+**Answer:**
+
+When two `HTTPRoute` resources match with equal specificity (same hostname, same path type/value, same header matches), Gateway API implementations resolve the conflict using **creation timestamp** (older route wins) and then **namespace/name lexicographic ordering** as a tiebreaker. The losing route's rules receive a `Conflicted: True` status condition, though the winning route shows no indication of the conflict from its own status alone.
+
+Key operational problems:
+- **Silent failure for teams:** A new route deploy appears `Accepted` from the creator's perspective but routes nothing because an older conflicting route already owns that match.
+- **Status asymmetry:** You must inspect the *losing* route to discover the conflict; the winning route's status gives no warning, making fleet-wide conflict detection hard.
+- **Timestamp manipulation risk:** Teams may delete and recreate routes to "win" conflicts, creating operational anti-patterns.
+- **Mitigation strategies:** Implement admission webhooks that reject routes conflicting with existing ones; use `HTTPRoute` naming conventions and RBAC to enforce hostname ownership; run periodic reconciliation jobs that surface `Conflicted` conditions via alerting.
+
+---
+
+### Q: What are the trade-offs between terminating TLS at the Gateway versus terminating it at the application Pod (via sidecar or in-process), and how does Gateway API's design accommodate both models?
+
+**Answer:**
+
+**Gateway TLS termination** centralizes certificate management, offloads crypto from application pods, and simplifies east-west traffic (which may be plain HTTP internally). The downside is that traffic between the Gateway and backend pods is unencrypted unless you add `BackendTLSPolicy` or a service mesh. **Application/sidecar termination** provides end-to-end encryption and mutual authentication but pushes certificate lifecycle complexity into every workload and complicates load balancer health checking.
+
+Gateway API accommodates both:
+- `Gateway` listener `protocol: HTTPS` with `tls.mode: Terminate` handles the centralized model.
+- `protocol: TLS` with `tls.mode: Passthrough` combined with `TLSRoute` allows encrypted traffic to reach pods intact, enabling in-pod or sidecar termination.
+- `BackendTLSPolicy` re-encrypts traffic from Gateway to backend after termination, enabling end-to-end TLS while keeping certificate management centralized.
+
+**Key trade-off:** Passthrough removes the Gateway's ability to inspect or modify HTTP headers, precluding header-based routing, authentication filters, and observability at the HTTP layer. Choose based on compliance requirements (e.g., PCI-DSS mandating encryption in transit) versus operational simplicity.
+
+---
+
+### Q: A team migrates from NGINX Ingress to Envoy Gateway and notices that their `CustomAnnotations` for upstream keepalive and connection pool tuning no longer work. How do you approach solving this systematically?
+
+**Answer:**
+
+This is an expected consequence of the annotation model being implementation-specific. The systematic approach:
+
+1. **Audit the annotations:** Catalog every NGINX-specific annotation in use and classify each as: (a) now a first-class Gateway API field (e.g., timeouts via `HTTPRoute.timeouts`), (b) coverable via an Envoy Gateway `EnvoyProxy` or `BackendTrafficPolicy` CRD, or (c) with no equivalent.
+
+2. **Map to Gateway API extension resources:** Envoy Gateway exposes `BackendTrafficPolicy` for connection pool sizing, circuit breaking, and keepalive settings attached to `Service` or `HTTPRoute` targets. Apply these as replacements for NGINX `upstream-keepalive-*` annotations.
+
+3. **Identify gaps requiring workarounds:** Features with no policy equivalent may require an `EnvoyPatchPolicy` (Envoy Gateway's escape hatch for raw xDS patches), which is powerful but tightly coupled to implementation internals and fragile across upgrades.
+
+4. **Establish a testing matrix:** Run traffic comparisons (shadow mirroring or load tests) to validate that connection behavior matches pre-migration baselines, since keepalive tuning directly affects latency and connection churn under load.
+
+5. **Document and enforce going forward:** Publish the canonical policy CRDs teams should use and block legacy-annotation patterns via policy linting in CI—preventing annotation creep from re-emerging on the new implementation.
+
+---
+
+### Q: How do you reason about and test the behavior of Gateway API implementations during control plane unavailability (e.g., the Gateway controller pod crashes), and what guarantees does the data plane typically provide?
+
+**Answer:**
+
+Gateway API separates the **control plane** (controller reconciling resources into data-plane config) from the **data plane** (proxy actually routing traffic). Most implementations based on Envoy, NGINX, or similar proxies load configuration into the data plane and then operate independently—meaning a controller crash does **not** interrupt in-flight or new connections as long as the proxy pods remain running. This is sometimes called "decoupled persistence."
+
+**What is lost during controller unavailability:**
+- New `HTTPRoute` or `Gateway` resources are not reconciled—no new routes become active.
+- Certificate renewals (e.g., cert-manager pushing new secrets) may not propagate to the proxy if the controller is the bridge.
+- Scaling events that require new proxy pods to receive full config may leave those pods in a degraded state.
+
+**Testing approach:**
+- **Chaos testing:** Kill controller pods with `kubectl delete pod` or use a chaos framework; validate existing traffic continues via synthetic monitoring.
+- **Config staleness tests:** Create a new `HTTPRoute` during controller downtime; verify it is *not* served, then resumes after controller restarts.
+- **Certificate expiry simulation:** Use a short-lived test certificate and kill the controller before renewal; measure when the proxy starts serving the expired cert.
+- **Operational implication:** Run controllers with PodDisruptionBudgets, leader-election-based HA, and liveness/readiness probes. Treat controller HA as a tier-1 reliability requirement separate from data-plane scaling.

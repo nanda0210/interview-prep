@@ -1345,3 +1345,21 @@ _Committed & pushed: yes_
 - Describe the operational and security implications of running multiple `GatewayClass` implementations simultaneously in the same cluster.
 
 _Committed & pushed: yes_
+
+## Run · 2026-11-27 23:12:51
+
+**2 file(s) updated** by sub-agents:
+
+### 📄 AWS-EKS-Senior-Architect-v1.0.md  ·  +4 Q&A  (7727 chars)
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes graceful shutdown and SIGTERM handling to ensure zero-downtime rolling deployments at scale?
+- A production EKS cluster running Istio as a service mesh begins experiencing a sudden surge in `upstream connect error or disconnect/reset before headers` 503 responses between specific services, but pod health checks and node metrics appear normal. How do you systematically diagnose and resolve this?
+- How do you design an EKS strategy for managing and enforcing workload-level Kubernetes Jobs and CronJobs at scale — ensuring reliability, idempotency, resource governance, and preventing cluster destabilization from job storms?
+- Behavioral — Your organization's platform team owns a shared EKS cluster used by 15 product teams. A major incident occurs because a single team's misconfigured CronJob consumed all available IP addresses in the VPC subnet, causing new pods across all teams to fail scheduling. How do you lead the post-incident response and design systemic safeguards to prevent recurrence?
+
+### 📄 Kubernetes-Ingress-and-Gateway-API.md  ·  +4 Q&A  (6466 chars)
+- How does Gateway API's `HTTPRoute` conflict resolution work when two routes match the same hostname and path with equal specificity, and what operational problems does this create?
+- What are the trade-offs between terminating TLS at the Gateway versus terminating it at the application Pod (via sidecar or in-process), and how does Gateway API's design accommodate both models?
+- A team migrates from NGINX Ingress to Envoy Gateway and notices that their `CustomAnnotations` for upstream keepalive and connection pool tuning no longer work. How do you approach solving this systematically?
+- How do you reason about and test the behavior of Gateway API implementations during control plane unavailability (e.g., the Gateway controller pod crashes), and what guarantees does the data plane typically provide?
+
+_Committed & pushed: yes_
